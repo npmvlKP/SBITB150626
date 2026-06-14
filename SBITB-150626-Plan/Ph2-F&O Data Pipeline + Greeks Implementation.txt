@@ -1,0 +1,1020 @@
+Here is the refined, production-grade Phase 2 instruction set. I'll write it to the plan file.
+
+PHASE 2: DATA PIPELINE — REFINED PRODUCTION-GRADE INSTRUCTIONS
+
+Environment Audit Findings (Blockers Resolved)
+Issue	Original Plan	Correction
+vollib package name	pip install vollib + from vollib...	py_vollib on PyPI, import as py_vollib
+newspaper3k	Listed as dependency	Deprecated — use newspaper4k (Phase 1 already corrected)
+psycopg2-binary	Listed in original	Use psycopg[binary]>=3.1 consistently (async support)
+QuantLib	Not installed globally	Must install in .venv via pyproject.toml
+jugaad-data	Not installed globally	Must install in .venv via pyproject.toml
+Trivy	Not on PATH	Install via winget install Aquasecurity.Trivy
+locust	Not installed globally	Must install in .venv via pyproject.toml
+Python version	Some refs say 3.11	System = 3.12.7 — all wheels must be cp312
+compute_option_metrics	Uses today (undefined)	Must receive as_of_date: date as explicit parameter
+No event log / immutable log	Original writes directly to DB	Kleppmann Ch.3: Append-only event log as source of truth; DB as derived view
+No idempotency	Original has no dedup	Kleppmann Ch.3: Every event must have unique ID; reprocessing = same result
+No schema evolution	Original has no versioning	Kleppmann Ch.2: Schema registry pattern for event payloads
+No backpressure	WebSocket dumps to Redis raw	Kleppmann Ch.4: Ring buffer + backpressure; drop oldest on overflow
+No exactly-once semantics	Original writes Redis + DB separately	Kleppmann Ch.3: Event log as single writer; Redis/DB as projections
+Missing error categorization	Generic try/except	Kleppmann Ch.5: Categorized faults (network, data, system); per-category recovery
+Risk-free rate	Hardcoded 0.065	Both methods with config switch (user choice) + auto-fallback
+Kleppmann Ch.1-5 Principles Applied
+Chapter	Principle	Phase 2 Application
+Ch.1 (Reliable, Scalable, Maintainable)	Reliability = fault-tolerant; no data loss on failure	All pipelines: checkpoint, resume, at-least-once delivery + idempotent consumers
+Ch.1	Operability = monitoring + escape hatches	Prometheus metrics on: download progress, WS reconnects, Greeks compute latency, DB write lag
+Ch.1	Evolvability = schema flexibility	Versioned event schemas; schema_version field on every event
+Ch.2 (Data Models)	Schema-on-write for structured data	TimescaleDB: strict column types + CHECK constraints; event log: JSONB for flexibility
+Ch.3 (Storage & Retrieval)	Append-only log as immutable source of truth	market_events table: append-only, no UPDATE/DELETE; hypertable partitioned by event_time
+Ch.3	Log-structured storage for writes	Batch writes to TimescaleDB: COPY-style bulk insert every N seconds
+Ch.3	Compaction: raw events → derived aggregates	Raw tick events → 1-min OHLCV materialized view; Greeks snapshot table
+Ch.4 (Encoding)	Schema evolution via versioned codecs	EventCodec class with encode(v2) / decode(any_version) + migration
+Ch.5 (Replication)	Leader-follower for single-writer consistency	WebSocket: single writer process → event log; multiple reader projections
+Ch.5	Fencing tokens for stale writes	Monotonic epoch counter on each WS reconnection; reject stale events
+INSTRUCTION 1 — Install Phase 2 Dependencies + Verify Infrastructure
+Prerequisite: Phase 0+1 project exists at G:\OC\02June26\indian-trading-bot\ with .venv activated, Docker services running.
+
+# Step 1.1: Activate venv
+& "G:\OC\02June26\indian-trading-bot\.venv\Scripts\Activate.ps1"
+
+# Step 1.2: Ensure Phase 2 deps are in pyproject.toml (they should be from Phase 1):
+# Core: py_vollib>=1.0.12, QuantLib>=1.36, jugaad-data>=0.20, redis>=5.0, psycopg[binary]>=3.1
+# Dev: hypothesis>=6.92, pytest-benchmark>=4.0, cyclonedx-bom>=4.0, locust>=2.20
+# If not present, add them, then:
+pip install -e ".[dev,backtest]"
+
+# Step 1.3: Verify Phase 2 specific imports
+python -c "from py_vollib.black_scholes.implied_volatility import implied_volatility; print('py_vollib IV OK')"
+python -c "from py_vollib.black_scholes.greeks.analytical import delta, gamma, theta, vega; print('py_vollib Greeks OK')"
+python -c "import QuantLib; print(f'QuantLib {QuantLib.__version__} OK')"
+python -c "from jugaad_data.nse import bhavcopy_fo_save, bhavcopy_cm_save; print('jugaad_data bhavcopy OK')"
+python -c "import redis; print(f'redis {redis.__version__} OK')"
+python -c "import psycopg; print(f'psycopg OK')"
+python -c "import locust; print('locust OK')"
+python -c "import hypothesis; print(f'hypothesis OK')"
+
+# Step 1.4: Install Trivy if not on PATH
+# winget install Aquasecurity.Trivy
+# trivy --version
+
+# Step 1.5: Verify Docker services are running
+docker compose -f deployment/docker-compose.yml ps
+# EXPECTED: timescaledb=Up, redis=Up, prometheus=Up, grafana=Up
+# IF NOT: docker compose -f deployment/docker-compose.yml up -d
+
+# Step 1.6: Test TimescaleDB connectivity
+python -c "
+import psycopg
+conn = psycopg.connect('postgresql://trading:password@localhost:5432/trading_bot')
+cur = conn.execute(\"SELECT default_version FROM pg_available_extensions WHERE name = 'timescaledb'\")
+print(f'TimescaleDB extension: {cur.fetchone()}')
+conn.close()
+"
+# IF FAILS: Check docker compose logs, verify password matches .env.docker
+
+# Step 1.7: Test Redis connectivity
+python -c "
+import redis
+r = redis.Redis(host='localhost', port=6379, db=0)
+r.ping()
+print('Redis PONG OK')
+r.set('_phase2_test', 'ok', ex=60)
+print(f'Redis read-back: {r.get(\"_phase2_test\")}')
+r.delete('_phase2_test')
+"
+Verification Gate: ALL imports must succeed. TimescaleDB must return extension version. Redis must PONG. Trivy must be on PATH. If ANY fails, fix before proceeding.
+
+INSTRUCTION 2 — Create TimescaleDB Schema for Options Data
+Create deployment/init_phase2.sql with the following schema. This extends Phase 0's init.sql.
+
+2.1 Event Log (Kleppmann Ch.3: Immutable Source of Truth)
+-- Append-only event log: ALL market data events flow through here first
+CREATE TABLE IF NOT EXISTS market_events (
+    event_id       UUID NOT NULL,
+    event_time     TIMESTAMPTZ NOT NULL,
+    event_type     VARCHAR(30) NOT NULL,  -- 'FO_BHAVCOPY', 'CM_BHAVCOPY', 'WS_TICK', 'WS_OI_UPDATE', 'GREEKS_SNAPSHOT'
+    schema_version SMALLINT NOT NULL DEFAULT 1,
+    payload        JSONB NOT NULL,
+    source         VARCHAR(20) NOT NULL,  -- 'jugaad_data', 'kite_ws', 'computed'
+    ingest_id      UUID NOT NULL,         -- Unique per pipeline run (idempotency key)
+    epoch          BIGINT NOT NULL DEFAULT 1,  -- Fencing token (Kleppmann Ch.5)
+    created_at     TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (event_id, event_time)
+);
+
+SELECT create_hypertable('market_events', 'event_time', if_not_exists => TRUE,
+    chunk_interval_interval => INTERVAL '1 day');
+
+CREATE INDEX IF NOT EXISTS idx_me_event_type ON market_events (event_type, event_time DESC);
+CREATE INDEX IF NOT EXISTS idx_me_ingest_id ON market_events (ingest_id);
+CREATE INDEX IF NOT EXISTS idx_me_source ON market_events (source, event_time DESC);
+
+-- Append-only protection (same pattern as audit_events)
+CREATE OR REPLACE FUNCTION prevent_market_event_deletion()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'Market events are append-only. Deletion not permitted.';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_prevent_market_event_deletion
+BEFORE DELETE ON market_events
+FOR EACH ROW EXECUTE FUNCTION prevent_market_event_deletion();
+
+CREATE OR REPLACE FUNCTION prevent_market_event_update()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'Market events are append-only. Updates not permitted.';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_prevent_market_event_update
+BEFORE UPDATE ON market_events
+FOR EACH ROW EXECUTE FUNCTION prevent_market_event_update();
+
+-- Retention: 7 years (SEBI 5+ requirement)
+SELECT add_retention_policy('market_events', INTERVAL '7 years', if_not_exists => TRUE);
+2.2 F&O Options EOD Hypertable (Derived from event log)
+-- Derived table: F&O options EOD data (populated from FO_BHAVCOPY events)
+CREATE TABLE IF NOT EXISTS fo_options_eod (
+    date           DATE NOT NULL,
+    symbol         VARCHAR(20) NOT NULL,     -- 'NIFTY', 'BANKNIFTY'
+    expiry         DATE NOT NULL,
+    strike         NUMERIC(12,2) NOT NULL,
+    option_type    CHAR(2) NOT NULL CHECK (option_type IN ('CE', 'PE')),
+    open           NUMERIC(12,2) NOT NULL DEFAULT 0,
+    high           NUMERIC(12,2) NOT NULL DEFAULT 0,
+    low            NUMERIC(12,2) NOT NULL DEFAULT 0,
+    close          NUMERIC(12,2) NOT NULL DEFAULT 0,
+    settle_price   NUMERIC(12,2) NOT NULL DEFAULT 0,
+    volume         BIGINT NOT NULL DEFAULT 0,
+    oi             BIGINT NOT NULL DEFAULT 0,
+    oi_change      BIGINT NOT NULL DEFAULT 0,  -- Daily OI change
+    created_at     TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (date, symbol, expiry, strike, option_type)
+);
+
+SELECT create_hypertable('fo_options_eod', 'date', if_not_exists => TRUE,
+    chunk_interval_interval => INTERVAL '1 month');
+
+-- Indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_fo_symbol_date ON fo_options_eod (symbol, date DESC);
+CREATE INDEX IF NOT EXISTS idx_fo_expiry ON fo_options_eod (symbol, expiry, date DESC);
+CREATE INDEX IF NOT EXISTS idx_fo_strike ON fo_options_eod (symbol, date, strike, option_type);
+
+-- Continuous aggregate: Daily OI change per symbol/expiry (TimescaleDB materialized view)
+CREATE MATERIALIZED VIEW IF NOT EXISTS v_daily_oi_summary
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 day', date) AS bucket,
+    symbol,
+    expiry,
+    option_type,
+    sum(oi) AS total_oi,
+    sum(oi_change) AS total_oi_change,
+    sum(volume) AS total_volume,
+    avg(close) AS avg_close
+FROM fo_options_eod
+GROUP BY bucket, symbol, expiry, option_type
+WITH NO DATA;
+
+-- Refresh policy: refresh every hour during market hours
+SELECT add_continuous_aggregate_policy('v_daily_oi_summary',
+    start_offset => INTERVAL '3 days',
+    end_offset => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '1 hour',
+    if_not_exists => TRUE);
+2.3 CM Spot Prices Table
+-- Derived table: Cash market spot prices
+CREATE TABLE IF NOT EXISTS cm_spot_eod (
+    date           DATE NOT NULL,
+    symbol         VARCHAR(20) NOT NULL,    -- 'NIFTY 50', 'NIFTY BANK'
+    open           NUMERIC(12,2) NOT NULL DEFAULT 0,
+    high           NUMERIC(12,2) NOT NULL DEFAULT 0,
+    low            NUMERIC(12,2) NOT NULL DEFAULT 0,
+    close          NUMERIC(12,2) NOT NULL DEFAULT 0,
+    volume         BIGINT NOT NULL DEFAULT 0,
+    created_at     TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (date, symbol)
+);
+
+SELECT create_hypertable('cm_spot_eod', 'date', if_not_exists => TRUE,
+    chunk_interval_interval => INTERVAL '1 month');
+
+CREATE INDEX IF NOT EXISTS idx_cm_symbol_date ON cm_spot_eod (symbol, date DESC);
+2.4 Greeks Snapshot Table
+-- Computed Greeks: one row per (date, symbol, expiry, strike, option_type)
+CREATE TABLE IF NOT EXISTS greeks_snapshot (
+    date           DATE NOT NULL,
+    symbol         VARCHAR(20) NOT NULL,
+    expiry         DATE NOT NULL,
+    strike         NUMERIC(12,2) NOT NULL,
+    option_type    CHAR(2) NOT NULL CHECK (option_type IN ('CE', 'PE')),
+    spot           NUMERIC(12,2) NOT NULL,
+    iv             DOUBLE PRECISION,       -- NULL if computation fails (deep OTM/ITM)
+    delta          DOUBLE PRECISION,
+    gamma          DOUBLE PRECISION,
+    theta          DOUBLE PRECISION,
+    vega           DOUBLE PRECISION,
+    risk_free_rate DOUBLE PRECISION NOT NULL,
+    rfr_method     VARCHAR(20) NOT NULL DEFAULT 't_bill',  -- 't_bill' or 'futures_basis'
+    ttm_years      DOUBLE PRECISION NOT NULL,
+    compute_error  TEXT,                   -- NULL if success; error message if failure
+    created_at     TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (date, symbol, expiry, strike, option_type)
+);
+
+SELECT create_hypertable('greeks_snapshot', 'date', if_not_exists => TRUE,
+    chunk_interval_interval => INTERVAL '1 month');
+
+CREATE INDEX IF NOT EXISTS idx_greeks_iv ON greeks_snapshot (symbol, date, iv WHERE iv IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_greeks_delta ON greeks_snapshot (symbol, date, delta WHERE delta IS NOT NULL);
+2.5 Live Tick Table + ATM View
+-- Live/WebSocket tick data (continuous ingest)
+CREATE TABLE IF NOT EXISTS ws_ticks (
+    tick_time      TIMESTAMPTZ NOT NULL,
+    instrument_token INTEGER NOT NULL,
+    symbol         VARCHAR(30) NOT NULL,
+    ltp            NUMERIC(12,2) NOT NULL,
+    volume         BIGINT,
+    oi             BIGINT,
+    bid_price      NUMERIC(12,4),
+    ask_price      NUMERIC(12,4),
+    depth_json     JSONB,             -- 5-level depth
+    epoch          BIGINT NOT NULL DEFAULT 1,
+    created_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+SELECT create_hypertable('ws_ticks', 'tick_time', if_not_exists => TRUE,
+    chunk_interval_interval => INTERVAL '1 day');
+
+CREATE INDEX IF NOT EXISTS idx_ws_token_time ON ws_ticks (instrument_token, tick_time DESC);
+CREATE INDEX IF NOT EXISTS idx_ws_symbol_time ON ws_ticks (symbol, tick_time DESC);
+
+-- Retention: 90 days for raw ticks (compact after that)
+SELECT add_retention_policy('ws_ticks', INTERVAL '90 days', if_not_exists => TRUE);
+
+-- Continuous aggregate: 1-minute OHLCV from ticks
+CREATE MATERIALIZED VIEW IF NOT EXISTS v_tick_1min_ohlcv
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 minute', tick_time) AS bucket,
+    instrument_token,
+    symbol,
+    first(ltp, tick_time) AS open,
+    max(ltp) AS high,
+    min(ltp) AS low,
+    last(ltp, tick_time) AS close,
+    sum(COALESCE(volume, 0)) AS volume,
+    last(oi, tick_time) AS oi_end
+FROM ws_ticks
+GROUP BY bucket, instrument_token, symbol
+WITH NO DATA;
+
+SELECT add_continuous_aggregate_policy('v_tick_1min_ohlcv',
+    start_offset => INTERVAL '3 hours',
+    end_offset => INTERVAL '1 minute',
+    schedule_interval => INTERVAL '1 minute',
+    if_not_exists => TRUE);
+2.6 Download Checkpoint Table (Resumable Download)
+-- Tracks download progress for resumable bhavcopy ingestion
+CREATE TABLE IF NOT EXISTS download_checkpoint (
+    pipeline_run   UUID NOT NULL,
+    date           DATE NOT NULL,
+    segment        VARCHAR(10) NOT NULL,    -- 'FO' or 'CM'
+    status         VARCHAR(20) NOT NULL DEFAULT 'pending',  -- 'pending', 'downloaded', 'parsed', 'ingested', 'failed'
+    rows_ingested  INTEGER NOT NULL DEFAULT 0,
+    error_message  TEXT,
+    updated_at     TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (pipeline_run, date, segment)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dc_status ON download_checkpoint (status, date);
+2.7 ATM Strike Computed View
+-- View: ATM strikes per day (closest strike to spot close)
+CREATE OR REPLACE VIEW v_atm_strikes AS
+SELECT
+    f.date,
+    f.symbol,
+    f.expiry,
+    s.close AS spot_close,
+    f.strike AS atm_strike,
+    f.option_type,
+    f.close AS option_close,
+    f.volume,
+    f.oi,
+    ABS(f.strike - s.close) AS strike_distance
+FROM fo_options_eod f
+JOIN cm_spot_eod s ON f.date = s.date AND f.symbol = REPLACE(s.symbol, ' 50', '') AND f.symbol = REPLACE(s.symbol, ' BANK', '')
+WHERE ABS(f.strike - s.close) = (
+    SELECT MIN(ABS(f2.strike - s2.close))
+    FROM fo_options_eod f2
+    JOIN cm_spot_eod s2 ON f2.date = s2.date
+    WHERE f2.date = f.date
+      AND f2.symbol = f.symbol
+      AND f2.expiry = f.expiry
+      AND f2.option_type = f.option_type
+      AND s2.symbol = s.symbol
+);
+2.8 Apply Schema
+# Run the schema migration
+$env:PGPASSWORD = "password"  # Match your docker .env
+Get-Content "G:\OC\02June26\indian-trading-bot\deployment\init_phase2.sql" | & docker exec -i trading_timescaledb psql -U trading -d trading_bot
+# Verify
+python -c "
+import psycopg
+conn = psycopg.connect('postgresql://trading:password@localhost:5432/trading_bot')
+tables = conn.execute(\"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename\").fetchall()
+for t in tables: print(t[0])
+conn.close()
+"
+# EXPECTED: audit_events, market_events, fo_options_eod, cm_spot_eod, greeks_snapshot, ws_ticks, download_checkpoint, + views
+INSTRUCTION 3 — config/settings.py Additions for Phase 2
+Extend the existing config/settings.py with Phase 2 settings classes. Do NOT modify existing Phase 0 settings — only ADD.
+
+3.1 DataPipelineSettings
+class DataPipelineSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="PIPELINE_", env_file=".env", extra="ignore")
+
+    HISTORICAL_START_DATE: date = date(2023, 6, 1)   # 3 years back from today
+    HISTORICAL_END_DATE: date = date(2026, 6, 1)     # Today; override for incremental
+    FO_SYMBOLS: list[str] = ["NIFTY", "BANKNIFTY"]
+    CM_SYMBOLS: list[str] = ["NIFTY 50", "NIFTY BANK"]
+    MCX_SYMBOLS: list[str] = ["GOLD", "SILVER", "CRUDEOIL"]
+    DOWNLOAD_DIR: str = "data/bhavcopy"
+    CHECKPOINT_TABLE: str = "download_checkpoint"
+    BATCH_SIZE: int = 5000               # Rows per bulk INSERT
+    MAX_RETRIES: int = 3
+    RETRY_BACKOFF_SEC: float = 2.0
+    EVENT_LOG_TABLE: str = "market_events"
+3.2 GreeksSettings
+class GreeksSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="GREEKS_", env_file=".env", extra="ignore")
+
+    RFR_METHOD: Literal["t_bill", "futures_basis"] = "t_bill"
+    RFR_T_BILL_DEFAULT: float = 0.065      # RBI 91-day T-bill yield fallback
+    RFR_T_BILL_FETCH_URL: str = "https://www.rbi.org.in/scripts/BS_NSDPDisplay.aspx"  # RBI yield page
+    RFR_FUTURES_SYMBOL: str = "NIFTY"      # Use NIFTY futures for basis calculation
+    MIN_TTM_DAYS: int = 1                  # Minimum time-to-maturity in calendar days
+    MIN_OPTION_PRICE: float = 0.05         # Skip IV computation for options priced below this
+    IV_MAX_ITERATIONS: int = 100           # Newton-Raphson iterations for IV
+    IV_PRECISION: float = 1e-6             # Convergence threshold
+    IV_UPPER_BOUND: float = 5.0            # Max IV = 500%
+    IV_LOWER_BOUND: float = 0.001          # Min IV = 0.1%
+    QUANTLIB_CALENDAR: str = "India"       # QuantLib calendar for Indian holidays
+3.3 WebSocketSettings
+class WebSocketSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="WS_", env_file=".env", extra="ignore")
+
+    RECONNECT_INITIAL_DELAY_SEC: float = 1.0
+    RECONNECT_MAX_DELAY_SEC: float = 60.0
+    RECONNECT_BACKOFF_FACTOR: float = 2.0
+    RECONNECT_MAX_ATTEMPTS: int = 100
+    REAUTH_SCHEDULE_HOUR_IST: int = 6      # Daily re-auth at 6:XX AM IST
+    REAUTH_SCHEDULE_MINUTE_IST: int = 1
+    RING_BUFFER_SIZE: int = 10000          # Max ticks held before backpressure
+    PERSIST_INTERVAL_SEC: float = 5.0      # Batch write ticks to TimescaleDB every N sec
+    REDIS_TTL_SEC: int = 86400             # 24h TTL for Redis tick cache
+    REDIS_KEY_PREFIX: str = "tick:"
+    NIFTY_ATM_STRIKES_EACH_SIDE: int = 25  # 25 above + 25 below = 50 strikes
+    MCX_INSTRUMENTS: list[str] = ["GOLD", "SILVER", "CRUDEOIL"]
+    HEARTBEAT_TIMEOUT_SEC: float = 5.0     # Zerodha sends heartbeat every ~2-3s
+INSTRUCTION 4 — src/data/event_log.py — Immutable Event Log (Kleppmann Ch.3)
+This is the single source of truth for all market data. All pipelines write events here first; derived tables are populated from this log.
+
+Requirements
+Dataclass MarketEvent:
+event_id: UUID — auto-generated uuid4
+event_time: datetime — timezone-aware (IST/UTC)
+event_type: str — one of: FO_BHAVCOPY, CM_BHAVCOPY, WS_TICK, WS_OI_UPDATE, GREEKS_SNAPSHOT
+schema_version: int — starts at 1; incremented on schema change
+payload: dict — the actual data (JSONB)
+source: str — jugaad_data, kite_ws, computed
+ingest_id: UUID — unique per pipeline run (idempotency: same ingest_id + event_id = no-op)
+epoch: int — monotonic counter per source (fencing token)
+Class EventLogWriter:
+__init__(self, db_url: str, batch_size: int = 5000)
+async def append(self, event: MarketEvent) -> None
+INSERT into market_events with ON CONFLICT (event_id, event_time) DO NOTHING (idempotent)
+Buffer events in memory; flush when buffer >= batch_size or on explicit flush()
+async def flush(self) -> int — returns rows written
+async def close(self) -> None — flush remaining + close connection
+Uses psycopg with COPY-style batch inserts for performance
+Structlog on every flush: {"action": "event_log_flush", "rows": N, "event_types": [...]}
+Class EventLogReader:
+async def query(self, event_type: str | None, start: datetime, end: datetime, source: str | None = None, limit: int = 10000) -> list[MarketEvent]
+async def get_latest_epoch(self, source: str) -> int — for fencing token checks
+Class EventCodec:
+encode(event: MarketEvent) -> dict — serialize with schema_version
+decode(raw: dict) -> MarketEvent — deserialize; handle schema migrations
+Version migration registry: dict[int, Callable] mapping old schema_version → migration function
+Current schema version: CURRENT_SCHEMA_VERSION = 1
+Schema Evolution Example (Kleppmann Ch.4):
+If v2 adds oi_change to FO_BHAVCOPY payload: migrate_v1_to_v2(payload) -> dict fills oi_change=0 for v1 events
+decode() checks schema_version; if < current, applies all migrations in sequence
+All methods fully type-hinted, async, with structlog. Every append must be idempotent (same event_id = no-op).
+
+INSTRUCTION 5 — src/data/historical.py — Resumable Historical Data Pipeline
+Requirements
+Class BhavcopyDownloader:
+__init__(self, settings: DataPipelineSettings, event_writer: EventLogWriter, audit_logger: AuditLogger)
+async def download_fo_bhavcopies(self) -> DownloadResult
+Generate date range from HISTORICAL_START_DATE to HISTORICAL_END_DATE
+Skip non-trading days (use jugaad_data.nse.NSE_HOLIDAYS or a cached holiday calendar)
+Resumable: Query download_checkpoint for this pipeline_run; skip dates with status='ingested'
+For each trading day: a. Check checkpoint: if ingested, skip b. Call bhavcopy_fo_save(date, download_dir) from jugaad-data c. Parse CSV: filter to NIFTY and BANKNIFTY rows only d. Validate: open <= high, low <= high, volume >= 0, oi >= 0 (reject bad rows) e. Write each row as a MarketEvent(event_type='FO_BHAVCOPY', source='jugaad_data') to event log f. After event log flush: derive into fo_options_eod table g. Update checkpoint: status='ingested', rows_ingested=N h. If any step fails: checkpoint status='failed', error_message=str(e); continue to next date
+Rate limiting: 1 req/sec to NSE (jugaad-data handles internally, but add explicit asyncio.sleep(1.1))
+Retry: on network error, retry up to MAX_RETRIES with exponential backoff
+Return DownloadResult(total_dates, skipped, downloaded, failed, total_rows)
+async def download_cm_bhavcopies(self) -> DownloadResult
+Same pattern but for CM bhavcopies
+Filter to NIFTY 50 and NIFTY BANK index rows
+Write as MarketEvent(event_type='CM_BHAVCOPY', source='jugaad_data')
+Derive into cm_spot_eod table
+Dataclass DownloadResult:
+total_dates: int
+skipped: int (already ingested)
+downloaded: int
+failed: int
+failed_dates: list[date]
+total_rows: int
+Class BhavcopyParser:
+parse_fo_csv(filepath: Path) -> list[dict]
+Read CSV with pandas
+Filter: SYMBOL IN ('NIFTY', 'BANKNIFTY') AND INSTRUMENT IN ('OPTIDX', 'OPTSTK') (jugaad-data F&O bhavcopy columns)
+Map columns: DATE→date, SYMBOL→symbol, EXPIRY_DT→expiry, STRIKE_PR→strike, OPTION_TYP→option_type, OPEN→open, HIGH→high, LOW→low, CLOSE→close, SETTLE_PR→settle_price, CONTRACTS→contracts, VAL_INLAKH→value_lakh, OPEN_INT→oi, CHG_IN_OI→oi_change
+Validate: drop rows where close <= 0 or strike <= 0
+Return list of dicts matching fo_options_eod schema
+parse_cm_csv(filepath: Path) -> list[dict]
+Read CSV with pandas
+Filter: SYMBOL IN ('NIFTY 50', 'NIFTY BANK') AND SERIES = 'INDEX' (or appropriate CM series)
+Map: DATE→date, SYMBOL→symbol, OPEN→open, HIGH→high, LOW→low, CLOSE→close, TOTTRDQTY→volume
+Validate: drop rows where close <= 0
+Holiday Calendar:
+Function get_nse_trading_days(start: date, end: date) -> list[date]
+Use jugaad_data.nse holiday list + exclude weekends
+Cache result in Redis for 24h (key: nse_trading_days:{start}:{end})
+Pipeline Orchestration:
+async def run_historical_pipeline() -> dict
+Generate pipeline_run = uuid4()
+Initialize checkpoint entries for all trading days
+Run download_fo_bhavcopies()
+Run download_cm_bhavcopies()
+Run Greeks computation (Instruction 6) on all ingested EOD data
+Return summary dict
+All methods: fully type-hinted, async, structlog on every step, retry with backoff, checkpoint every date. No assumption that downloads succeed — every failure is captured and the pipeline continues.
+
+INSTRUCTION 6 — src/data/option_chain.py — Greeks Computation Engine
+Requirements
+Enum RFRMethod: T_BILL | FUTURES_BASIS
+Class RiskFreeRateProvider:
+__init__(self, settings: GreeksSettings, db_url: str)
+async def get_rate(self, as_of_date: date, method: RFRMethod | None = None) -> float
+If method is None, use settings.RFR_METHOD
+T_BILL method: a. Try to fetch RBI 91-day T-bill yield from RFR_T_BILL_FETCH_URL b. Parse the RBI page (HTML table) for current yield c. Cache in Redis: rfr_t_bill:{date} with 24h TTL d. On failure: fall back to RFR_T_BILL_DEFAULT with WARNING log
+FUTURES_BASIS method: a. Query fo_options_eod for the nearest NIFTY futures contract on as_of_date b. Query cm_spot_eod for NIFTY spot on as_of_date c. Compute: r = (F/S - 1) * (365/T) where T = days to futures expiry / 365 d. Clamp result to [0.01, 0.15] (1% to 15%) — anything outside is data error e. Cache in Redis: rfr_futures_basis:{date} with 24h TTL
+On BOTH methods failing: log ERROR, return RFR_T_BILL_DEFAULT
+Structlog: {"action": "rfr_computed", "method": method, "rate": r, "date": date}
+Class OptionMetricsComputer:
+__init__(self, settings: GreeksSettings, rfr_provider: RiskFreeRateProvider)
+def compute_single(self, spot: float, strike: float, expiry_date: date, as_of_date: date, option_ltp: float, option_type: Literal['CE', 'PE'], risk_free_rate: float) -> OptionMetrics
+t = max((expiry_date - as_of_date).days, settings.MIN_TTM_DAYS) / 365.0
+flag = 'c' if option_type == 'CE' else 'p'
+Guard: if option_ltp < MIN_OPTION_PRICE: return OptionMetrics with all Greeks=None, compute_error='price_below_threshold'
+Guard: if t <= 0: return OptionMetrics with all Greeks=None, compute_error='expired'
+Try: a. iv = implied_volatility(option_ltp, spot, strike, t, risk_free_rate, flag) b. Clamp IV to [IV_LOWER_BOUND, IV_UPPER_BOUND] — if outside, log WARNING c. d = delta(flag, spot, strike, t, risk_free_rate, iv) d. g = gamma(flag, spot, strike, t, risk_free_rate, iv) e. th = theta(flag, spot, strike, t, risk_free_rate, iv) f. v = vega(flag, spot, strike, t, risk_free_rate, iv) g. Return OptionMetrics(iv=iv, delta=d, gamma=g, theta=th, vega=v, risk_free_rate=risk_free_rate, rfr_method=..., ttm_years=t, compute_error=None)
+Except Exception as e: a. Return OptionMetrics(iv=None, delta=None, ..., compute_error=str(e)) b. NEVER raise — always return a result with error field. Deep OTM/ITM options often fail IV computation; this is expected.
+Dataclass OptionMetrics:
+iv: float | None
+delta: float | None
+gamma: float | None
+theta: float | None
+vega: float | None
+risk_free_rate: float
+rfr_method: str
+ttm_years: float
+compute_error: str | None
+Async Batch Computation:
+async def compute_greeks_for_date(self, as_of_date: date, symbol: str) -> int
+Fetch all fo_options_eod rows for (date, symbol)
+Fetch spot from cm_spot_eod for (date, symbol)
+Get risk-free rate from provider
+For each option row: call compute_single()
+Write results to greeks_snapshot table
+Also write as MarketEvent(event_type='GREEKS_SNAPSHOT', source='computed')
+Return count of successful computations
+Use asyncio.to_thread() for CPU-bound compute_single() calls (vollib is sync)
+Process in batches of 1000 to avoid memory pressure
+QuantLib Calendar Integration (Secondary):
+class QuantLibCalendar:
+get_trading_calendar(start_year: int, end_year: int) -> set[date]
+Uses QuantLib.India calendar for Indian holiday handling
+More accurate than jugaad-data for future/past holiday dates
+Used as fallback when jugaad-data holiday list is incomplete
+CRITICAL: as_of_date is always an explicit parameter. The original today variable is NEVER used inside compute functions. This ensures backtesting works correctly on historical data.
+
+INSTRUCTION 7 — src/data/websocket.py — Live Data Pipeline
+Requirements
+Enum WSConnectionState: DISCONNECTED | CONNECTING | CONNECTED | RECONNECTING | REAUTHenticating
+Class TickRingBuffer (Kleppmann Ch.4 — Backpressure):
+__init__(self, capacity: int)
+Fixed-capacity circular buffer (collections.deque with maxlen)
+def push(self, tick: dict) -> None — if full, drop oldest + increment dropped_count + log WARNING
+def drain(self, max_items: int) -> list[dict] — atomically remove and return up to max_items
+def __len__(self) -> int
+dropped_count: int — counter for Prometheus metric
+Thread-safe with threading.Lock
+Class LiveMarketFeed:
+__init__(self, kite_api: KiteBroker, settings: WebSocketSettings, event_writer: EventLogWriter, redis_client: redis.Redis, audit_logger: AuditLogger)
+State: _state: WSConnectionState, _epoch: int (monotonic, incremented on each reconnect)
+State: _kws: KiteTicker | None
+State: _ring_buffer: TickRingBuffer
+async def start(self) -> None
+Set up KiteTicker with kite_api.access_token
+Assign callbacks: on_ticks, on_connect, on_close, on_error, on_reconnect
+Call kws.connect(threaded=True) — runs WS in background thread
+Start persist loop: asyncio.create_task(self._persist_loop())
+Start heartbeat monitor: asyncio.create_task(self._heartbeat_monitor())
+Start reauth scheduler: asyncio.create_task(self._reauth_scheduler())
+def _on_connect(self, kws, response) -> None
+Increment _epoch (fencing token)
+Subscribe: NIFTY spot + 25 ATM CE + 25 ATM PE = 51 instruments; same for BANKNIFTY = 102
+Subscribe MCX: GOLD, SILVER, CRUDEOIL futures (3-6 instruments)
+Mode: kws.MODE_FULL for options (need depth + OI), kws.MODE_QUOTE for spot indices
+Log: {"action": "ws_connected", "epoch": epoch, "instruments": count}
+def _on_ticks(self, kws, ticks: list[dict]) -> None
+For each tick: add epoch=self._epoch field
+Push to ring buffer
+Write to Redis: SET tick:{instrument_token} {json} EX REDIS_TTL_SEC
+If Redis write fails: log WARNING, continue (Redis is cache, not source of truth)
+def _on_close(self, kws, code, reason) -> None
+Log: {"action": "ws_closed", "code": code, "reason": reason, "epoch": epoch}
+Set state = RECONNECTING
+Trigger reconnect with exponential backoff
+def _on_error(self, kws, code, reason) -> None
+Log: {"action": "ws_error", "code": code, "reason": reason}
+If TokenException (403): set state = REAUTHENTICATING, trigger re-auth
+If network error: trigger reconnect with backoff
+async def _reconnect_with_backoff(self) -> None
+delay = min(RECONNECT_INITIAL_DELAY_SEC * (RECONNECT_BACKOFF_FACTOR ** attempt), RECONNECT_MAX_DELAY_SEC)
+Sleep delay seconds
+Attempt reconnect: kws.reconnect()
+If attempt >= RECONNECT_MAX_ATTEMPTS: log CRITICAL, activate kill switch PAUSE level
+On success: reset attempt counter, set state = CONNECTED
+async def _reauth_scheduler(self) -> None
+Calculate seconds until next 6:01 AM IST
+Sleep until then
+Call kite_api.authenticate() to get new access_token
+If success: stop old kws, create new KiteTicker with new token, reconnect
+If failure: log CRITICAL, activate kill switch PAUSE level
+Repeat daily
+async def _persist_loop(self) -> None
+Every PERSIST_INTERVAL_SEC seconds:
+Drain ring buffer
+If empty: continue
+Convert ticks to MarketEvent(event_type='WS_TICK', source='kite_ws') list
+Bulk write to ws_ticks table (psycopg COPY or execute_values)
+Also write to event log
+Log: {"action": "ws_persist", "rows": N, "lag_ms": ...}
+async def _heartbeat_monitor(self) -> None
+Every HEARTBEAT_TIMEOUT_SEC seconds:
+Check if any tick received in last HEARTBEAT_TIMEOUT_SEC * 2 seconds
+If no ticks: log WARNING, check connection state
+If state is CONNECTED but no ticks: possible silent disconnect → trigger reconnect
+async def stop(self) -> None
+Close kws connection
+Flush ring buffer to DB
+Set state = DISCONNECTED
+ATM Strike Subscription Logic:
+def compute_atm_subscriptions(spot_price: float, strike_interval: float, num_strikes: int) -> list[float]
+Returns list of strikes centered around spot: [spot - N*interval, ..., spot, ..., spot + N*interval]
+NIFTY strike interval: 50 (current); BANKNIFTY: 100
+Fetch current spot from Redis; if unavailable, use previous close from cm_spot_eod
+MCX Segment Support:
+MCX instruments use different exchange tokens
+Subscribe to MCX futures (Gold, Silver, Crude) in QUOTE mode
+MCX options if available (currently limited on Zerodha)
+INSTRUCTION 8 — src/data/storage.py — TimescaleDB + Redis Read/Write Layer
+Requirements
+Class TimescaleDBStore:
+__init__(self, db_url: str, settings: DataPipelineSettings)
+Connection pool: psycopg_pool.AsyncConnectionPool(min_size=2, max_size=10)
+async def bulk_insert(self, table: str, rows: list[dict], on_conflict: str = 'DO NOTHING') -> int
+Uses psycopg.extras.execute_values or COPY for performance
+Returns rows inserted
+async def query_fo_options(self, symbol: str, start_date: date, end_date: date, expiry: date | None = None, strike: float | None = None) -> pd.DataFrame
+async def query_cm_spot(self, symbol: str, start_date: date, end_date: date) -> pd.DataFrame
+async def query_greeks(self, symbol: str, date: date, expiry: date | None = None) -> pd.DataFrame
+async def query_atm_strikes(self, symbol: str, date: date) -> pd.DataFrame
+async def get_oi_change(self, symbol: str, date: date) -> pd.DataFrame
+async def healthcheck(self) -> bool
+All methods: parameterized queries (no SQL injection), async, structlog, timeout handling
+Class RedisCache:
+__init__(self, redis_url: str, settings: WebSocketSettings)
+async def set_tick(self, instrument_token: int, data: dict) -> None
+async def get_tick(self, instrument_token: int) -> dict | None
+async def get_all_ticks(self, tokens: list[int]) -> dict[int, dict]
+async def set_rfr(self, date: date, method: str, rate: float) -> None
+async def get_rfr(self, date: date, method: str) -> float | None
+async def set_holiday_cache(self, key: str, days: list[str], ttl: int = 86400) -> None
+async def healthcheck(self) -> bool
+Connection Resilience (Kleppmann Ch.5):
+Both classes must handle psycopg.OperationalError and redis.ConnectionError
+On connection failure: retry up to 3 times with exponential backoff
+On persistent failure: log CRITICAL + raise (don't silently fail)
+TimescaleDBStore uses connection pool with auto-reconnect
+INSTRUCTION 9 — src/brokers/base.py + src/brokers/zerodha.py — Multi-Broker Abstraction
+9.1 Extend src/brokers/base.py from Phase 0
+The Phase 0 BrokerInterface has basic methods. Extend with Phase 2 additions:
+
+class BrokerInterface(ABC):
+    # Phase 0 methods (already exist)
+    @abstractmethod
+    async def authenticate(self) -> str: ...
+    @abstractmethod
+    async def place_order(self, params: dict) -> dict: ...
+    @abstractmethod
+    async def cancel_order(self, order_id: str) -> dict: ...
+    @abstractmethod
+    async def cancel_all_orders(self) -> list[dict]: ...
+    @abstractmethod
+    async def get_positions(self) -> list[dict]: ...
+    @abstractmethod
+    async def get_margins(self) -> dict: ...
+    @abstractmethod
+    async def get_order_book(self) -> list[dict]: ...
+    @abstractmethod
+    async def get_instruments(self, segment: str) -> list[dict]: ...
+
+    # Phase 2 additions
+    @abstractmethod
+    async def get_option_chain(self, symbol: str, expiry: date) -> list[dict]:
+        """Fetch available option contracts for symbol/expiry."""
+        ...
+
+    @abstractmethod
+    async def subscribe_ticks(self, instruments: list[int], mode: str, callback) -> None:
+        """Subscribe to live market data via WebSocket."""
+        ...
+
+    @abstractmethod
+    async def get_historical_candles(self, instrument_token: int, interval: str, from_date: date, to_date: date) -> pd.DataFrame:
+        """Fetch historical OHLCV candles."""
+        ...
+
+    @abstractmethod
+    async def get_quote(self, instruments: list[str]) -> dict:
+        """Fetch current quote for instruments."""
+        ...
+9.2 src/brokers/zerodha.py — KiteBroker Implementation
+class KiteBroker(BrokerInterface):
+    def __init__(self, api_key: str, api_secret: str, access_token: str | None = None):
+        self._kite = KiteConnect(api_key=api_key)
+        self._kite.api_secret = api_secret
+        if access_token:
+            self._kite.set_access_token(access_token)
+        self._access_token = access_token
+        self._instrument_cache: dict[str, list[dict]] = {}
+
+    async def authenticate(self) -> str:
+        """Complete OAuth flow: generate session from request_token."""
+        # For automated daily re-auth:
+        # 1. Open login URL in browser
+        # 2. User completes TOTP manually (or use pyautogui for TOTP automation — at own risk)
+        # 3. Capture request_token from redirect
+        # 4. Generate session: kite.generate_session(request_token, api_secret=api_secret)
+        # 5. Set access_token: kite.set_access_token(session["access_token"])
+        # 6. Compute checksum: SHA-256(api_key + request_token + api_secret)
+        # 7. Log auth event via audit_logger
+        ...
+
+    async def place_order(self, params: dict) -> dict:
+        """Place order with pre-trade risk check integration."""
+        # 1. Validate params against Zerodha API requirements
+        # 2. Set market_protection=-1 (auto LPP)
+        # 3. Set tag=f"{strategy_id}:{version}"[:20]
+        # 4. Call kite.place_order()
+        # 5. Handle: OrderException, MarginException, TokenException
+        # 6. Log result via audit_logger
+        ...
+
+    async def cancel_order(self, order_id: str) -> dict:
+        # kite.cancel_order(variety, order_id)
+        # Retry on NetworkException up to 3 times
+        ...
+
+    async def cancel_all_orders(self) -> list[dict]:
+        # Fetch all open orders, cancel each
+        # Track failures; return list of {order_id, status}
+        ...
+
+    async def get_positions(self) -> list[dict]:
+        # kite.positions()["net"]
+        ...
+
+    async def get_margins(self) -> dict:
+        # kite.margins()
+        ...
+
+    async def get_option_chain(self, symbol: str, expiry: date) -> list[dict]:
+        # Fetch instruments for NFO segment
+        # Filter: symbol + expiry
+        # Cache in self._instrument_cache
+        ...
+
+    async def subscribe_ticks(self, instruments: list[int], mode: str, callback) -> None:
+        # This is handled by LiveMarketFeed (Instruction 7)
+        # KiteBroker provides the access_token + instrument list
+        ...
+
+    async def get_historical_candles(self, instrument_token: int, interval: str, from_date: date, to_date: date) -> pd.DataFrame:
+        # kite.historical_data(instrument_token, from_date, to_date, interval)
+        # Rate limit: 3 req/sec for historical
+        ...
+
+    async def get_quote(self, instruments: list[str]) -> dict:
+        # kite.quote(instruments)
+        # Rate limit: 1 req/sec
+        ...
+9.3 src/brokers/angelone.py — Stub
+class AngelBroker(BrokerInterface):
+    """Stub implementation for Angel One SmartAPI. To be implemented in Phase 16."""
+
+    async def authenticate(self) -> str:
+        raise NotImplementedError("AngelBroker not yet implemented (Phase 16)")
+
+    # ... all methods raise NotImplementedError
+9.4 src/brokers/dhan.py — Stub
+class DhanBroker(BrokerInterface):
+    """Stub implementation for Dhan API (200-level depth). To be implemented in Phase 16."""
+
+    async def authenticate(self) -> str:
+        raise NotImplementedError("DhanBroker not yet implemented (Phase 16)")
+
+    # ... all methods raise NotImplementedError
+INSTRUCTION 10 — src/data/providers.py — Update MarketDataProvider Interface
+Extend the Phase 0 MarketDataProvider with concrete implementations:
+
+class MarketDataProvider(ABC):
+    # Phase 0 methods
+    @abstractmethod
+    async def get_quote(self, symbol: str) -> dict: ...
+    @abstractmethod
+    async def get_historical(self, symbol: str, from_date: date, to_date: date) -> pd.DataFrame: ...
+    @abstractmethod
+    async def subscribe(self, symbols: list[str], callback) -> None: ...
+
+    # Phase 2 additions
+    @abstractmethod
+    async def get_option_chain(self, symbol: str, expiry: date) -> list[dict]: ...
+    @abstractmethod
+    async def get_greeks(self, symbol: str, date: date, expiry: date) -> pd.DataFrame: ...
+
+
+class KiteDataProvider(MarketDataProvider):
+    """Concrete implementation using KiteBroker + TimescaleDBStore + RedisCache."""
+    def __init__(self, broker: KiteBroker, db: TimescaleDBStore, cache: RedisCache, greeks: OptionMetricsComputer):
+        ...
+
+    async def get_quote(self, symbol: str) -> dict:
+        # Try Redis first; fall back to broker API
+        ...
+
+    async def get_historical(self, symbol: str, from_date: date, to_date: date) -> pd.DataFrame:
+        # Query TimescaleDB
+        ...
+
+    async def get_option_chain(self, symbol: str, expiry: date) -> list[dict]:
+        # Combine: broker instruments + DB EOD data + computed Greeks
+        ...
+
+    async def get_greeks(self, symbol: str, date: date, expiry: date) -> pd.DataFrame:
+        # Query greeks_snapshot table
+        ...
+INSTRUCTION 11 — Prometheus Metrics for Phase 2
+Add to src/data/metrics.py:
+
+from prometheus_client import Counter, Gauge, Histogram
+
+# Historical pipeline
+DOWNLOAD_ATTEMPTS = Counter('pipeline_download_attempts_total', 'Bhavcopy download attempts', ['segment', 'status'])
+DOWNLOAD_ROWS = Counter('pipeline_download_rows_total', 'Rows ingested from bhavcopies', ['segment'])
+GREEKS_COMPUTED = Counter('pipeline_greeks_computed_total', 'Greeks computations', ['symbol', 'status'])  # status: success/failed
+
+# Live pipeline
+WS_RECONNECTS = Counter('ws_reconnects_total', 'WebSocket reconnections')
+WS_TICKS_RECEIVED = Counter('ws_ticks_received_total', 'Ticks received from WebSocket')
+WS_TICKS_DROPPED = Counter('ws_ticks_dropped_total', 'Ticks dropped due to backpressure')
+WS_PERSIST_LAG = Histogram('ws_persist_lag_seconds', 'Time between tick receipt and DB persist')
+WS_PERSIST_ROWS = Counter('ws_persist_rows_total', 'Ticks persisted to TimescaleDB')
+
+# Storage
+DB_WRITE_LATENCY = Histogram('db_write_latency_seconds', 'TimescaleDB write latency', ['table'])
+DB_QUERY_LATENCY = Histogram('db_query_latency_seconds', 'TimescaleDB query latency', ['table'])
+REDIS_HIT_RATE = Gauge('redis_hit_rate', 'Redis cache hit rate')
+
+# Risk-free rate
+RFR_COMPUTED = Counter('rfr_computed_total', 'Risk-free rate computations', ['method', 'status'])
+INSTRUCTION 12 — Test Suite
+12.1 tests/conftest.py Additions
+Add Phase 2 fixtures:
+
+@pytest.fixture
+def pipeline_settings() -> DataPipelineSettings:
+    return DataPipelineSettings(HISTORICAL_START_DATE=date(2023,6,1), HISTORICAL_END_DATE=date(2023,6,30))
+
+@pytest.fixture
+def greeks_settings() -> GreeksSettings:
+    return GreeksSettings()
+
+@pytest.fixture
+def ws_settings() -> WebSocketSettings:
+    return WebSocketSettings()
+
+@pytest.fixture
+def event_writer(mock_db) -> EventLogWriter:
+    ...
+
+@pytest.fixture
+def rfr_provider(greeks_settings, mock_db) -> RiskFreeRateProvider:
+    ...
+
+@pytest.fixture
+def greeks_computer(greeks_settings, rfr_provider) -> OptionMetricsComputer:
+    ...
+
+@pytest.fixture
+def sample_fo_row() -> dict:
+    return {"date": date(2024,1,15), "symbol": "NIFTY", "expiry": date(2024,1,25),
+            "strike": 21500.0, "option_type": "CE", "open": 250.0, "high": 280.0,
+            "low": 240.0, "close": 265.0, "settle_price": 265.0,
+            "volume": 10000, "oi": 50000, "oi_change": 2000}
+
+@pytest.fixture
+def sample_tick() -> dict:
+    return {"instrument_token": 12345, "symbol": "NIFTY2150012500CE",
+            "ltp": 265.0, "volume": 100, "oi": 50000,
+            "bid_price": 264.5, "ask_price": 265.5, "depth_json": "{}"}
+12.2 tests/unit/test_data_pipeline.py — Historical Pipeline
+test_bhavcopy_parser_fo_valid_csv: Parse valid F&O CSV → correct row count + field mapping
+test_bhavcopy_parser_fo_filters_nifty: Only NIFTY/BANKNIFTY rows retained
+test_bhavcopy_parser_fo_rejects_bad_rows: close=0 or strike=0 rows dropped
+test_bhavcopy_parser_cm_valid_csv: Parse valid CM CSV → correct mapping
+test_bhavcopy_parser_cm_filters_index: Only NIFTY 50/NIFTY BANK rows retained
+test_download_checkpoint_resumes: Pipeline run with partial checkpoint skips ingested dates
+test_download_checkpoint_fails_gracefully: Failed date logged but pipeline continues
+test_holiday_calendar_excludes_weekends: No Saturday/Sunday in trading days
+test_holiday_calendar_excludes_holidays: Known NSE holiday excluded
+test_event_log_idempotent_append: Same event_id written twice → only 1 row
+test_event_codec_roundtrip: encode → decode = original event
+test_event_codec_v1_migration: Decode v1 schema event → v2 fields filled with defaults
+12.3 tests/unit/test_option_greeks.py — Greeks Computation
+test_compute_single_atm_call: ATM CE with known inputs → delta ≈ 0.50, iv > 0
+test_compute_single_atm_put: ATM PE → delta ≈ -0.50
+test_compute_single_deep_otm: Deep OTM → small delta, IV may be None (acceptable)
+test_compute_single_expired: expiry <= as_of_date → compute_error='expired'
+test_compute_single_zero_price: option_ltp=0 → compute_error='price_below_threshold'
+test_compute_single_negative_price: option_ltp<0 → compute_error
+test_risk_free_rate_t_bill_fallback: RBI fetch fails → returns default 0.065
+test_risk_free_rate_futures_basis: Valid F/S data → computed rate in [0.01, 0.15]
+test_risk_free_rate_futures_basis_clamped: Extreme F/S ratio → clamped to 0.15
+test_greeks_batch_compute: 100 rows → 100 results (some may have compute_error)
+test_greeks_all_none_on_error: compute_single with invalid inputs → all Greeks=None, compute_error set
+12.4 tests/unit/test_websocket.py — Live Pipeline
+test_ring_buffer_push_drain: Push N items → drain returns all N
+test_ring_buffer_overflow: Push capacity+1 → dropped_count=1
+test_ring_buffer_fifo: First pushed = first drained
+test_ws_state_transitions: DISCONNECTED → CONNECTING → CONNECTED → RECONNECTING
+test_ws_epoch_increments_on_reconnect: Each reconnect increments epoch
+test_ws_stale_tick_rejected: Tick with old epoch < current → rejected by persist
+test_reconnect_backoff_sequence: Delay sequence: 1, 2, 4, 8, ..., capped at 60
+test_redis_write_failure_continues: Redis error → logged but pipeline continues
+12.5 tests/unit/test_storage.py — TimescaleDB + Redis
+test_bulk_insert_fo_options: Insert 1000 rows → all present in fo_options_eod
+test_bulk_insert_idempotent: Same rows inserted twice → no duplicates (ON CONFLICT)
+test_query_fo_options_filter: Query by symbol+date → only matching rows
+test_query_cm_spot_range: Date range query → correct rows
+test_redis_tick_set_get: Set tick → get same tick back
+test_redis_tick_expiry: After TTL → get returns None
+test_redis_rfr_cache: Set RFR → get same value within TTL
+test_db_connection_retry: Mock OperationalError → retry succeeds on 2nd attempt
+test_db_persistent_failure: Mock 3 failures → raises after retries exhausted
+12.6 tests/unit/test_broker_interface.py — Broker Abstraction
+test_kitebroker_authenticate: Mock KiteConnect → returns access_token
+test_kitebroker_place_order: Mock place_order → returns order_id
+test_kitebroker_cancel_order: Mock cancel_order → returns confirmation
+test_kitebroker_get_option_chain: Mock instruments → returns filtered list
+test_kitebroker_rate_limit_historical: 4 requests in 1 sec → 4th delayed
+test_angelbroker_stub_raises: Any method → NotImplementedError
+test_dhanbroker_stub_raises: Any method → NotImplementedError
+test_broker_interface_abstract: Cannot instantiate BrokerInterface directly
+12.7 tests/property/test_option_greeks.py — Hypothesis Invariants
+@given(st_floats(50,50000), st_floats(50,50000), st_dates(), st_floats(0.05,50000))
+test_iv_always_positive_or_none: IV is either None or > 0
+test_delta_call_in_0_1: CE delta ∈ (0, 1) or None
+test_delta_put_in_neg1_0: PE delta ∈ (-1, 0) or None
+test_gamma_always_non_negative: gamma >= 0 or None
+test_theta_always_negative_for_long: Long option theta < 0 or None (time decay)
+test_vega_always_non_negative: vega >= 0 or None
+test_put_call_parity_approx: |CE_delta - PE_delta| ≈ 1 for same strike/expiry
+test_greeks_never_nan: No Greek is ever NaN (must be float or None)
+test_idempotent_computation: Same inputs → same outputs (deterministic)
+12.8 tests/integration/test_redis_timescaledb.py — Write + Read Roundtrip
+Requires Docker services running.
+
+test_fo_options_write_read_roundtrip: Write 500 rows → read back → identical
+test_cm_spot_write_read_roundtrip: Write 100 rows → read back → identical
+test_greeks_snapshot_write_read: Write Greeks → read back → values within epsilon
+test_ws_ticks_write_read: Write 1000 ticks → read back → all present
+test_event_log_write_read: Append 100 events → query by type → all found
+test_redis_set_get_tick_roundtrip: Set tick JSON → get → identical
+test_redis_pipeline_multi_set_get: Set 50 ticks via pipeline → get all → all present
+test_timescaledb_hypertable_chunks: Verify data is in daily/weekly chunks
+test_continuous_aggregate_refresh: Insert tick data → refresh 1min aggregate → verify OHLCV
+12.9 tests/property/test_data_pipeline.py — Hypothesis: Pipeline Invariants
+@given(st_lists(st_dates()))
+test_checkpoint_always_consistent: After any download sequence, checkpoint table reflects exactly which dates succeeded
+test_event_log_monotonic_time: All events in log have monotonically increasing event_time within a source
+test_derived_table_matches_events: fo_options_eod rows = distinct FO_BHAVCOPY events (no more, no less)
+12.10 tests/bench/test_greeks_perf.py — Performance Benchmarks
+test_greeks_single_compute_benchmark: benchmark(compute_single, ...) → < 1ms per option
+test_greeks_batch_1000_benchmark: benchmark(compute_greeks_for_date, 1000 options) → < 1 second
+test_event_log_bulk_insert_benchmark: benchmark(bulk_insert, 10000 events) → < 2 seconds
+test_redis_set_get_benchmark: benchmark(set+get, 1000 ticks) → < 100ms
+12.11 tests/load/locustfile.py — Load Testing Skeleton
+from locust import HttpUser, task, between
+
+class TradingBotUser(HttpUser):
+    wait_time = between(1, 5)
+
+    @task
+    def query_option_chain(self):
+        # Simulate API request for option chain data
+        ...
+
+    @task(3)
+    def query_greeks(self):
+        # Simulate Greeks query (3x more frequent)
+        ...
+INSTRUCTION 13 — Run Full Verification
+# Ensure venv activated + Docker services running
+& "G:\OC\02June26\indian-trading-bot\.venv\Scripts\Activate.ps1"
+docker compose -f deployment/docker-compose.yml up -d
+
+# Tier 0 — Every PR gate
+ruff check src/ tests/                          # 0 errors
+ruff format --check src/ tests/                 # 0 files need formatting
+mypy src/ --strict                              # 0 errors
+bandit -c pyproject.toml -r src/                # 0 high-severity
+pytest tests/unit/ -v --cov=src --cov-branch --cov-fail-under=80
+pip-audit -r requirements.txt                   # 0 known vulnerabilities
+
+# Tier 1 — Property + integration + benchmarks
+pytest tests/property/ -v                       # All Hypothesis invariants pass
+pytest tests/integration/ -v                    # All roundtrip tests pass (requires Docker)
+pytest tests/bench/ --benchmark-only --benchmark-compare=prev  # No regression
+
+# Tier 2 — Pre-release security
+trivy fs .                                      # No critical CVEs
+cyclonedx-bom -o sbom.json                      # SBOM generated
+pip-audit -r requirements.txt --desc            # Detailed vuln report
+
+# Tool-specific
+gitleaks detect --source .                      # 0 secrets in repo
+Gate Criteria:
+
+ruff = 0 errors
+mypy = 0 errors (strict mode)
+bandit = 0 high-severity findings
+coverage ≥ 80% (branch)
+pip-audit = 0 known vulnerabilities
+gitleaks = 0 secrets detected
+ALL unit + property + integration tests pass
+No benchmark regression > 20% from previous
+Cross-Reference: Kleppmann Principles → Code
+Kleppmann Principle	Code Location	Implementation
+Immutable event log (Ch.3)	src/data/event_log.py	market_events table: append-only, no UPDATE/DELETE
+Idempotent consumers (Ch.3)	EventLogWriter.append()	ON CONFLICT (event_id, event_time) DO NOTHING
+Schema evolution (Ch.4)	EventCodec	schema_version field + migration registry
+Fencing tokens (Ch.5)	LiveMarketFeed._epoch	Monotonic counter on each WS reconnect; stale ticks rejected
+Backpressure (Ch.4)	TickRingBuffer	Fixed-capacity ring buffer; drop oldest on overflow
+Log-structured writes (Ch.3)	EventLogWriter.flush()	Batch COPY-style bulk inserts
+Derived views from log (Ch.3)	fo_options_eod, cm_spot_eod, greeks_snapshot	Populated from event log; event log is source of truth
+Compaction (Ch.3)	v_tick_1min_ohlcv, v_daily_oi_summary	TimescaleDB continuous aggregates
+Fault categorization (Ch.5)	All pipeline classes	Network errors → retry; data errors → log + skip; system errors → escalate
+Single-writer consistency (Ch.5)	LiveMarketFeed	One writer process → event log; multiple reader projections
+Dependency Resolution Summary
+Original	Corrected	Reason
+vollib	py_vollib>=1.0.12	PyPI package name; import py_vollib
+from vollib.black_scholes...	from py_vollib.black_scholes...	Import path
+psycopg2-binary	psycopg[binary]>=3.1	Async support; modern API; consistent with Phase 0
+newspaper3k	newspaper4k	Deprecated; API-compatible fork
+today in compute function	as_of_date: date parameter	Explicit parameter for backtesting correctness
+Hardcoded risk_free_rate=0.065	RiskFreeRateProvider with config switch	Dual method + fallback
+No event log	market_events append-only table	Kleppmann Ch.3: log as source of truth
+No idempotency	ingest_id + ON CONFLICT DO NOTHING	Kleppmann Ch.3: exactly-once semantics
+No backpressure	TickRingBuffer with drop-oldest	Kleppmann Ch.4: handle overload gracefully
+QuantLib not installed	In pyproject.toml core deps	pip install QuantLib>=1.36 (cp312 wheels on PyPI)
+Trivy not on PATH	winget install Aquasecurity.Trivy	Pre-flight step
+locust not installed	In pyproject.toml dev deps	pip install locust>=2.20

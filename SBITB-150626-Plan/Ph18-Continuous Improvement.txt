@@ -1,0 +1,1646 @@
+================================================================================
+PHASE 18: CONTINUOUS IMPROVEMENT (ONGOING) — PRODUCTION-GRADE IMPLEMENTATION PLAN
+================================================================================
+Reference Standards: ISO/IEC 25010 (SQuaRE), NIST AI RMF 1.0, ML Maturity Model
+(谷歌 SRE Book Ch.17), MLOps Principles (Kreuzberger et al. 2023), SEC/FIATS
+Algorithmic Trading Audit Standards, ISACA COBIT 2019, NIST SP 800-53 Rev5,
+OWASP MASVS, Indian SEBI Circulars (MRD/DP/21/2012 + 2023 algo-trade norms).
+
+Suggested Books (Extractions Applied):
+  [B1] "Building Machine Learning Powered Applications" — Emmanuel Ameisen
+       (Ch.6: Continuous Learning & Data Pipeline Refresh)
+  [B2] "Designing Machine Learning Systems" — Chip Huyen
+       (Ch.3+9: Data Evolution, Monitoring, Continual Training)
+  [B3] "Options Trading in India" — S.L. Gupta + NSE India F&O Manual
+       (Strategy Definitions, OI-Based Selection, Margin Frameworks)
+  [B4] "Site Reliability Engineering" — Google SRE Team
+       (Ch.17: SRE Engagement Model, Ch.27: Release Engineering)
+  [B5] "Advances in Financial Machine Learning" — Marcos López de Prado
+       (Ch.11+12: Backtesting, Strategy Selection, Ensemble Methods)
+  [B6] "Secure by Design" — Dan Bergh Johnsson et al.
+       (Ch.4: Threat Modeling Continuous Pipelines)
+  [B7] "Option Volatility and Pricing" — Sheldon Natenberg
+       (Ch.8-11: Iron Condor, Calendar Spread, Ratio Spread Greeks)
+
+================================================================================
+STEP 1: PROJECT SCAFFOLDING & ENVIRONMENT BOOTSTRAP
+================================================================================
+
+INSTRUCTION 1.1 — Create Phase-18 Directory Structure
+------------------------------------------------------
+Create the following directory tree under "G:\OC\02June26\phase18_continuous_improvement\":
+
+  phase18_continuous_improvement/
+  ├── src/
+  │   ├── retraining/
+  │   │   ├── __init__.py
+  │   │   ├── drl_retrainer.py
+  │   │   ├── sentiment_updater.py
+  │   │   └── rag_knowledge_refresh.py
+  │   ├── audit/
+  │   │   ├── __init__.py
+  │   │   ├── strategy_audit.py
+  │   │   ├── system_audit.py
+  │   │   └── compliance_check.py
+  │   ├── strategies/
+  │   │   ├── __init__.py
+  │   │   ├── iron_condor.py
+  │   │   ├── calendar_spread.py
+  │   │   ├── ratio_spread.py
+  │   │   └── registry.py
+  │   ├── fno/
+  │   │   ├── __init__.py
+  │   │   ├── oi_scanner.py
+  │   │   ├── stock_fno_manager.py
+  │   │   └── margin_calculator.py
+  │   └── config/
+  │       ├── __init__.py
+  │       ├── settings.py
+  │       └── schedule.py
+  ├── tests/
+  │   ├── __init__.py
+  │   ├── test_drl_retrainer.py
+  │   ├── test_sentiment_updater.py
+  │   ├── test_rag_refresh.py
+  │   ├── test_iron_condor.py
+  │   ├── test_calendar_spread.py
+  │   ├── test_ratio_spread.py
+  │   ├── test_oi_scanner.py
+  │   ├── test_stock_fno.py
+  │   ├── test_strategy_audit.py
+  │   ├── test_system_audit.py
+  │   ├── test_compliance.py
+  │   ├── test_registry.py
+  │   ├── conftest.py
+  │   └── locustfile.py
+  ├── scripts/
+  │   ├── colab_retrain_notebook.ipynb
+  │   ├── quarterly_retrain.py
+  │   ├── monthly_rag_refresh.py
+  │   └── annual_audit.py
+  ├── configs/
+  │   ├── retrain_config.yaml
+  │   ├── strategies_config.yaml
+  │   ├── fno_config.yaml
+  │   └── audit_config.yaml
+  ├── pyproject.toml
+  ├── requirements.txt
+  ├── Makefile
+  ├── Dockerfile
+  ├── .pre-commit-config.yaml
+  ├── .secrets.baseline
+  └── SBOM/
+
+INSTRUCTION 1.2 — Initialize pyproject.toml with Production-Grade Metadata
+---------------------------------------------------------------------------
+Create pyproject.toml with:
+  [project] name="phase18_continuous_improvement", version="0.1.0",
+  requires-python=">=3.11,<3.13"
+  dependencies = [
+    "stable-baselines3>=2.3.0",
+    "shimmy>=1.3.0",
+    "gymnasium>=0.29.0",
+    "transformers>=4.40.0",
+    "datasets>=2.19.0",
+    "langchain>=0.2.0",
+    "langchain-community>=0.2.0",
+    "chromadb>=0.5.0",
+    "yfinance>=0.2.38",
+    "nsepy>=1.0.0 OR nsetools>=2.0.0",
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    "scikit-learn>=1.5.0",
+    "sqlalchemy>=2.0.0",
+    "pydantic>=2.7.0",
+    "pyyaml>=6.0",
+    "schedule>=1.2.0",
+    "httpx>=0.27.0",
+    "tenacity>=8.3.0",
+    "structlog>=24.1.0",
+    "cryptography>=42.0.0",
+  ]
+
+  [project.optional-dependencies]
+  dev = [
+    "pytest>=8.2.0",
+    "pytest-cov>=5.0.0",
+    "pytest-xdist>=3.6.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-benchmark>=4.0.0",
+    "pytest-mock>=3.14.0",
+    "hypothesis>=6.102.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "bandit[toml]>=1.7.0",
+    "pip-audit>=0.7.0",
+    "gitleaks>=8.18.0",
+    "cyclonedx-bom>=4.0.0",
+    "trivy>=0.51.0",
+    "locust>=2.28.0",
+    "pre-commit>=3.7.0",
+    "types-pyyaml",
+    "types-requests",
+  ]
+
+INSTRUCTION 1.3 — Create requirements.txt (pinned, hashed where possible)
+--------------------------------------------------------------------------
+Generate frozen requirements.txt from pyproject.toml with exact version pins.
+Run: pip-compile --generate-hashes pyproject.toml
+
+INSTRUCTION 1.4 — Create Virtual Environment & Install Dependencies
+----------------------------------------------------------------------
+Execute on Windows 11 PowerShell:
+  cd G:\OC\02June26\phase18_continuous_improvement
+  python -m venv .venv
+  .\.venv\Scripts\Activate.ps1
+  pip install --upgrade pip setuptools wheel
+  pip install -e ".[dev]"
+  pip-audit                  (verify zero known CVEs)
+  python -c "import stable_baselines3; import transformers; import chromadb"
+  (confirm all imports succeed — ZERO dependency conflicts)
+
+INSTRUCTION 1.5 — Create .pre-commit-config.yaml
+--------------------------------------------------
+Configure pre-commit hooks for:
+  - ruff (lint + format)
+  - mypy (type-check)
+  - bandit (security lint)
+  - gitleaks (secret detection)
+  - pip-audit (dependency CVE scan)
+  - pytest (fast unit gate)
+Run: pre-commit install
+
+================================================================================
+STEP 2: DRL AGENT QUARTERLY RETRAINING (GOOGLE COLAB T4)
+================================================================================
+
+Reference: [B2] Chip Huyen Ch.9 — Continual Training; [B5] López de Prado Ch.12
+
+INSTRUCTION 2.1 — Implement src/retraining/drl_retrainer.py
+-------------------------------------------------------------
+Class: DRLRetainer (inherits from pydantic BaseModel for config validation)
+
+  Fields (validated via pydantic):
+    - model_type: Literal["PPO", "SAC", "TD3", "DDPG"] = "PPO"
+    - total_timesteps: int = Field(ge=100_000, default=500_000)
+    - eval_episodes: int = Field(ge=10, default=100)
+    - reward_threshold: float = Field(gt=0.0, default=1.5)
+    - max_retrain_iterations: int = Field(ge=1, le=10, default=3)
+    - data_window_days: int = Field(ge=30, default=90)
+    - colab_gpu: Literal["T4", "V100", "A100"] = "T4"
+    - checkpoint_dir: Path
+    - retrain_trigger: Literal["scheduled", "drift_detected", "manual"]
+
+  Methods:
+    - load_latest_model(self) -> stable_baselines3.common.base_class.BaseAlgorithm
+      * Load from checkpoint_dir, raise FileNotFoundError if absent
+      * Validate model zip integrity before loading
+      * Wrap in try/except with structlog error logging
+
+    - detect_model_drift(self, recent_rewards: list[float]) -> bool
+      * Implement KL-divergence drift detection per [B2] Ch.9
+      * Compare recent episode reward distribution vs. baseline
+      * Trigger retrain if KL > threshold (configurable, default 0.15)
+      * Log drift metrics to structlog
+
+    - prepare_training_data(self, end_date: date) -> gymnasium.Env
+      * Fetch last N days of market data via httpx (NSE/BSE APIs)
+      * Apply feature engineering pipeline (returns, volatility, OI, Greeks)
+      * Wrap in custom gymnasium.Env with Indian market constraints:
+        - Lot sizes per NSE specifications
+        - Margin requirements per SEBI/Span margin
+        - Trading hours (9:15-15:30 IST)
+        - Circuit breaker rules
+      * Validate env observation/action spaces
+
+    - retrain(self, resume_from_checkpoint: bool = True) -> dict
+      * Main retrain orchestration
+      * If resume_from_checkpoint: load existing model, continue training
+      * Else: initialize fresh model
+      * Train with EvalCallback (eval_freq=5000, n_eval_episodes=eval_episodes)
+      * Save checkpoints every 50k steps
+      * After training, run eval_episodes; if mean_reward < reward_threshold,
+        re-train up to max_retrain_iterations
+      * Return metrics dict: {"mean_reward", "std_reward", "timesteps",
+        "drift_before", "drift_after", "retrain_iterations", "model_version"}
+      * All exceptions caught, logged via structlog, re-raised as
+        DRLRetrainError (custom exception)
+
+    - export_for_colab(self, output_path: Path) -> None
+      * Serialize model + config + normalization stats into .zip
+      * Generate Google Colab notebook (scripts/colab_retrain_notebook.ipynb)
+        with cells for:
+          1. T4 GPU check (torch.cuda.is_available())
+          2. Dependency install (!pip install stable-baselines3[extra])
+          3. Data download from cloud storage
+          4. Model retrain loop with EvalCallback
+          5. TensorBoard logging
+          6. Export updated model back to cloud
+      * Validate .zip integrity post-creation
+
+    - validate_retrained_model(self, old_model_path: Path, new_model_path: Path)
+        -> bool
+      * Backtest both models on same OOS window (last 30 days)
+      * Per [B5] Ch.12: Use combinatorial purged cross-validation
+      * New model must pass all checks:
+        1. Sharpe ratio >= old model's Sharpe - 0.1 (no regression)
+        2. Max drawdown <= old model's max DD + 0.02
+        3. Win rate >= old model's win rate - 0.05
+        4. No NaN/Inf in predictions
+      * If any check fails: log warning, keep old model, flag for review
+      * Return True only if all checks pass
+
+INSTRUCTION 2.2 — Create scripts/colab_retrain_notebook.ipynb
+--------------------------------------------------------------
+Generate Jupyter notebook with nbformat containing:
+  Cell 1 [markdown]: "Phase 18 — DRL Quarterly Retrain (T4 GPU)"
+  Cell 2 [code]: # Install dependencies
+  Cell 3 [code]: # Verify T4 GPU — assert torch.cuda.get_device_name() == "Tesla T4"
+  Cell 4 [code]: # Mount Google Drive for data/model persistence
+  Cell 5 [code]: # Load model + data
+  Cell 6 [code]: # Train with EvalCallback, log to TensorBoard
+  Cell 7 [code]: # Validate against baseline metrics
+  Cell 8 [code]: # Export updated model to Drive
+  Cell 9 [markdown]: "Post-retrain: Download model and deploy to production server"
+
+INSTRUCTION 2.3 — Create scripts/quarterly_retrain.py
+------------------------------------------------------
+CLI script using argparse:
+  --mode [auto|manual|drift_only]
+  --model-type [PPO|SAC|TD3|DDPG]
+  --timesteps (int)
+  --dry-run (bool)
+
+Workflow:
+  1. Load config from configs/retrain_config.yaml
+  2. Initialize DRLRetainer
+  3. If mode=auto: check schedule + drift detection
+  4. If mode=drift_only: only retrain if drift detected
+  5. If mode=manual: force retrain
+  6. Execute retrain()
+  7. Validate retrained model
+  8. If valid: promote new model to production checkpoint_dir
+  9. If invalid: rollback, alert via structlog + optional webhook
+  10. Generate retrain report (JSON) with all metrics
+
+INSTRUCTION 2.4 — Create configs/retrain_config.yaml
+-----------------------------------------------------
+  drl_retrainer:
+    model_type: "PPO"
+    total_timesteps: 500000
+    eval_episodes: 100
+    reward_threshold: 1.5
+    max_retrain_iterations: 3
+    data_window_days: 90
+    checkpoint_dir: "./checkpoints/drl"
+    drift_threshold_kl: 0.15
+    schedule_cron: "0 0 1 */3 *"    # Quarterly (Jan, Apr, Jul, Oct 1st)
+    colab_gpu: "T4"
+    validation:
+      min_sharpe_delta: -0.1
+      max_drawdown_delta: 0.02
+      min_winrate_delta: -0.05
+    rollback_on_failure: true
+    alert_webhook: "${DRL_ALERT_WEBHOOK}"  # From env var, never hardcoded
+
+================================================================================
+STEP 3: SENTIMENT MODEL UPDATE WITH NEW INDIAN MARKET NEWS
+================================================================================
+
+Reference: [B1] Ameisen Ch.6 — Continuous Learning; [B2] Huyen Ch.3 — Data
+           Evolution; NSE India News Data Guidelines
+
+INSTRUCTION 3.1 — Implement src/retraining/sentiment_updater.py
+----------------------------------------------------------------
+Class: SentimentUpdater (pydantic BaseModel)
+
+  Fields:
+    - model_name: str = "finiteautomata/bertweet-base-sentiment-analy"
+    - indian_market_model: str = "custom/indian-market-sentiment-v2"
+    - data_sources: list[Literal["moneycontrol", "economictimes",
+        "livemint", "ndtv_profit", "reuters_india"]]
+    - min_new_articles: int = Field(ge=100, default=500)
+    - fine_tune_epochs: int = Field(ge=1, le=10, default=3)
+    - learning_rate: float = Field(gt=0.0, default=2e-5)
+    - batch_size: int = Field(ge=8, default=16)
+    - validation_split: float = Field(gt=0.0, lt=1.0, default=0.2)
+    - checkpoint_dir: Path
+    - label_schema: list[str] = ["bullish", "bearish", "neutral"]
+
+  Methods:
+    - fetch_new_articles(self, since: datetime) -> datasets.Dataset
+      * Scrape/configure API calls to each data_source via httpx
+      * Apply rate limiting with tenacity (retry + backoff)
+      * Filter for Indian market keywords: NIFTY, SENSEX, RBI, SEBI,
+        F&O, quarterly results, corporate actions, IPO, etc.
+      * Deduplicate by URL + title similarity (cosine > 0.95)
+      * Return HuggingFace Dataset with columns: text, source, date, url
+
+    - label_articles(self, dataset: Dataset) -> Dataset
+      * Use existing model for pseudo-labeling on high-confidence samples
+      * Flag low-confidence (< 0.7) for manual review
+      * Apply Indian market sentiment heuristics:
+        - RBI rate hike → bearish bias
+        - FII net buyer → bullish bias
+        - DII net seller → mixed signal
+        - Earnings beat → bullish for sector
+      * Validate label distribution (no class > 70% without flagging)
+
+    - fine_tune(self, labelled_data: Dataset) -> dict
+      * Load base model + tokenizer
+      * Apply LoRA/PEFT for parameter-efficient fine-tuning
+      * Split into train/val per validation_split
+      * Train with HuggingFace Trainer, early stopping (patience=2)
+      * Evaluate on held-out validation set
+      * Metrics: accuracy, F1 (macro), precision, recall per class
+      * Save model + tokenizer + label encoder to checkpoint_dir
+      * Return metrics dict
+
+    - validate_updated_model(self) -> bool
+      * Compare new model vs. old on curated Indian market test set
+      * Test set: 500 manually verified articles (curated quarterly)
+      * Must meet:
+        1. Macro F1 >= old model F1 - 0.02
+        2. No class precision < 0.7
+        3. Calibration error (ECE) <= 0.1
+      * Log confusion matrix to structlog
+      * Return True only if all thresholds met
+
+    - update_production_model(self) -> None
+      * Atomic swap: write new model to temp dir, rename to production path
+      * Invalidate any caching layers
+      * Log model version transition
+      * If swap fails: rollback to previous model immediately
+
+INSTRUCTION 3.2 — Create Sentiment Update Schedule
+----------------------------------------------------
+In src/config/schedule.py:
+  - Define SENTIMENT_UPDATE_CRON = "0 2 1 */3 *" (quarterly, 2 AM IST)
+  - Register with schedule library or APScheduler
+  - Include health-check endpoint for monitoring
+
+================================================================================
+STEP 4: RAG KNOWLEDGE BASE MONTHLY REVIEW
+================================================================================
+
+Reference: [B2] Huyen Ch.9 — Monitoring; LangChain Production Best Practices
+
+INSTRUCTION 4.1 — Implement src/retraining/rag_knowledge_refresh.py
+--------------------------------------------------------------------
+Class: RAGKnowledgeRefresher (pydantic BaseModel)
+
+  Fields:
+    - vector_store_path: Path
+    - embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    - chunk_size: int = Field(ge=100, le=2000, default=512)
+    - chunk_overlap: int = Field(ge=0, default=50)
+    - knowledge_sources: list[str] = [
+        "SEBI circulars", "RBI monetary policy", "NSE bulletins",
+        "BSE notices", "corporate actions", "economic indicators",
+        "futures & options data", "sector analysis reports"]
+    - max_document_age_days: int = Field(ge=30, default=365)
+    - similarity_threshold: float = Field(gt=0.0, lt=1.0, default=0.85)
+    - collection_name: str = "indian_market_knowledge"
+
+  Methods:
+    - scan_stale_documents(self) -> list[dict]
+      * Query ChromaDB for documents older than max_document_age_days
+      * Check source URLs for updates (ETag/Last-Modified via httpx HEAD)
+      * Return list of stale/outdated documents with metadata
+
+    - fetch_updated_documents(self, stale_docs: list[dict]) -> list[Document]
+      * Re-download updated versions from sources
+      * Extract text from PDF, HTML, plain text
+      * Apply Indian market context tagging (NSE/BSE/SEBI category)
+      * Validate document integrity (non-empty, valid encoding, no corruption)
+
+    - deduplicate_and_chunk(self, documents: list[Document]) -> list[Document]
+      * Embed all documents, find near-duplicates (cosine > similarity_threshold)
+      * Remove duplicates, keep most recent
+      * Split into chunks with RecursiveCharacterTextSplitter
+        (chunk_size, chunk_overlap)
+      * Attach metadata: source, date, category, version
+
+    - update_vector_store(self, chunks: list[Document]) -> dict
+      * Delete stale document chunks from ChromaDB
+      * Insert new/updated chunks
+      * Persist vector store to disk
+      * Validate: query test questions, verify retrieval quality
+        (must return relevant docs for 10 pre-defined test queries)
+      * Return stats: {"added", "deleted", "updated", "total_chunks",
+        "validation_pass"}
+
+    - generate_knowledge_report(self) -> dict
+      * Count documents by source, category, age distribution
+      * Identify gaps (sources with no recent updates > 60 days)
+      * Compute embedding coverage statistics
+      * Return structured report dict
+
+INSTRUCTION 4.2 — Create scripts/monthly_rag_refresh.py
+--------------------------------------------------------
+CLI script:
+  --config (path to configs/retrain_config.yaml RAG section)
+  --dry-run (bool)
+  --force (bool — bypass staleness check)
+
+Workflow:
+  1. Load config
+  2. Initialize RAGKnowledgeRefresher
+  3. Scan for stale documents
+  4. Fetch updates (with dry-run support)
+  5. Deduplicate and chunk
+  6. Update vector store
+  7. Validate retrieval quality
+  8. Generate and save knowledge report
+  9. All operations logged via structlog
+
+INSTRUCTION 4.3 — RAG Schedule in schedule.py
+----------------------------------------------
+RAG_REFRESH_CRON = "0 3 1 * *"  (monthly, 1st at 3 AM IST)
+
+================================================================================
+STEP 5: ANNUAL STRATEGY REVIEW + SYSTEM AUDIT
+================================================================================
+
+Reference: [B4] Google SRE Ch.27 — Release Engineering; ISACA COBIT 2019;
+           NIST SP 800-53 Rev5 AU (Audit Family); SEBI Algo-Trading Audit Norms
+
+INSTRUCTION 5.1 — Implement src/audit/strategy_audit.py
+--------------------------------------------------------
+Class: StrategyAuditor (pydantic BaseModel)
+
+  Fields:
+    - audit_period: tuple[date, date]
+    - strategies_under_review: list[str]
+    - performance_thresholds: dict  (sharpe, max_dd, win_rate, profit_factor)
+    - compliance_checklist: list[str]
+    - report_output_dir: Path
+
+  Methods:
+    - audit_strategy_performance(self) -> dict
+      * For each strategy in strategies_under_review:
+        - Compute: CAGR, Sharpe, Sortino, max drawdown, win rate,
+          avg win/loss ratio, profit factor, Calmar ratio
+        - Benchmark against NIFTY50 buy-and-hold over same period
+        - Flag strategies below performance_thresholds
+        - Per [B5] Ch.12: apply deflated Sharpe ratio to account for
+          multiple testing bias
+      * Return per-strategy audit dict
+
+    - audit_risk_compliance(self) -> dict
+      * Check SEBI compliance:
+        - Position size limits per lot/contract
+        - Margin utilization vs. available margin
+        - Concentration risk (single stock > 20% of portfolio)
+        - Intraday vs. positional margin rules
+      * Check internal risk limits:
+        - Max daily loss, max weekly loss, max position per strategy
+        - Correlation between strategies (no two > 0.8 correlation)
+      * Return compliance report dict with pass/fail per check
+
+    - generate_annual_report(self) -> Path
+      * Compile strategy performance + risk compliance into PDF/HTML
+      * Include: executive summary, per-strategy breakdowns, risk metrics,
+        compliance status, recommendations, action items
+      * Save to report_output_dir/annual_audit_{year}.pdf
+      * Return path to generated report
+
+INSTRUCTION 5.2 — Implement src/audit/system_audit.py
+------------------------------------------------------
+Class: SystemAuditor (pydantic BaseModel)
+
+  Fields:
+    - components: list[str] = ["drl_agent", "sentiment", "rag", "execution",
+        "risk_manager", "data_pipeline", "monitoring"]
+    - health_check_timeout: int = 30  (seconds)
+    - uptime_threshold: float = 0.999  (99.9%)
+
+  Methods:
+    - audit_infrastructure(self) -> dict
+      * Verify all services are running and healthy
+      * Check: disk space (>20% free), memory (>30% free), CPU (<80% avg)
+      * Verify database connectivity and query latency (<100ms)
+      * Verify API endpoints (NSE, broker) are reachable
+      * Check SSL/TLS certificate expiry (>30 days)
+      * Return component health dict
+
+    - audit_security(self) -> dict
+      * Run bandit scan on codebase, collect findings
+      * Run pip-audit for dependency vulnerabilities
+      * Run gitleaks for secret detection in git history
+      * Run trivy for container/image vulnerabilities
+      * Verify .secrets.baseline has no unacknowledged secrets
+      * Check file permissions on config/key directories
+      * Return security findings dict with severity levels
+
+    - audit_data_quality(self) -> dict
+      * Check for data gaps in market data (missing candles)
+      * Verify data freshness (last update < 24 hours for daily data)
+      * Cross-validate prices across sources
+      * Check for NaN/Inf/zero values in critical fields
+      * Return data quality report dict
+
+    - generate_system_audit_report(self) -> Path
+      * Compile infrastructure + security + data quality audits
+      * Include: uptime SLA compliance, MTTR metrics, incident log
+      * Save to report_output_dir/system_audit_{year}.pdf
+      * Return path
+
+INSTRUCTION 5.3 — Implement src/audit/compliance_check.py
+----------------------------------------------------------
+Class: ComplianceChecker
+
+  Methods:
+    - check_sebi_compliance(self) -> ComplianceReport
+      * Verify algorithmic trading registration (SEBI)
+      * Check order-to-trade ratio (< threshold per SEBI norms)
+      * Verify risk management framework per SEBI 2023 circular
+      * Check timestamping accuracy (IST with NTP sync)
+      * Audit trail completeness (all orders logged with reason codes)
+
+    - check_dpdpa_compliance(self) -> ComplianceReport
+      * Digital Personal Data Protection Act 2023
+      * Verify consent for any personal data processed
+      * Check data retention policies
+      * Verify data deletion capabilities
+
+    - run_full_compliance_audit(self) -> dict
+      * Aggregate all compliance checks
+      * Return structured report with pass/fail/warning per item
+
+INSTRUCTION 5.4 — Create scripts/annual_audit.py
+-------------------------------------------------
+CLI script:
+  --year (int)
+  --components (comma-separated, default: all)
+  --output-format [pdf|html|json]
+  --skip-security (bool)
+
+Workflow:
+  1. Initialize StrategyAuditor, SystemAuditor, ComplianceChecker
+  2. Run all audits
+  3. Compile into unified annual report
+  4. Save to configs/audit_config.yaml → report_output_dir
+  5. Alert on any critical findings
+
+INSTRUCTION 5.5 — Create configs/audit_config.yaml
+---------------------------------------------------
+  strategy_audit:
+    performance_thresholds:
+      min_sharpe: 1.0
+      max_drawdown: 0.20
+      min_win_rate: 0.45
+      min_profit_factor: 1.2
+    benchmark: "NIFTY50"
+    deflated_sharpe_enabled: true
+
+  system_audit:
+    uptime_threshold: 0.999
+    health_check_timeout: 30
+    disk_space_min_pct: 20
+    memory_min_pct: 30
+    cpu_max_avg_pct: 80
+
+  compliance:
+    sebi_registration_id: "${SEBI_REG_ID}"
+    order_to_trade_ratio_max: 50.0
+    audit_trail_retention_days: 3650   # 10 years per SEBI
+    dpdpa_consent_required: true
+
+  reporting:
+    output_dir: "./reports/annual_audit"
+    format: "pdf"
+    retention_days: 3650
+
+================================================================================
+STEP 6: ADD NEW STRATEGIES — IRON CONDOR, CALENDAR SPREAD, RATIO SPREADS
+================================================================================
+
+Reference: [B3] NSE F&O Manual; [B7] Natenberg Ch.8-11 (Greeks & Strategy
+           Structure); Indian market lot sizes & margin requirements
+
+INSTRUCTION 6.1 — Implement src/strategies/iron_condor.py
+----------------------------------------------------------
+Class: IronCondorStrategy (pydantic BaseModel)
+
+  Per [B7] Ch.9 — Iron Condor = Bull Put Spread + Bear Call Spread
+
+  Fields:
+    - underlying: str (e.g., "NIFTY", "BANKNIFTY")
+    - expiry: date
+    - wing_width_pct: float = Field(gt=0, default=2.0)   # % from ATM
+    - short_put_delta: float = Field(ge=-1.0, lt=0, default=-0.20)
+    - short_call_delta: float = Field(gt=0, le=1.0, default=0.20)
+    - long_put_delta: float = Field(ge=-1.0, lt=-0.20, default=-0.10)
+    - long_call_delta: float = Field(gt=0.20, le=1.0, default=0.10)
+    - lot_size: int = Field(gt=0)          # Populated from NSE spec
+    - margin_pct: float = Field(gt=0, default=1.0)  # SPAN + exposure margin
+    - max_profit_pct: float (computed)
+    - max_loss_pct: float (computed)
+    - breakeven_points: tuple[float, float] (computed)
+
+  Methods:
+    - validate_strike_selection(self, spot: float, chain: dict) -> bool
+      * Verify strikes exist in NSE option chain
+      * Verify strikes have sufficient liquidity (OI > 10000, volume > 100)
+      * Verify wing widths are consistent
+      * Verify net premium is positive (credit spread)
+      * Raise IronCondorValidationError if any check fails
+
+    - compute_greeks(self, spot: float, iv_surface: dict) -> Greeks
+      * Compute net delta, gamma, theta, vega for the 4-leg position
+      * Use Black-Scholes with Indian market adjustments:
+        - Risk-free rate: RBI 91-day T-bill yield
+        - Dividend yield: NIFTY50 dividend yield
+        - Settlement: T+1 for options
+      * Return Greeks dataclass
+
+    - compute_margin(self) -> float
+      * Calculate SPAN margin + exposure margin per NSE framework
+      * Validate against broker API (if available) or NSE margin calculator
+      * Apply margin buffer of 10% for safety
+      * Return total margin required per lot
+
+    - generate_order_legs(self) -> list[OrderLeg]
+      * Return 4 OrderLeg objects:
+        1. SELL PUT (short_put_strike)
+        2. BUY PUT (long_put_strike, further OTM)
+        3. SELL CALL (short_call_strike)
+        4. BUY CALL (long_call_strike, further OTM)
+      * Each OrderLeg: symbol, side, strike, option_type, quantity, order_type
+      * Validate: net order = credit (premium received > 0)
+
+    - risk_assessment(self, spot: float, scenarios: list[dict]) -> RiskReport
+      * P&L at: current spot, ±1σ, ±2σ, ±3σ moves
+      * Max profit zone (between short strikes)
+      * Max loss zones (beyond long strikes)
+      * Probability of profit (POP) using lognormal distribution
+      * Return RiskReport dataclass
+
+    - should_adjust(self, current_spot: float, days_to_expiry: int,
+        net_delta: float) -> AdjustAction
+      * Adjustment rules:
+        - If days_to_expiry < 7 and net_delta > 0.15: roll tested side
+        - If loss > 50% of max profit: close or roll
+        - If IV rank drops below 25: consider closing early
+      * Return AdjustAction enum: HOLD, ROLL, CLOSE, ADJUST
+
+INSTRUCTION 6.2 — Implement src/strategies/calendar_spread.py
+--------------------------------------------------------------
+Class: CalendarSpreadStrategy (pydantic BaseModel)
+
+  Per [B7] Ch.10 — Calendar Spread = Sell near-term + Buy far-term same strike
+
+  Fields:
+    - underlying: str
+    - near_expiry: date
+    - far_expiry: date
+    - strike: float
+    - option_type: Literal["CE", "PE"]
+    - lot_size: int
+    - min_days_between_expiries: int = Field(ge=7, default=14)
+    - iv_rank_entry_threshold: float = Field(ge=0, le=100, default=50)
+
+  Methods:
+    - validate_expiry_pair(self) -> bool
+      * Verify near_expiry < far_expiry
+      * Verify at least min_days_between_expiries between them
+      * Verify both are valid NSE expiry dates (Thu for weekly, last Thu for monthly)
+      * Verify both expiries have available option chain data
+      * Raise CalendarSpreadValidationError if invalid
+
+    - compute_greeks(self, spot: float, near_iv: float, far_iv: float) -> Greeks
+      * Compute per-leg and net Greeks
+      * Key: positive vega (profit from IV expansion), positive theta
+      * Warn if near_iv > far_iv (invert calendar — unusual, needs flag)
+
+    - compute_margin(self) -> float
+      * NSE margin for calendar spread (reduced due to offsetting positions)
+      * Typically: far leg premium + % of near leg
+      * Query NSE margin calculator API if available
+
+    - generate_order_legs(self) -> list[OrderLeg]
+      * 2 OrderLeg objects:
+        1. SELL near-expiry option at strike
+        2. BUY far-expiry option at same strike
+      * Validate net debit (calendar = debit spread)
+
+    - risk_assessment(self, spot: float, scenarios: list[dict]) -> RiskReport
+      * P&L at various spot moves and IV changes
+      * Highlight: profit max at strike if near expires worthless
+      * Risk: large adverse move + IV crush
+      * POP using lognormal + vol surface assumptions
+
+    - should_roll(self, near_expiry_dte: int, pnl_pct: float) -> RollAction
+      * If near_expiry_dte <= 3 and profit > 50%: take profit or roll
+      * If near option ITM and DTE < 5: roll to avoid assignment risk
+      * Return RollAction: HOLD, TAKE_PROFIT, ROLL_NEAR, CLOSE_ALL
+
+INSTRUCTION 6.3 — Implement src/strategies/ratio_spread.py
+-----------------------------------------------------------
+Class: RatioSpreadStrategy (pydantic BaseModel)
+
+  Per [B7] Ch.11 — Ratio Spread = Buy 1 ATM + Sell N OTM (N > 1, typically 2:1)
+
+  Fields:
+    - underlying: str
+    - expiry: date
+    - long_strike: float
+    - short_strike: float
+    - ratio: int = Field(ge=2, le=5, default=2)  # e.g., 2 = 1:2 ratio
+    - option_type: Literal["CE", "PE"]
+    - lot_size: int
+    - max_risk_multiplier: float = Field(gt=0, default=3.0)
+
+  Methods:
+    - validate_ratio_and_strikes(self, spot: float) -> bool
+      * For call ratio: short_strike > long_strike > spot (front spread)
+        OR long_strike near ATM, short_strike OTM (back spread variant)
+      * For put ratio: inverse logic
+      * Verify ratio is supported (2:1, 3:1, 3:2)
+      * Verify sufficient OI at short strikes
+      * Verify net credit or acceptable net debit
+      * Raise RatioSpreadValidationError if invalid
+
+    - compute_greeks(self, spot: float, iv: float) -> Greeks
+      * Net position Greeks accounting for ratio
+      * Critical: unlimited risk on upside (call ratio) or downside (put ratio)
+      * Compute delta-neutral point
+      * Compute max profit point and max loss scenarios
+
+    - compute_margin(self) -> float
+      * Margin = max(unlimited risk cushion, SPAN requirement)
+      * Apply max_risk_multiplier * max_profit as minimum margin
+      * Warn if margin exceeds 2x the margin of a simple spread
+
+    - generate_order_legs(self) -> list[OrderLeg]
+      * For 1:2 call ratio spread:
+        1. BUY 1 lot at long_strike CE
+        2. SELL 2 lots at short_strike CE
+      * Validate net position: typically credit for front spreads
+
+    - risk_assessment(self, spot: float, scenarios: list[dict]) -> RiskReport
+      * P&L at: current spot, long strike, short strike, ±2σ, ±3σ
+      * CRITICAL: highlight unlimited risk zone beyond short strike
+      * Compute: max profit, break-even, worst-case loss
+      * POP with explicit warning about tail risk
+      * Flag if max_loss > max_risk_multiplier * max_profit
+
+INSTRUCTION 6.4 — Implement src/strategies/registry.py
+-------------------------------------------------------
+Class: StrategyRegistry
+
+  Fields:
+    - _strategies: dict[str, type]  # name → strategy class mapping
+
+  Methods:
+    - register(self, name: str, strategy_class: type) -> None
+      * Validate strategy_class has required interface methods
+      * Check for duplicate registration
+      * Add to _strategies dict
+
+    - get(self, name: str) -> type
+      * Lookup strategy by name
+      * Raise StrategyNotFoundError if absent
+
+    - list_all(self) -> list[StrategyInfo]
+      * Return all registered strategies with metadata
+      * Include: name, description, risk_profile, market_outlook, complexity
+
+    - validate_all(self) -> list[ValidationResult]
+      * Run validation on all registered strategies
+      * Return list of pass/fail per strategy
+
+  Pre-registered strategies:
+    - "iron_condor" → IronCondorStrategy
+    - "calendar_spread" → CalendarSpreadStrategy
+    - "ratio_spread" → RatioSpreadStrategy
+
+INSTRUCTION 6.5 — Create configs/strategies_config.yaml
+--------------------------------------------------------
+  strategies:
+    iron_condor:
+      enabled: true
+      underlyings: ["NIFTY", "BANKNIFTY"]
+      entry_conditions:
+        iv_rank_min: 30
+        iv_rank_max: 70
+        days_to_expiry_min: 20
+        days_to_expiry_max: 45
+        min_oi: 10000
+      risk:
+        max_loss_per_trade_pct: 2.0
+        adjustment_threshold_delta: 0.15
+        stop_loss_pct: 50
+      exit_conditions:
+        profit_target_pct: 50
+        dte_close_min: 5
+
+    calendar_spread:
+      enabled: true
+      underlyings: ["NIFTY", "BANKNIFTY"]
+      entry_conditions:
+        iv_rank_min: 25
+        days_between_expiries_min: 14
+        min_oi: 5000
+      risk:
+        max_loss_per_trade_pct: 1.5
+        assignment_risk_dte: 5
+      exit_conditions:
+        profit_target_pct: 50
+        near_dte_close: 3
+
+    ratio_spread:
+      enabled: true
+      underlyings: ["NIFTY", "BANKNIFTY"]
+      entry_conditions:
+        ratio: 2
+        max_net_debit_pct: 1.0
+        min_oi: 10000
+      risk:
+        max_loss_per_trade_pct: 2.0
+        max_risk_multiplier: 3.0
+        tail_risk_alert: true
+      exit_conditions:
+        profit_target_pct: 60
+        stop_loss_pct: 200
+
+================================================================================
+STEP 7: ADD STOCK F&O (TOP 20 BY OI)
+================================================================================
+
+Reference: [B3] NSE India F&O Manual — Stock F&O Lot Sizes & Margins;
+           SEBI Circular on Stock F&O Eligibility Criteria
+
+INSTRUCTION 7.1 — Implement src/fno/oi_scanner.py
+--------------------------------------------------
+Class: OIScanner (pydantic BaseModel)
+
+  Fields:
+    - top_n: int = Field(ge=5, le=50, default=20)
+    - min_oi: int = Field(ge=0, default=100000)
+    - scan_interval_minutes: int = Field(ge=1, default=60)
+    - data_source: Literal["nse_api", "broker_api", "csv_cache"]
+
+  Methods:
+    - scan_top_by_oi(self) -> list[OIResult]
+      * Fetch NSE F&O OI data via httpx to NSE API
+        URL: https://www.nseindia.com/api/live-analysis-oi-data
+      * Apply rate limiting, retry with tenacity (3 retries, backoff)
+      * Filter: only F&O stocks (not index), OI >= min_oi
+      * Sort by total OI (CE + PE) descending
+      * Return top_n results as list[OIResult]
+      * OIResult: symbol, total_oi, ce_oi, pe_oi, oi_change_pct, volume
+
+    - get_oi_history(self, symbol: str, days: int = 30) -> pd.DataFrame
+      * Fetch historical OI for symbol
+      * Return DataFrame: date, ce_oi, pe_oi, total_oi, oi_change
+
+    - detect_oi_anomalies(self, symbol: str) -> list[OIAnomaly]
+      * Detect: sudden OI spike (>3σ from mean), OI buildup with price
+        divergence, aggressive OI addition at strikes (support/resistance)
+      * Return list of anomalies with severity
+
+    - should_update_top20(self) -> bool
+      * Compare current top 20 with stored top 20
+      * If > 3 symbols changed: trigger update
+      * Log changes via structlog
+
+INSTRUCTION 7.2 — Implement src/fno/stock_fno_manager.py
+---------------------------------------------------------
+Class: StockFnoManager (pydantic BaseModel)
+
+  Fields:
+    - tracked_stocks: list[str] = []  # Populated from OI scan
+    - lot_sizes: dict[str, int]       # From NSE spec
+    - margin_requirements: dict[str, float]
+    - circuit_limits: dict[str, tuple[float, float]]
+    - max_stocks: int = Field(ge=5, le=50, default=20)
+
+  Methods:
+    - update_tracked_stocks(self, oi_results: list[OIResult]) -> dict
+      * Replace tracked_stocks with top 20 from OI scan
+      * Fetch and update lot_sizes from NSE (per [B3]):
+        - Reliance: 250, HDFCBank: 550, ICICIBank: 700, etc.
+      * Fetch and update margin_requirements per SPAN calculator
+      * Fetch and update circuit_limits (5%, 10%, 20% per SEBI rules)
+      * Return change report: {"added", "removed", "lot_size_updates"}
+
+    - validate_stock_for_strategy(self, symbol: str,
+        strategy_type: str) -> bool
+      * Check: symbol is in tracked_stocks
+      * Check: lot_size available for symbol
+      * Check: sufficient liquidity (OI + volume thresholds)
+      * Check: margin within limits
+      * Check: no corporate action blackout (dividend, split, bonus)
+      * Return True only if all checks pass
+
+    - get_stock_metadata(self, symbol: str) -> StockFnoMetadata
+      * Return: symbol, lot_size, margin, circuit_limits,
+        sector, market_cap_category, fno_listing_date
+      * Raise StockNotFoundError if symbol not in tracked_stocks
+
+    - get_eligible_stocks_for_strategy(self, strategy_type: str)
+        -> list[str]
+      * Filter tracked_stocks by strategy eligibility
+      * E.g., iron_condor: need weekly + monthly expiry availability
+      * E.g., calendar spread: need multiple expiry availability
+      * Return filtered list
+
+INSTRUCTION 7.3 — Implement src/fno/margin_calculator.py
+---------------------------------------------------------
+Class: MarginCalculator
+
+  Methods:
+    - calculate_span_margin(self, positions: list[Position]) -> float
+      * Simplified SPAN margin calculation per NSE framework:
+        - Scan risk = max(loss across scenarios)
+        - Scenarios: price up/down by 3σ, vol up/down by 3σ
+        - Short option minimum charge
+        - Inter-commodity spread credit
+      * Return total SPAN margin
+
+    - calculate_exposure_margin(self, positions: list[Position]) -> float
+      * Exposure margin = % of MTM loss (typically 3% for options)
+      * Apply per NSE specification for each position type
+
+    - calculate_total_margin(self, positions: list[Position]) -> MarginBreakdown
+      * Total = SPAN + Exposure + Premium (for buy positions)
+      * Apply margin benefits for spread positions:
+        - Iron condor: only max risk of either wing
+        - Calendar spread: reduced margin per NSE offset benefit
+        - Ratio spread: SPAN + exposure with short option charge
+      * Return MarginBreakdown: span, exposure, premium, total, benefit
+
+    - validate_margin_available(self, required: float, available: float)
+        -> bool
+      * Check required <= available * 0.80 (keep 20% buffer)
+      * Raise InsufficientMarginError if not
+
+INSTRUCTION 7.4 — Create configs/fno_config.yaml
+-------------------------------------------------
+  oi_scanner:
+    top_n: 20
+    min_oi: 100000
+    scan_interval_minutes: 60
+    data_source: "nse_api"
+    anomaly_detection_sigma: 3.0
+
+  stock_fno:
+    max_stocks: 20
+    default_lot_sizes:
+      RELIANCE: 250
+      HDFCBANK: 550
+      ICICIBANK: 700
+      INFY: 600
+      TCS: 150
+      KOTAKBANK: 400
+      AXISBANK: 1200
+      LT: 150
+      SBIN: 1500
+      BHARTIARTL: 650
+      ITC: 1600
+      HCLTECH: 350
+      ASIANPAINT: 200
+      BAJFINANCE: 250
+      MARUTI: 50
+      SUNPHARMA: 1400
+      TITAN: 175
+      WIPRO: 1500
+      HINDUNILVR: 500
+      ULTRACEMCO: 200
+    circuit_limit_pct: 10.0
+    corporate_action_blackout_days: 3
+
+  margin:
+    span_scenario_sigma: 3.0
+    exposure_margin_pct: 3.0
+    buffer_pct: 20.0
+    spread_benefit_enabled: true
+
+================================================================================
+STEP 8: CENTRALIZED CONFIG & SCHEDULING
+================================================================================
+
+INSTRUCTION 8.1 — Implement src/config/settings.py
+----------------------------------------------------
+Class: Phase18Settings (pydantic-settings BaseSettings)
+
+  Fields (all from environment variables with .env fallback):
+    - PROJECT_ROOT: Path
+    - LOG_LEVEL: Literal["DEBUG","INFO","WARNING","ERROR"] = "INFO"
+    - NSE_API_BASE_URL: str = "https://www.nseindia.com"
+    - BROKER_API_KEY: str (from env, validated non-empty)
+    - BROKER_API_SECRET: str (from env, validated non-empty)
+    - DRL_CHECKPOINT_DIR: Path
+    - SENTIMENT_MODEL_DIR: Path
+    - RAG_VECTOR_STORE_DIR: Path
+    - REPORTS_DIR: Path
+    - SEBI_REG_ID: str | None = None
+    - ALERT_WEBHOOK_URL: str | None = None
+    - DB_CONNECTION_STRING: str (from env, validated)
+    - ENCRYPTION_KEY: str (from env, 32-byte hex)
+
+  class Config:
+    env_file = ".env"
+    env_file_encoding = "utf-8"
+    secrets_dir = "/run/secrets"  # Docker secrets support
+
+  Methods:
+    - validate_all_paths(self) -> None
+      * Ensure all directory paths exist or can be created
+      * Raise ConfigurationError if critical paths invalid
+
+    - mask_secrets(self) -> dict
+      * Return settings dict with all secret fields masked (***)
+      * For logging/display only
+
+INSTRUCTION 8.2 — Implement src/config/schedule.py
+---------------------------------------------------
+  Constants:
+    DRL_QUARTERLY_RETRAIN_CRON = "0 0 1 */3 *"
+    SENTIMENT_QUARTERLY_UPDATE_CRON = "0 2 1 */3 *"
+    RAG_MONTHLY_REFRESH_CRON = "0 3 1 * *"
+    OI_DAILY_SCAN_CRON = "0 9 * * 1-5"         # 9 AM weekdays
+    ANNUAL_AUDIT_CRON = "0 8 1 1 *"             # Jan 1st 8 AM
+
+  Class: ScheduleManager
+    - register_all(self) -> None
+      * Register all cron jobs with APScheduler
+      * Include misfire_grace_time, coalesce, max_instances
+    - health_check(self) -> dict
+      * Verify all jobs registered and next fire times valid
+    - run_manual(self, job_name: str) -> None
+      * Trigger a job immediately by name
+
+================================================================================
+STEP 9: COMPREHENSIVE TEST SUITE IMPLEMENTATION
+================================================================================
+
+Testing & Security Stack:
+  pytest + pytest-cov + coverage + ruff + mypy + bandit + pip-audit +
+  gitleaks + hypothesis + pytest-benchmark + pytest-xdist + pytest-asyncio +
+  cyclonedx-bom + trivy + locust
+
+INSTRUCTION 9.1 — Create tests/conftest.py
+-------------------------------------------
+Shared fixtures:
+  - fixture: mock_nse_api (httpx mock router for NSE API responses)
+  - fixture: sample_option_chain (realistic NIFTY option chain dict)
+  - fixture: sample_oi_data (top 20 F&O stocks by OI)
+  - fixture: mock_drl_model (stable-baselines3 PPO with dummy env)
+  - fixture: mock_sentiment_model (transformers pipeline mock)
+  - fixture: mock_chromadb (in-memory ChromaDB instance)
+  - fixture: temp_checkpoint_dir (tmp_path for model checkpoints)
+  - fixture: sample_market_data (OHLCV DataFrame for 90 days)
+  - fixture: indian_market_config (Phase18Settings with test values)
+  - fixture: mock_broker_api (trading API mock with order validation)
+
+  Configure:
+    - pytest-asyncio: auto_mode = "auto"
+    - pytest-cov: fail_under = 85
+    - coverage: omit = ["tests/*", "scripts/*"]
+    - hypothesis: max_examples = 200, deadline = 500ms
+
+INSTRUCTION 9.2 — Create tests/test_drl_retrainer.py
+-----------------------------------------------------
+  - TestDRLRetainerLoadModel:
+    * test_load_existing_model_succeeds
+    * test_load_missing_model_raises_file_not_found
+    * test_load_corrupted_model_raises_value_error
+    * test_load_model_invalid_zip_raises_error
+
+  - TestDRLRetainerDriftDetection:
+    * test_no_drift_within_threshold (hypothesis: reward lists near baseline)
+    * test_drift_detected_on_distribution_shift
+    * test_drift_threshold_configurable
+    * test_empty_reward_list_handled_gracefully
+
+  - TestDRLRetainerRetrain:
+    * test_retrain_produces_valid_model (mock env, 1k steps)
+    * test_retrain_resumes_from_checkpoint
+    * test_retrain_exceeds_max_iterations_flags_error
+    * test_retrain_metrics_returned_correctly
+    * test_retrain_failure_raises_drl_retrain_error
+
+  - TestDRLRetainerValidation:
+    * test_validate_model_passes_when_sharpe_acceptable
+    * test_validate_model_fails_on_sharpe_regression
+    * test_validate_model_fails_on_drawdown_regression
+    * test_rollback_on_validation_failure
+
+  - TestDRLRetainerColabExport:
+    * test_export_creates_valid_zip
+    * test_export_notebook_has_required_cells
+    * test_export_zip_integrity_check
+
+  - Hypothesis strategies:
+    * st.lists(st.floats(min_value=-10, max_value=10), min_size=50)
+    * reward_distributions around baseline mean
+
+INSTRUCTION 9.3 — Create tests/test_sentiment_updater.py
+---------------------------------------------------------
+  - TestFetchNewArticles:
+    * test_fetch_from_all_configured_sources
+    * test_fetch_handles_rate_limiting (mock 429 response)
+    * test_fetch_deduplicates_by_url
+    * test_fetch_deduplicates_by_title_similarity
+    * test_fetch_filters_indian_market_keywords
+    * test_fetch_empty_response_handled
+
+  - TestLabelArticles:
+    * test_pseudo_labeling_applies_to_high_confidence
+    * test_low_confidence_flagged_for_review
+    * test_indian_market_heuristics_applied_correctly
+    * test_label_distribution_imbalance_flagged
+
+  - TestFineTune:
+    * test_fine_tune_produces_model (tiny dataset, 1 epoch)
+    * test_fine_tune_early_stopping_triggers
+    * test_fine_tune_metrics_returned
+    * test_fine_tune_saves_checkpoint
+
+  - TestValidateUpdatedModel:
+    * test_validation_passes_when_f1_acceptable
+    * test_validation_fails_on_f1_regression
+    * test_validation_fails_on_class_precision_below_threshold
+    * test_validation_fails_on_calibration_error
+    * test_atomic_swap_on_success
+    * test_rollback_on_failure
+
+INSTRUCTION 9.4 — Create tests/test_rag_refresh.py
+----------------------------------------------------
+  - TestScanStaleDocuments:
+    * test_scan_identifies_old_documents
+    * test_scan_checks_source_urls_for_updates
+    * test_scan_empty_store_handled
+
+  - TestFetchUpdatedDocuments:
+    * test_fetch_downloads_updated_versions
+    * test_fetch_handles_network_errors_with_retry
+    * test_fetch_validates_document_integrity
+
+  - TestDeduplicateAndChunk:
+    * test_near_duplicates_removed (hypothesis: similar text pairs)
+    * test_chunks_have_correct_size (property-based)
+    * test_chunks_preserve_metadata
+    * test_empty_document_list_handled
+
+  - TestUpdateVectorStore:
+    * test_update_deletes_stale_and_inserts_new
+    * test_update_persists_to_disk
+    * test_update_validation_with_test_queries
+    * test_update_stats_returned_correctly
+
+  - TestKnowledgeReport:
+    * test_report_contains_source_distribution
+    * test_report_identifies_gaps
+    * test_report_embedding_coverage_computed
+
+INSTRUCTION 9.5 — Create tests/test_iron_condor.py
+---------------------------------------------------
+  - TestIronCondorStrikeSelection:
+    * test_valid_strikes_pass_validation (hypothesis: realistic option chains)
+    * test_invalid_strike_raises_error
+    * test_insufficient_oi_raises_error
+    * test_net_debit_raises_error (iron condor must be credit)
+    * test_wing_width_consistency_checked
+
+  - TestIronCondorGreeks:
+    * test_net_delta_near_zero_at_entry
+    * test_positive_theta_at_entry
+    * test_negative_gamma_at_entry
+    * test_greeks_with_indian_market_adjustments
+
+  - TestIronCondorMargin:
+    * test_margin_calculated_per_nse_framework
+    * test_margin_includes_buffer
+    * test_margin_less_than_two_separate_spreads (spread benefit)
+
+  - TestIronCondorOrderLegs:
+    * test_four_legs_generated
+    * test_sell_put_buy_put_sell_call_buy_call_order
+    * test_net_premium_is_credit
+
+  - TestIronCondorRisk:
+    * test_max_profit_computed_correctly
+    * test_max_loss_computed_correctly
+    * test_breakeven_points_correct
+    * test_pop_computed (hypothesis: various spot/vol combos)
+
+  - TestIronCondorAdjustment:
+    * test_hold_when_delta_within_threshold
+    * test_roll_when_delta_exceeds_threshold
+    * test_close_on_50pct_loss
+    * test_close_on_low_iv_rank
+
+INSTRUCTION 9.6 — Create tests/test_calendar_spread.py
+-------------------------------------------------------
+  - TestCalendarSpreadExpiryValidation:
+    * test_valid_expiry_pair_passes
+    * test_near_after_far_raises_error
+    * test_insufficient_days_between_raises_error
+    * test_non_nse_expiry_date_raises_error
+
+  - TestCalendarSpreadGreeks:
+    * test_positive_vega_at_entry
+    * test_positive_theta_at_entry
+    * test_iv_inversion_flagged
+
+  - TestCalendarSpreadOrderLegs:
+    * test_two_legs_generated
+    * test_sell_near_buy_far_order
+    * test_net_debit_confirmed
+
+  - TestCalendarSpreadRisk:
+    * test_profit_max_at_strike_on_near_expiry
+    * test_risk_from_iv_crush_assessed
+    * test_pop_computed
+
+  - TestCalendarSpreadRoll:
+    * test_hold_when_dte_sufficient
+    * test_take_profit_near_expiry
+    * test_roll_near_on_assignment_risk
+    * test_close_all_on_adverse_move
+
+INSTRUCTION 9.7 — Create tests/test_ratio_spread.py
+----------------------------------------------------
+  - TestRatioSpreadValidation:
+    * test_valid_ratio_and_strikes_pass (hypothesis: valid combos)
+    * test_invalid_ratio_raises_error
+    * test_insufficient_oi_at_short_raises_error
+    * test_unlimited_risk_flagged
+
+  - TestRatioSpreadGreeks:
+    * test_net_position_greeks_correct_for_ratio
+    * test_delta_neutral_point_computed
+    * test_max_profit_point_computed
+
+  - TestRatioSpreadMargin:
+    * test_margin_includes_unlimited_risk_cushion
+    * test_margin_exceeds_simple_spread_warning
+    * test_margin_within_max_risk_multiplier
+
+  - TestRatioSpreadOrderLegs:
+    * test_correct_number_of_legs_for_ratio
+    * test_buy_long_sell_short_ratio_quantity
+
+  - TestRatioSpreadRisk:
+    * test_max_profit_computed
+    * test_unlimited_risk_zone_highlighted
+    * test_breakeven_points_correct
+    * test_tail_risk_flag_when_loss_exceeds_multiplier
+    * test_pop_with_tail_risk_warning
+
+INSTRUCTION 9.8 — Create tests/test_oi_scanner.py
+--------------------------------------------------
+  - TestOIScannerScan:
+    * test_scan_returns_top_n_stocks
+    * test_scan_filters_by_min_oi
+    * test_scan_handles_nse_api_rate_limit
+    * test_scan_handles_nse_api_downtime
+    * test_scan_result_has_required_fields
+
+  - TestOIHistory:
+    * test_history_returns_dataframe_with_expected_columns
+    * test_history_handles_missing_symbol_gracefully
+
+  - TestOIAnomalies:
+    * test_spike_detection (hypothesis: OI series with injected spikes)
+    * test_oi_price_diversion_detected
+    * test_strike_level_oi_buildup_flagged
+
+  - TestShouldUpdateTop20:
+    * test_no_update_when_few_changes
+    * test_update_triggered_when_many_changes
+    * test_change_report_logged
+
+INSTRUCTION 9.9 — Create tests/test_stock_fno.py
+-------------------------------------------------
+  - TestStockFnoManagerUpdate:
+    * test_update_replaces_tracked_stocks
+    * test_update_fetches_lot_sizes
+    * test_update_fetches_margin_requirements
+    * test_update_change_report_accurate
+
+  - TestStockFnoValidation:
+    * test_valid_stock_passes_validation
+    * test_non_tracked_stock_fails
+    * test_insufficient_liquidity_fails
+    * test_corporate_action_blackout_fails
+
+  - TestStockMetadata:
+    * test_metadata_returned_for_valid_symbol
+    * test_metadata_raises_for_invalid_symbol
+
+  - TestEligibleStocks:
+    * test_eligible_stocks_filtered_by_strategy
+    * test_no_eligible_stocks_for_invalid_strategy
+
+INSTRUCTION 9.10 — Create tests/test_strategy_audit.py
+-------------------------------------------------------
+  - TestStrategyPerformanceAudit:
+    * test_audit_computes_all_metrics_per_strategy
+    * test_audit_benchmarks_against_nifty50
+    * test_audit_flags_underperforming_strategies
+    * test_deflated_sharpe_applied
+
+  - TestRiskComplianceAudit:
+    * test_position_size_limits_checked
+    * test_margin_utilization_checked
+    * test_concentration_risk_checked
+    * test_strategy_correlation_checked
+
+  - TestAnnualReport:
+    * test_report_generated_as_pdf
+    * test_report_contains_all_sections
+    * test_report_saved_to_output_dir
+
+INSTRUCTION 9.11 — Create tests/test_system_audit.py
+-----------------------------------------------------
+  - TestInfrastructureAudit:
+    * test_all_components_health_checked
+    * test_disk_space_warning_when_low
+    * test_memory_warning_when_low
+    * test_api_connectivity_verified
+    * test_ssl_expiry_checked
+
+  - TestSecurityAudit:
+    * test_bandit_findings_collected
+    * test_pip_audit_findings_collected
+    * test_gitleaks_findings_collected
+    * test_trivy_findings_collected
+    * test_no_unacknowledged_secrets
+
+  - TestDataQualityAudit:
+    * test_data_gap_detection
+    * test_data_freshness_checked
+    * test_cross_validation_across_sources
+    * test_nan_inf_zero_detection
+
+INSTRUCTION 9.12 — Create tests/test_compliance.py
+----------------------------------------------------
+  - TestSEBICompliance:
+    * test_algo_trading_registration_verified
+    * test_order_to_trade_ratio_checked
+    * test_risk_management_framework_verified
+    * test_timestamping_accuracy_checked
+    * test_audit_trail_completeness_checked
+
+  - TestDPDPACompliance:
+    * test_consent_verification
+    * test_data_retention_policy_checked
+    * test_data_deletion_capability_verified
+
+  - TestFullComplianceAudit:
+    * test_all_checks_aggregated
+    * test_pass_fail_warning_per_item
+
+INSTRUCTION 9.13 — Create tests/test_registry.py
+--------------------------------------------------
+  - TestStrategyRegistry:
+    * test_register_strategy
+    * test_register_duplicate_raises_error
+    * test_get_strategy_by_name
+    * test_get_nonexistent_raises_error
+    * test_list_all_returns_metadata
+    * test_validate_all_strategies
+
+INSTRUCTION 9.14 — Create tests/locustfile.py
+----------------------------------------------
+  - class OIScannerUser(HttpUser):
+    * Simulate concurrent OI scans to NSE API
+    * Tasks: scan_top_by_oi, get_oi_history, detect_anomalies
+    * Wait time: 1-5 seconds between tasks
+
+  - class StrategyComputeUser(HttpUser):
+    * Simulate concurrent strategy computation requests
+    * Tasks: compute_greeks, risk_assessment, generate_order_legs
+    * Wait time: 0.5-2 seconds
+
+  - Configuration:
+    * host = "http://localhost:8000"
+    * Target RPS: 50 for OI scan, 100 for strategy compute
+
+================================================================================
+STEP 10: LINTING, TYPE-CHECKING, SECURITY SCANNING — VERIFICATION PIPELINE
+================================================================================
+
+INSTRUCTION 10.1 — Create Makefile with All Verification Targets
+-----------------------------------------------------------------
+  .PHONY: all lint typecheck security test coverage benchmark bom audit clean
+
+  all: lint typecheck security test coverage bom
+
+  lint:
+      ruff check src/ tests/ --config pyproject.toml
+      ruff format --check src/ tests/ --config pyproject.toml
+
+  typecheck:
+      mypy src/ --config-file pyproject.toml --strict
+
+  security:
+      bandit -r src/ -c pyproject.toml -f json -o reports/bandit.json
+      pip-audit --desc --output reports/pip-audit.json
+      gitleaks detect --source . --report-format json --report-path reports/gitleaks.json
+      trivy fs --format json --output reports/trivy.json .
+
+  test:
+      pytest tests/ -v --tb=short -n auto
+
+  coverage:
+      pytest tests/ -v --cov=src --cov-report=term-missing \
+        --cov-report=html:reports/coverage --cov-fail-under=85 -n auto
+
+  benchmark:
+      pytest tests/ -v --benchmark-only --benchmark-autosave
+
+  bom:
+      cyclonedx-bom -o SBOM/sbom.json --format json
+      cyclonedx-bom -o SBOM/sbom.xml --format xml
+
+  audit: security
+      python -c "import json; data=json.load(open('reports/bandit.json')); \
+        assert data.get('results',[])==[], 'Bandit findings detected'"
+      python -c "import json; data=json.load(open('reports/pip-audit.json')); \
+        assert len(data.get('dependencies',[]))==0, 'CVEs detected'"
+
+  clean:
+      ruff cache clean
+      mypy --cache-clear
+      Remove-Item -Recurse -Force reports/, .pytest_cache/, .mypy_cache/
+
+INSTRUCTION 10.2 — Configure pyproject.toml Tool Sections
+----------------------------------------------------------
+  [tool.ruff]
+  line-length = 100
+  target-version = "py311"
+  select = ["E","W","F","I","N","UP","B","A","SIM","C4","T20","RUF"]
+  ignore = ["E501"]
+
+  [tool.ruff.format]
+  quote-style = "double"
+  indent-style = "space"
+
+  [tool.mypy]
+  python_version = "3.11"
+  strict = true
+  warn_return_any = true
+  warn_unused_configs = true
+  disallow_untyped_defs = true
+  plugins = ["pydantic.mypy"]
+
+  [tool.bandit]
+  targets = ["src"]
+  skips = ["B101"]   # assert is fine in tests
+
+  [tool.pytest.ini_options]
+  testpaths = ["tests"]
+  addopts = "-v --tb=short -x"
+  asyncio_mode = "auto"
+  markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks integration tests",
+    "colab: marks Colab-specific tests"
+  ]
+
+  [tool.coverage.run]
+  source = ["src"]
+  omit = ["tests/*", "scripts/*"]
+  branch = true
+
+  [tool.coverage.report]
+  fail_under = 85
+  show_missing = true
+  exclude_lines = ["pragma: no cover", "if TYPE_CHECKING", "raise NotImplementedError"]
+
+INSTRUCTION 10.3 — Create .secrets.baseline
+--------------------------------------------
+Run: gitleaks generate config --source . --baseline-path .secrets.baseline
+Review and acknowledge any existing secrets.
+Add .secrets.baseline to git.
+Add actual secrets only via .env (which is gitignored) or Docker secrets.
+
+INSTRUCTION 10.4 — Create Dockerfile
+-------------------------------------
+  FROM python:3.11-slim-bookworm
+  WORKDIR /app
+  COPY requirements.txt .
+  RUN pip install --no-cache-dir -r requirements.txt && pip-audit
+  COPY src/ src/
+  COPY configs/ configs/
+  COPY scripts/ scripts/
+  RUN bandit -r src/ -f json || true
+  HEALTHCHECK --interval=60s --timeout=10s CMD python -c "import src; print('healthy')"
+  CMD ["python", "-m", "src.config.schedule"]
+
+INSTRUCTION 10.5 — Create .gitignore
+-------------------------------------
+  .venv/
+  __pycache__/
+  *.pyc
+  .env
+  .mypy_cache/
+  .pytest_cache/
+  .ruff_cache/
+  reports/
+  checkpoints/
+  SBOM/
+  *.egg-info/
+  dist/
+  build/
+
+================================================================================
+STEP 11: EXECUTION ORDER & VERIFICATION CHECKLIST
+================================================================================
+
+  STEP  1 → Scaffolding + pyproject.toml + venv + deps + pre-commit
+            VERIFY: python -c "import stable_baselines3; import transformers;
+                    import chromadb; print('ALL IMPORTS OK')"
+            VERIFY: pip-audit returns 0 CVEs
+            VERIFY: pre-commit run --all-files passes
+
+  STEP  2 → DRL Retrainer + Colab notebook + quarterly script + config
+            VERIFY: pytest tests/test_drl_retrainer.py -v (all pass)
+            VERIFY: mypy src/retraining/drl_retrainer.py (0 errors)
+            VERIFY: ruff check src/retraining/ (0 violations)
+
+  STEP  3 → Sentiment Updater + schedule
+            VERIFY: pytest tests/test_sentiment_updater.py -v (all pass)
+            VERIFY: mypy src/retraining/sentiment_updater.py (0 errors)
+
+  STEP  4 → RAG Knowledge Refresher + monthly script
+            VERIFY: pytest tests/test_rag_refresh.py -v (all pass)
+            VERIFY: mypy src/retraining/rag_knowledge_refresh.py (0 errors)
+
+  STEP  5 → Strategy Auditor + System Auditor + Compliance + annual script
+            VERIFY: pytest tests/test_strategy_audit.py tests/test_system_audit.py
+                    tests/test_compliance.py -v (all pass)
+
+  STEP  6 → Iron Condor + Calendar Spread + Ratio Spread + Registry + config
+            VERIFY: pytest tests/test_iron_condor.py tests/test_calendar_spread.py
+                    tests/test_ratio_spread.py tests/test_registry.py -v (all pass)
+            VERIFY: hypothesis tests pass with 200 examples
+
+  STEP  7 → OI Scanner + Stock F&O Manager + Margin Calculator + config
+            VERIFY: pytest tests/test_oi_scanner.py tests/test_stock_fno.py -v
+            VERIFY: ruff + mypy on all fno/ modules (0 errors/violations)
+
+  STEP  8 → Settings + Schedule
+            VERIFY: mypy src/config/ --strict (0 errors)
+            VERIFY: pydantic settings validation works with .env
+
+  STEP  9 → All tests + coverage + benchmarks
+            VERIFY: make coverage → >= 85% branch coverage
+            VERIFY: make benchmark → all benchmarks recorded
+            VERIFY: pytest -m "not slow" -n auto — all pass in < 60s
+
+  STEP 10 → Full pipeline
+            VERIFY: make all → lint + typecheck + security + test + coverage + bom
+            VERIFY: make audit → 0 bandit findings, 0 pip-audit CVEs
+            VERIFY: make bom → SBOM/sbom.json + sbom.xml generated
+            VERIFY: trivy fs . → 0 critical/high vulnerabilities
+            VERIFY: gitleaks detect → 0 new leaks
+
+  STEP 11 → Final validation
+            VERIFY: All 13 test files pass
+            VERIFY: Coverage >= 85%
+            VERIFY: 0 mypy errors (strict mode)
+            VERIFY: 0 ruff violations
+            VERIFY: 0 bandit findings
+            VERIFY: 0 pip-audit CVEs
+            VERIFY: 0 gitleaks
+            VERIFY: 0 trivy critical/high
+            VERIFY: All hypothesis strategies converge
+            VERIFY: locust load test completes without errors
+            VERIFY: SBOM generated in JSON + XML
+            VERIFY: Dockerfile builds without errors
+            VERIFY: .secrets.baseline committed
+            VERIFY: All configs valid YAML
+            VERIFY: All pydantic models validated with test configs
+
+================================================================================
+STEP 12: RISK MATRIX & MITIGATION (ZERO-BLOCKING GUARANTEE)
+================================================================================
+
+  RISK                                          | MITIGATION
+  ----------------------------------------------|------------------------------
+  NSE API rate limiting/downtime                | tenacity retry + cached fallback
+  Google Colab T4 unavailability                | Retry with V100; local GPU fallback
+  Model retrain produces worse model            | Automated validation + rollback
+  Sentiment model drift on new data             | KL-divergence detection + alerting
+  RAG vector store corruption                   | Daily backup + integrity check
+  Strategy margin exceeds available             | Pre-trade margin validation + reject
+  OI data staleness                             | Max 1-hour staleness + alert
+  Dependency CVE discovered                     | pip-audit in CI + immediate patch
+  Secret leakage in git history                 | gitleaks pre-commit + pre-push
+  Windows 11 compatibility issues               | Python 3.11 tested on Win11;
+                                                 | no Unix-only deps used
+  Test flakiness from async/network             | Mock all external calls; no real
+                                                 | network in unit tests
+  Corporate action causes F&O blackout          | 3-day blackout check in validator
+  Assignment risk on short options              | DTE-based roll/close triggers
+
+================================================================================
+END OF PHASE 18 IMPLEMENTATION PLAN
+================================================================================

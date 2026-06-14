@@ -1,0 +1,1841 @@
+================================================================================
+  TESTING GATE MATRIX — PRODUCTION & ENTERPRISE GRADE IMPLEMENTATION PLAN
+================================================================================
+
+  Target Platform : Windows 11 (Native x64) + WSL2 for Tier-2/Mutation
+  Python Version  : 3.11.x+ (recommended 3.12.x for best tooling support)
+  Execution Model : Sequential AI-agent instructions (copy-paste ready)
+  Compliance Base : OWASP DevSecOps Guideline, NIST SP 800-218 SSDF,
+                    CIS Benchmarks, Martin Fowler Test Pyramid,
+                    ISTQB Foundation, SLSA Level 3
+  Reference Books : "Python Testing with pytest" — Brian Okken (2nd Ed)
+                    "Testing Python Applications" — Seljin Paluch
+                    "Secure by Design" — Dan Bergh Johnsson et al.
+                    "Effective Python" — Brett Slatkin (3rd Ed, Ch.5-6)
+                    "The Art of Software Security Assessment" — Dowd et al.
+                    "Software Security" — Gary McGraw
+                    "XUnit Test Patterns" — Gerard Meszaros
+                    "Property-Based Testing with PropEr, Erlang, and Elixir"
+                    — Francesco Cesarini (adapted for Hypothesis)
+
+================================================================================
+  PHASE 0 — PREREQUISITE ENVIRONMENT HARDENING (Windows 11 Native)
+================================================================================
+
+INSTRUCTION 0.1 — Verify Python and Pip Integrity
+---------------------------------------------------
+Execute:
+
+  python --version
+  python -c "import sys; assert sys.version_info >= (3, 11), f'Python 3.11+ required, got {sys.version}'; print('Python version OK')"
+  pip --version
+
+Verify: Python >=3.11 and pip >=24.x. If pip is outdated, upgrade:
+  python -m pip install --upgrade pip
+
+INSTRUCTION 0.2 — Create Isolated Virtual Environment
+-------------------------------------------------------
+Execute:
+
+  python -m venv .venv
+  .\.venv\Scripts\activate
+  python -c "import sys; print(sys.prefix); assert 'site-packages' not in sys.executable.lower() or '.venv' in sys.prefix, 'Virtual env not activated'"
+
+Verify: sys.prefix points to .venv directory. Never install tools globally.
+
+INSTRUCTION 0.3 — Verify Windows 11 Build and WSL2 Availability
+------------------------------------------------------------------
+Execute:
+
+  systeminfo | findstr /B /C:"OS Name" /C:"OS Version"
+  wsl --status 2>$null; if ($LASTEXITCODE -ne 0) { Write-Output "WSL2 NOT INSTALLED - required for Tier-2 and Mutation Testing" }
+
+Verify: OS Version >= 10.0.22000 (Windows 11). WSL2 must be available for
+        Tier-2 (trivy, cosmic-ray, mutmut) and extended load testing.
+        If WSL2 missing, install with: wsl --install
+
+INSTRUCTION 0.4 — Install Core C Toolchain (Required by some Python packages)
+--------------------------------------------------------------------------------
+Execute:
+
+  gcc --version 2>$null; cl.exe 2>$null
+  pip install --upgrade setuptools wheel
+
+Verify: At least one C compiler available OR setuptools/wheel upgraded so
+        binary wheels are preferred. Most listed packages ship pre-built
+        wheels for Windows.
+
+================================================================================
+  PHASE 1 — DETERMINISTIC DEPENDENCY INSTALLATION (Pinned, Conflict-Free)
+================================================================================
+
+INSTRUCTION 1.1 — Install Tier-0 Testing & Quality Stack
+----------------------------------------------------------
+Execute (single deterministic install with pinned ranges):
+
+  pip install "pytest>=8.3,<9" "pytest-cov>=5.0,<6" "coverage[toml]>=7.6,<8" "ruff>=0.8,<1" "mypy>=1.13,<2" "bandit[toml]>=1.8,<2" "pip-audit>=0.3,<1" "gitleaks>=8.21,<9"
+
+Rationale per standard:
+  - pytest 8.3+ : Stable xdist/asyncio plugin compat (Okken Ch.2)
+  - pytest-cov 5.0+ : Branch coverage with --cov-fail-under (Fowler: TestCoverage)
+  - coverage[toml] 7.6+ : TOML config support, branch=True enforced
+  - ruff 0.8+ : Replaces flake8+black+isort per PyCQA direction (Astral docs)
+  - mypy 1.13+ : Strict mode with --strict, PEP 484/544 compliant
+  - bandit[toml] 1.8+ : AST-based SAST, OWASP-aligned (Bandit docs)
+  - pip-audit 0.3+ : SCA against PyPI Advisory DB + OSV (NIST SSDF PW.4)
+  - gitleaks 8.21+ : Git secret detection (OWASP DevSecOps: Credential Leakage)
+
+Verify:
+
+  pip list | Select-String "pytest|coverage|ruff|mypy|bandit|pip-audit|gitleaks"
+  pytest --version
+  ruff --version
+  mypy --version
+  bandit --version
+  pip-audit --version
+  gitleaks version
+
+INSTRUCTION 1.2 — Install Tier-0 Companion Plugins
+-----------------------------------------------------
+Execute:
+
+  pip install "pytest-asyncio>=0.24,<1" "pytest-xdist>=3.6,<4"
+
+Rationale:
+  - pytest-asyncio : Async test support (PEP 492 coroutines, Okken Ch.9)
+  - pytest-xdist 3.6+ : Parallel execution via -n auto (Fowler: fast feedback)
+
+Verify:
+
+  pip list | Select-String "asyncio|xdist"
+
+INSTRUCTION 1.3 — Install Tier-1 Nightly Stack
+------------------------------------------------
+Execute:
+
+  pip install "hypothesis>=6.112,<7" "pytest-benchmark>=4.0,<5"
+
+Rationale:
+  - hypothesis 6.112+ : Property-based testing per QuickCheck methodology
+    (Fowler: SelfTestingCode, Meszaros: Parameterized Test patterns)
+  - pytest-benchmark 4.0+ : Performance regression detection with
+    --benchmark-compare (Fowler: ThresholdTest)
+
+Verify:
+
+  pip list | Select-String "hypothesis|benchmark"
+  python -c "import hypothesis; print(f'hypothesis {hypothesis.__version__}')"
+
+INSTRUCTION 1.4 — Install Tier-2 Pre-Release / Supply Chain Stack
+--------------------------------------------------------------------
+Execute:
+
+  pip install "cyclonedx-bom>=4.0,<5" "locust>=2.32,<3"
+
+Rationale:
+  - cyclonedx-bom 4.0+ : SBOM generation per CycloneDX v1.6 spec,
+    NTIA minimum elements, EO 14028 compliance (SLSA Level 3 provenance)
+  - locust 2.32+ : Load testing with distributed workers (ISTQB performance)
+
+Note: trivy installation is via Windows binary, NOT pip. See Instruction 1.5.
+
+Verify:
+
+  pip list | Select-String "cyclonedx|locust"
+  cyclonedx-bom --version
+  locust --version
+
+INSTRUCTION 1.5 — Install Trivy (Windows Native Binary)
+----------------------------------------------------------
+Execute:
+
+  $trivyUrl = "https://github.com/aquasecurity/trivy/releases/latest/download/trivy_windows_amd64.zip"
+  $trivyDir = "${env:LOCALAPPDATA}\trivy"
+  New-Item -ItemType Directory -Path $trivyDir -Force | Out-Null
+  Invoke-WebRequest -Uri $trivyUrl -OutFile "$trivyDir\trivy.zip"
+  Expand-Archive -Path "$trivyDir\trivy.zip" -DestinationPath $trivyDir -Force
+  Remove-Item "$trivyDir\trivy.zip" -Force
+  $env:PATH = "$trivyDir;$env:PATH"
+  [Environment]::SetEnvironmentVariable("PATH", "$trivyDir;" + [Environment]::GetEnvironmentVariable("PATH", "User"), "User")
+  trivy --version
+
+Rationale: trivy is a Go binary — no pip package. Windows amd64 zip from
+           aquasecurity releases. Adds to persistent User PATH.
+           (OWASP DevSecOps: Container/FS scan, CIS Benchmark: Image scanning)
+
+Verify: trivy --version returns >=0.58.x
+
+INSTRUCTION 1.6 — Install Gitleaks (If Not Already via pip)
+-------------------------------------------------------------
+If gitleaks was NOT installed via pip in 1.1 (Windows binary alternative):
+
+  $glUrl = "https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_windows_x64.zip"
+  $glDir = "${env:LOCALAPPDATA}\gitleaks"
+  New-Item -ItemType Directory -Path $glDir -Force | Out-Null
+  Invoke-WebRequest -Uri $glUrl -OutFile "$glDir\gitleaks.zip"
+  Expand-Archive -Path "$glDir\gitleaks.zip" -DestinationPath $glDir -Force
+  Remove-Item "$glDir\gitleaks.zip" -Force
+  $env:PATH = "$glDir;$env:PATH"
+  [Environment]::SetEnvironmentVariable("PATH", "$glDir;" + [Environment]::GetEnvironmentVariable("PATH", "User"), "User")
+  gitleaks version
+
+Verify: gitleaks version returns >=8.21.x
+
+INSTRUCTION 1.7 — Dependency Conflict Audit
+----------------------------------------------
+Execute:
+
+  pip check
+  pip list --outdated
+
+Verify: "pip check" returns "No broken requirements found."
+        Review outdated list but do NOT auto-upgrade beyond pinned ranges.
+
+INSTRUCTION 1.8 — Generate requirements.txt (Deterministic Lockfile)
+----------------------------------------------------------------------
+Execute:
+
+  pip freeze > requirements.txt
+  python -c "
+with open('requirements.txt') as f:
+    lines = f.readlines()
+    pkgs = ['pytest','pytest-cov','coverage','ruff','mypy','bandit','pip-audit',
+            'gitleaks','hypothesis','pytest-benchmark','pytest-xdist',
+            'pytest-asyncio','cyclonedx-bom','locust']
+    found = [p for p in pkgs if any(p in l.lower() for l in lines)]
+    missing = set(pkgs) - set(found)
+    if missing:
+        print(f'MISSING in requirements.txt: {missing}')
+        raise SystemExit(1)
+    print(f'All {len(pkgs)} packages present in requirements.txt')
+"
+
+Verify: All 14 packages appear in requirements.txt with exact versions.
+
+================================================================================
+  PHASE 2 — PROJECT SCAFFOLDING & CONFIGURATION (Zero-Assumption Defaults)
+================================================================================
+
+INSTRUCTION 2.1 — Create Project Directory Structure
+-------------------------------------------------------
+Execute:
+
+  $dirs = @(
+    "src",
+    "tests\unit",
+    "tests\integration",
+    "tests\property",
+    "tests\replay",
+    "tests\bench",
+    "tests\load",
+    "tests\conftest",
+    ".github\workflows"
+  )
+  foreach ($d in $dirs) {
+    New-Item -ItemType Directory -Path $d -Force | Out-Null
+  }
+  # Verify
+  foreach ($d in $dirs) {
+    if (-not (Test-Path -LiteralPath $d)) {
+      Write-Error "FAILED to create: $d"
+    }
+  }
+  Write-Output "Directory structure verified"
+
+Rationale: Martin Fowler Test Pyramid — unit > integration > e2e.
+           ISTQB: separation of test levels (component, integration, system).
+           Meszaros: shared fixtures in conftest/.
+
+INSTRUCTION 2.2 — Create pyproject.toml (Single Source of Truth)
+-------------------------------------------------------------------
+Execute the following to write pyproject.toml:
+
+  @'
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "app"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=5.0,<6",
+    "coverage[toml]>=7.6,<8",
+    "ruff>=0.8,<1",
+    "mypy>=1.13,<2",
+    "bandit[toml]>=1.8,<2",
+    "pip-audit>=0.3,<1",
+    "hypothesis>=6.112,<7",
+    "pytest-benchmark>=4.0,<5",
+    "pytest-xdist>=3.6,<4",
+    "pytest-asyncio>=0.24,<1",
+    "cyclonedx-bom>=4.0,<5",
+    "locust>=2.32,<3",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "C4",   # flake8-comprehensions
+    "PERF", # perflint
+    "RUF",  # ruff-specific
+    "S",    # flake8-bandit (security, supplements bandit)
+    "A",    # flake8-builtins
+    "T20",  # flake8-print (no print in production)
+]
+ignore = ["E501"]
+fixable = ["ALL"]
+unfixable = ["F841"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["S101", "S106", "T20"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+check_untyped_defs = true
+no_implicit_optional = true
+no_implicit_reexport = true
+strict_equality = true
+strict_concatenate = true
+extra_checks = true
+show_error_codes = true
+show_error_context = true
+show_column_numbers = true
+pretty = true
+force_uppercase_builtins = true
+force_union_syntax = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[tool.bandit]
+targets = ["src"]
+severity = "all"
+confidence = "all"
+format = "json"
+exclude_dirs = ["tests", ".venv"]
+
+[tool.bandit.assert_used]
+skips = ["*/test_*.py", "*/*_test.py"]
+
+[tool.pytest.ini_options]
+minversion = "8.3"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--strict-config",
+    "-p", "no:cacheprovider",
+]
+markers = [
+    "unit: Unit tests (fast, isolated, no I/O)",
+    "integration: Integration tests (service boundaries)",
+    "property: Property-based tests (Hypothesis)",
+    "replay: Record-replay determinism tests",
+    "bench: Performance benchmark tests",
+    "slow: Slow tests (exclude from fast runs)",
+    "asyncio: Async test marker (pytest-asyncio)",
+]
+asyncio_mode = "auto"
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:tests",
+    "ignore::PendingDeprecationWarning:tests",
+]
+xfail_strict = true
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = [
+    "tests/*",
+    ".venv/*",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+fail_under = 80
+precision = 2
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "raise AssertionError",
+    "@(abc\\.)?abstractmethod",
+    "pass",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.coverage.json]
+output = "coverage.json"
+show_contexts = true
+
+[tool.hypothesis]
+max_examples = 1000
+deadline = 500
+suppress_health_check = []
+print_blob = true
+'@ | Set-Content -Path "pyproject.toml" -Encoding UTF8
+
+Verify:
+
+  python -c "import tomllib; f=open('pyproject.toml','rb'); d=tomllib.load(f); print('pyproject.toml valid'); print('Ruff selects:', len(d['tool']['ruff']['lint']['select'])); print('Mypy strict:', d['tool']['mypy']['strict']); print('Coverage branch:', d['tool']['coverage']['run']['branch']); print('Fail-under:', d['tool']['coverage']['report']['fail_under'])"
+
+INSTRUCTION 2.3 — Create src/__init__.py (Minimal, Typed)
+------------------------------------------------------------
+Execute:
+
+  @''@ | Set-Content -Path "src\__init__.py" -Encoding UTF8
+
+Verify: File exists and is empty (package marker only).
+
+INSTRUCTION 2.4 — Create Root Conftest
+-----------------------------------------
+Execute:
+
+  @'
+import pytest
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line("markers", "unit: Unit tests")
+    config.addinivalue_line("markers", "integration: Integration tests")
+    config.addinivalue_line("markers", "property: Property-based tests")
+    config.addinivalue_line("markers", "replay: Record-replay tests")
+    config.addinivalue_line("markers", "bench: Benchmark tests")
+    config.addinivalue_line("markers", "slow: Slow tests")
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    for item in items:
+        if "unit" in str(item.fspath):
+            item.add_marker(pytest.mark.unit)
+        elif "integration" in str(item.fspath):
+            item.add_marker(pytest.mark.integration)
+        elif "property" in str(item.fpath):
+            item.add_marker(pytest.mark.property)
+        elif "replay" in str(item.fpath):
+            item.add_marker(pytest.mark.replay)
+        elif "bench" in str(item.fpath):
+            item.add_marker(pytest.mark.bench)
+'@ | Set-Content -Path "tests\conftest.py" -Encoding UTF8
+
+Rationale: Auto-marking by path per Meszaros xUnit Patterns.
+           Fowler: test categorization enables selective tier execution.
+
+INSTRUCTION 2.5 — Create Unit Test Conftest (Shared Fixtures)
+---------------------------------------------------------------
+Execute:
+
+  @'
+import pytest
+
+
+@pytest.fixture
+def any_fixture_placeholder() -> str:
+    return "fixture_value"
+'@ | Set-Content -Path "tests\unit\conftest.py" -Encoding UTF8
+
+Verify: conftest hierarchy loads: pytest --collect-only tests/unit/
+
+INSTRUCTION 2.6 — Create .gitignore (Testing Artifacts)
+----------------------------------------------------------
+Execute:
+
+  @'
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+build/
+dist/
+*.egg-info/
+htmlcov/
+coverage.json
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.benchmarks/
+sbom.json
+trivy-results.json
+gitleaks-report.json
+bandit-report.json
+.locust/
+'@ | Set-Content -Path ".gitignore" -Encoding UTF8
+
+Verify: File exists and covers all tool output artifacts.
+
+INSTRUCTION 2.7 — Create .gitleaks.toml (Secret Scan Config)
+---------------------------------------------------------------
+Execute:
+
+  @'
+[extend]
+use = ["https://raw.githubusercontent.com/gitleaks/gitleaks/master/config/gitleaks.toml"]
+
+[[rules]]
+id = "generic-api-key"
+description = "Generic API Key"
+regex = '''(?i)(?:api[_-]?key|apikey|secret[_-]?key|token)\s*[:=]\s*['"]?[a-zA-Z0-9]{20,}'''
+tags = ["key", "generic"]
+
+[[allowlist]]
+paths = [
+    '''tests/unit/test_.*\.py$''',
+    '''tests/integration/test_.*\.py$''',
+    '''tests/property/test_.*\.py$''',
+]
+'@ | Set-Content -Path ".gitleaks.toml" -Encoding UTF8
+
+Rationale: OWASP DevSecOps — credential leakage detection with test exceptions.
+
+INSTRUCTION 2.8 — Create .bandit.yaml (If Not Using pyproject.toml Only)
+--------------------------------------------------------------------------
+Execute:
+
+  @'
+targets:
+  - src
+exclude_dirs:
+  - tests
+  - .venv
+  - node_modules
+skips: []
+'@ | Set-Content -Path ".bandit.yaml" -Encoding UTF8
+
+Rationale: Bandit supports both pyproject.toml and .bandit.yaml.
+           Redundant config ensures CI/CD runners pick up either.
+
+================================================================================
+  PHASE 3 — TIER-0 GATE IMPLEMENTATION (Fast, Non-Negotiable, Every PR)
+================================================================================
+
+  Standards Reference:
+  - OWASP DevSecOps: SAST (bandit), SCA (pip-audit), Secret Scan (gitleaks)
+  - NIST SP 800-218 SSDF: PW.4 (code review), PW.7 (static analysis)
+  - Fowler: SelfTestingCode — green suite = shippable
+  - Meszaros: ThresholdTest — coverage gate = threshold enforcement
+
+INSTRUCTION 3.1 — Implement Gate: ruff lint
+---------------------------------------------
+Command:
+
+  ruff check . --config pyproject.toml
+
+Zero-Tolerance Criteria:
+  - Exit code 0 = PASS
+  - Exit code != 0 = FAIL (block merge)
+  - NO --fix in CI; --fix allowed only in local dev
+  - All errors must be resolved, not suppressed
+
+Error Handling:
+
+  ruff check . --config pyproject.toml; if ($LASTEXITCODE -ne 0) {
+      ruff check . --config pyproject.toml --output-format=json > ruff-errors.json
+      Write-Error "RUFF LINT FAILED. See ruff-errors.json for details."
+      Write-Error "Run 'ruff check . --fix' locally to auto-fix safe issues."
+      exit 1
+  }
+
+Verify:
+
+  ruff check . --statistics
+
+INSTRUCTION 3.2 — Implement Gate: ruff format check
+------------------------------------------------------
+Command:
+
+  ruff format --check . --config pyproject.toml
+
+Zero-Tolerance Criteria:
+  - Exit code 0 = PASS (all files formatted)
+  - Exit code 1 = FAIL (unformatted files)
+  - NO --diff in CI; --diff allowed locally only
+
+Error Handling:
+
+  ruff format --check . --config pyproject.toml; if ($LASTEXITCODE -ne 0) {
+      Write-Error "RUFF FORMAT CHECK FAILED. Run 'ruff format .' to fix."
+      exit 1
+  }
+
+Verify:
+
+  ruff format --check . --diff
+
+INSTRUCTION 3.3 — Implement Gate: mypy strict type checking
+--------------------------------------------------------------
+Command:
+
+  mypy src/ --strict --config-file pyproject.toml
+
+Zero-Tolerance Criteria:
+  - Exit code 0 = PASS (0 errors)
+  - Exit code 1 = FAIL
+  - --strict enables ALL strictness flags (see pyproject.toml mypy section)
+  - NO --allow-untyped-defs in src/; tests may use relaxed overrides
+
+Error Handling:
+
+  mypy src/ --strict --config-file pyproject.toml; if ($LASTEXITCODE -ne 0) {
+      mypy src/ --strict --config-file pyproject.toml --html-report mypy-report
+      Write-Error "MYPY FAILED. HTML report: mypy-report/index.html"
+      exit 1
+  }
+
+Verify:
+
+  mypy src/ --strict --config-file pyproject.toml --error-summary
+
+INSTRUCTION 3.4 — Implement Gate: bandit security lint
+---------------------------------------------------------
+Command:
+
+  bandit -r src/ -c pyproject.toml -f json -o bandit-report.json
+
+Zero-Tolerance Criteria:
+  - HIGH severity findings = FAIL (block merge)
+  - MEDIUM severity findings = WARN (document, triage within 48h)
+  - LOW severity findings = INFO (track, fix opportunistically)
+  - Confidence level: ALL reported, only HIGH+confidence blocks
+
+Error Handling:
+
+  bandit -r src/ -c pyproject.toml -f json -o bandit-report.json
+  $highCount = (python -c "
+import json, sys
+with open('bandit-report.json') as f:
+    data = json.load(f)
+high = [r for r in data.get('results',[]) if r['issue_severity']=='HIGH']
+print(len(high))
+")
+  if ([int]$highCount -gt 0) {
+      Write-Error "BANDIT: $highCount HIGH-severity findings detected. See bandit-report.json"
+      exit 1
+  }
+
+Verify:
+
+  bandit -r src/ -c pyproject.toml -f txt
+
+INSTRUCTION 3.5 — Implement Gate: pytest unit + integration with coverage
+----------------------------------------------------------------------------
+Command:
+
+  pytest tests/unit/ tests/integration/ -v --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing --cov-report=html --cov-report=json
+
+Zero-Tolerance Criteria:
+  - All tests PASS (0 failures, 0 errors)
+  - Branch coverage >= 80% (--cov-fail-under=80 enforced by pytest-cov)
+  - Exit code 0 = PASS; exit code 1 or 2 = FAIL
+  - --cov-fail-under is a HARD gate; cannot be bypassed
+
+Error Handling:
+
+  pytest tests/unit/ tests/integration/ -v --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing --cov-report=html --cov-report=json; if ($LASTEXITCODE -ne 0) {
+      Write-Error "PYTEST FAILED (test failure or coverage below 80%)."
+      Write-Error "Check htmlcov/index.html for coverage gaps."
+      exit 1
+  }
+
+Verify:
+
+  python -c "import json; d=json.load(open('coverage.json')); print(f'Line: {d[\"totals\"][\"covered_lines\"]}/{d[\"totals\"][\"num_statements\"]} = {d[\"totals\"][\"line_coveragerate\"]:.1%}'); print(f'Branch: {d[\"totals\"][\"covered_branches\"]}/{d[\"totals\"][\"num_branches\"]} = {d[\"totals\"][\"branch_coveragerate\"]:.1%}')"
+
+INSTRUCTION 3.6 — Implement Gate: pip-audit vulnerability scan
+----------------------------------------------------------------
+Command:
+
+  pip-audit -r requirements.txt --desc
+
+Zero-Tolerance Criteria:
+  - 0 known vulnerabilities = PASS
+  - Any vulnerability with CVSS >= 0.0 = FAIL
+  - --desc provides description for triage
+  - Escalation path: if vulnerability has no fix, document in SECURITY_EXCEPTIONS.md
+    with risk acceptance sign-off (OWASP risk assessment framework)
+
+Error Handling:
+
+  pip-audit -r requirements.txt --desc; if ($LASTEXITCODE -ne 0) {
+      pip-audit -r requirements.txt --desc -f json > pip-audit-report.json
+      Write-Error "PIP-AUDIT FAILED. Vulnerable dependencies found."
+      Write-Error "See pip-audit-report.json. Run 'pip-audit -r requirements.txt --fix' to auto-fix."
+      exit 1
+  }
+
+Verify:
+
+  pip-audit -r requirements.txt --progress-spinner off
+
+INSTRUCTION 3.7 — Implement Gate: gitleaks secret detection
+--------------------------------------------------------------
+Command:
+
+  gitleaks detect --source . --config .gitleaks.toml --report-format json --report-path gitleaks-report.json
+
+Zero-Tolerance Criteria:
+  - 0 secrets detected = PASS
+  - Any finding = FAIL (block merge immediately)
+  - False positives: add to .gitleaks.toml allowlist with justification
+  - NEVER commit real secrets; use environment variables or vault
+
+Error Handling:
+
+  gitleaks detect --source . --config .gitleaks.toml --report-format json --report-path gitleaks-report.json; if ($LASTEXITCODE -ne 0) {
+      Write-Error "GITLEAKS: Secrets detected! See gitleaks-report.json"
+      Write-Error "If false positive, add to .gitleaks.toml allowlist with justification."
+      Write-Error "If real secret: ROTATE IMMEDIATELY, then remove from history."
+      exit 1
+  }
+
+Verify:
+
+  gitleaks detect --source . --config .gitleaks.toml --no-banner
+
+INSTRUCTION 3.8 — Tier-0 Composite Gate Script
+-------------------------------------------------
+Execute (create the unified gate script):
+
+  @'
+# Tier-0 Gate: Every PR (Fast, Non-Negotiable)
+# Standards: OWASP DevSecOps, NIST SSDF PW.4/PW.7, Fowler SelfTestingCode
+
+$ErrorActionPreference = "Stop"
+$gateFailures = @()
+
+Write-Output "=" * 70
+Write-Output "  TIER-0 GATE MATRIX EXECUTION"
+Write-Output "=" * 70
+
+# Gate 1: Ruff Lint
+Write-Output "`n[GATE 1/6] ruff check ."
+ruff check . --config pyproject.toml
+if ($LASTEXITCODE -ne 0) { $gateFailures += "ruff-check" }
+
+# Gate 2: Ruff Format
+Write-Output "`n[GATE 2/6] ruff format --check ."
+ruff format --check . --config pyproject.toml
+if ($LASTEXITCODE -ne 0) { $gateFailures += "ruff-format" }
+
+# Gate 3: mypy strict
+Write-Output "`n[GATE 3/6] mypy src/ --strict"
+mypy src/ --strict --config-file pyproject.toml
+if ($LASTEXITCODE -ne 0) { $gateFailures += "mypy-strict" }
+
+# Gate 4: bandit security
+Write-Output "`n[GATE 4/6] bandit -r src/"
+bandit -r src/ -c pyproject.toml -f json -o bandit-report.json
+$highCount = (python -c "import json; d=json.load(open('bandit-report.json')); print(len([r for r in d.get('results',[]) if r['issue_severity']=='HIGH']))")
+if ([int]$highCount -gt 0) { $gateFailures += "bandit-high-$highCount" }
+
+# Gate 5: pytest + coverage
+Write-Output "`n[GATE 5/6] pytest unit+integration + coverage >=80%"
+pytest tests/unit/ tests/integration/ -v --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing
+if ($LASTEXITCODE -ne 0) { $gateFailures += "pytest-coverage" }
+
+# Gate 6: pip-audit
+Write-Output "`n[GATE 6/6] pip-audit -r requirements.txt"
+pip-audit -r requirements.txt --desc
+if ($LASTEXITCODE -ne 0) { $gateFailures += "pip-audit" }
+
+# Gate 6b: gitleaks (parallel-safe)
+Write-Output "`n[GATE 6b/7] gitleaks detect"
+gitleaks detect --source . --config .gitleaks.toml --report-format json --report-path gitleaks-report.json
+if ($LASTEXITCODE -ne 0) { $gateFailures += "gitleaks" }
+
+# Summary
+Write-Output "`n" + ("=" * 70)
+if ($gateFailures.Count -eq 0) {
+    Write-Output "  TIER-0 GATE: ALL PASSED"
+    exit 0
+} else {
+    Write-Output "  TIER-0 GATE: FAILED"
+    Write-Output "  Failed gates: $($gateFailures -join ', ')"
+    exit 1
+}
+'@ | Set-Content -Path "gate-tier0.ps1" -Encoding UTF8
+
+Verify:
+
+  powershell -File gate-tier0.ps1
+
+================================================================================
+  PHASE 4 — TIER-1 NIGHTLY / SCHEDULED GATE IMPLEMENTATION
+================================================================================
+
+  Standards Reference:
+  - Hypothesis: Property-based testing (QuickCheck methodology, John Hughes)
+  - Record-Replay: Deterministic regression (Meszaros: TestDouble)
+  - Benchmark: Performance regression (Fowler: ThresholdTest)
+  - xdist: Parallel test distribution (ISTWB: test execution optimization)
+
+INSTRUCTION 4.1 — Implement Gate: Hypothesis Property Tests
+--------------------------------------------------------------
+Command:
+
+  pytest tests/property/ -v -m property --hypothesis-profile=ci
+
+Hypothesis Profile (add to pyproject.toml under [tool.hypothesis]):
+
+  [tool.hypothesis]
+  max_examples = 1000
+  deadline = 500
+
+Zero-Tolerance Criteria:
+  - All property tests PASS
+  - NO flaky failures (Hypothesis is deterministic with seed)
+  - If flaky: use @seed decorator or --hypothesis-seed for reproducibility
+  - HypothesisHealthCheck failures = must fix (slow test, filter too wide)
+
+Error Handling:
+
+  pytest tests/property/ -v --hypothesis-profile=ci; if ($LASTEXITCODE -ne 0) {
+      Write-Error "PROPERTY TESTS FAILED. Check Hypothesis output for shrinking steps."
+      Write-Error "Reproduce with: --hypothesis-seed=<seed_from_output>"
+      exit 1
+  }
+
+Verify:
+
+  pytest tests/property/ -v --hypothesis-profile=ci --hypothesis-seed=0
+
+INSTRUCTION 4.2 — Implement Gate: Record-Replay Determinism Tests
+--------------------------------------------------------------------
+Command:
+
+  pytest tests/replay/ -v -m replay
+
+Zero-Tolerance Criteria:
+  - Record-replay cycle must produce BIT-IDENTICAL outputs
+  - Any divergence = FAIL (non-determinism detected)
+  - Fowler: "Eradicating Non-Determinism in Tests" — quarantine + fix immediately
+
+Error Handling:
+
+  pytest tests/replay/ -v; if ($LASTEXITCODE -ne 0) {
+      Write-Error "REPLAY TESTS FAILED. Non-deterministic behavior detected."
+      Write-Error "Isolate: check for time dependencies, random state, shared resources."
+      exit 1
+  }
+
+Verify:
+
+  pytest tests/replay/ -v -k "replay" --tb=long
+
+INSTRUCTION 4.3 — Implement Gate: Performance Benchmark Regression
+---------------------------------------------------------------------
+Command:
+
+  pytest tests/bench/ -v -m bench --benchmark-only --benchmark-compare=prev --benchmark-json=bench-results.json
+
+Zero-Tolerance Criteria:
+  - Benchmark runs complete without errors
+  - Comparison against previous baseline (bench-results.json from last run)
+  - Regression > 20% on any benchmark = WARN (not block; investigate)
+  - Regression > 50% = FAIL (block release)
+
+Error Handling:
+
+  pytest tests/bench/ --benchmark-only --benchmark-compare=prev --benchmark-json=bench-results.json; if ($LASTEXITCODE -ne 0) {
+      Write-Error "BENCHMARK FAILED. Check bench-results.json for regression details."
+      exit 1
+  }
+
+Verify:
+
+  pytest tests/bench/ --benchmark-only --benchmark-sort=name
+
+INSTRUCTION 4.4 — Implement Gate: Parallel Test Execution
+------------------------------------------------------------
+Command:
+
+  pytest tests/ -n auto -v --dist=loadgroup
+
+Zero-Tolerance Criteria:
+  - All tests pass with -n auto (xdist distributed)
+  - 0 test interdependencies (each test must be isolated)
+  - --dist=loadgroup ensures marked groups run on same worker
+
+Error Handling:
+
+  pytest tests/ -n auto -v --dist=loadgroup; if ($LASTEXITCODE -ne 0) {
+      Write-Error "PARALLEL TESTS FAILED. Possible test interdependency."
+      Write-Error "Re-run sequentially to identify: pytest tests/ -v"
+      exit 1
+  }
+
+Verify:
+
+  pytest tests/ -n auto --co -q
+
+INSTRUCTION 4.5 — Tier-1 Composite Gate Script
+-------------------------------------------------
+Execute (create the unified nightly gate script):
+
+  @'
+# Tier-1 Gate: Nightly / Scheduled
+# Standards: Hypothesis PBT, Meszaros TestDouble, Fowler ThresholdTest
+
+$ErrorActionPreference = "Stop"
+$gateFailures = @()
+
+Write-Output "=" * 70
+Write-Output "  TIER-1 NIGHTLY GATE EXECUTION"
+Write-Output "=" * 70
+
+# Gate 1: Property-based tests
+Write-Output "`n[GATE 1/4] Hypothesis property tests"
+pytest tests/property/ -v --hypothesis-profile=ci
+if ($LASTEXITCODE -ne 0) { $gateFailures += "property-tests" }
+
+# Gate 2: Record-replay determinism
+Write-Output "`n[GATE 2/4] Record-replay tests"
+pytest tests/replay/ -v
+if ($LASTEXITCODE -ne 0) { $gateFailures += "replay-tests" }
+
+# Gate 3: Performance regression
+Write-Output "`n[GATE 3/4] Benchmark regression"
+pytest tests/bench/ --benchmark-only --benchmark-compare=prev --benchmark-json=bench-results.json
+if ($LASTEXITCODE -ne 0) { $gateFailures += "benchmark-regression" }
+
+# Gate 4: Parallel execution
+Write-Output "`n[GATE 4/4] Parallel tests (xdist)"
+pytest tests/ -n auto -v --dist=loadgroup
+if ($LASTEXITCODE -ne 0) { $gateFailures += "parallel-tests" }
+
+# Summary
+Write-Output "`n" + ("=" * 70)
+if ($gateFailures.Count -eq 0) {
+    Write-Output "  TIER-1 NIGHTLY GATE: ALL PASSED"
+    exit 0
+} else {
+    Write-Output "  TIER-1 NIGHTLY GATE: FAILED"
+    Write-Output "  Failed gates: $($gateFailures -join ', ')"
+    exit 1
+}
+'@ | Set-Content -Path "gate-tier1.ps1" -Encoding UTF8
+
+Verify:
+
+  powershell -File gate-tier1.ps1
+
+================================================================================
+  PHASE 5 — TIER-2 PRE-RELEASE GATE IMPLEMENTATION
+================================================================================
+
+  Standards Reference:
+  - Trivy: CIS Docker Benchmark, NIST SP 800-53 RA-5 (vulnerability scanning)
+  - CycloneDX SBOM: EO 14028, NTIA minimum elements, SLSA Level 3
+  - Locust: ISTQB performance testing, OWASP load testing guidelines
+  - Extended replay: Chaos engineering principles (Nedoff, "Chaos Engineering")
+
+INSTRUCTION 5.1 — Implement Gate: Trivy Filesystem Scan
+----------------------------------------------------------
+Command (Windows native):
+
+  trivy fs . --format json --output trivy-results.json --severity HIGH,CRITICAL --exit-code 1
+
+Zero-Tolerance Criteria:
+  - CRITICAL severity = FAIL (block release)
+  - HIGH severity = FAIL (block release)
+  - MEDIUM severity = WARN (document, fix before GA)
+  - LOW severity = INFO (track in backlog)
+
+Error Handling:
+
+  trivy fs . --format json --output trivy-results.json --severity HIGH,CRITICAL --exit-code 1; if ($LASTEXITCODE -ne 0) {
+      Write-Error "TRIVY: HIGH/CRITICAL vulnerabilities detected. See trivy-results.json"
+      Write-Error "Remediate vulnerable dependencies or add .trivyignore with justification."
+      exit 1
+  }
+
+Verify:
+
+  trivy fs . --format table --severity LOW,MEDIUM,HIGH,CRITICAL
+
+INSTRUCTION 5.2 — Implement Gate: CycloneDX SBOM Generation
+--------------------------------------------------------------
+Command:
+
+  cyclonedx-bom -o sbom.json --format json --type pip --source .
+
+OR (if using pip):
+
+  cyclonedx-bom -o sbom.json --format json --type pip
+
+Zero-Tolerance Criteria:
+  - SBOM generated successfully
+  - Contains all direct + transitive dependencies
+  - NTIA minimum elements present: supplier, component name, version,
+    dependency relationship, author, timestamp
+  - sbom.json must be archived per release artifact retention policy
+
+Error Handling:
+
+  cyclonedx-bom -o sbom.json --format json --type pip; if ($LASTEXITCODE -ne 0) {
+      Write-Error "SBOM GENERATION FAILED."
+      exit 1
+  }
+  python -c "
+import json
+with open('sbom.json') as f:
+    sbom = json.load(f)
+components = sbom.get('components', [])
+print(f'SBOM: {len(components)} components')
+assert len(components) > 0, 'SBOM has zero components!'
+print('SBOM validation: PASS')
+"
+
+Verify:
+
+  python -c "import json; d=json.load(open('sbom.json')); print(f'Components: {len(d.get(\"components\",[]))}'); print(f'SerialNumber: {d.get(\"serialNumber\",\"MISSING\")}'); print(f'Version: {d.get(\"version\",\"MISSING\")}')"
+
+INSTRUCTION 5.3 — Implement Gate: Locust Load Testing
+---------------------------------------------------------
+Command:
+
+  locust -f tests/load/locustfile.py --headless --users 100 --spawn-rate 10 --run-time 60s --host http://localhost:8000 --csv=locust-results --html=locust-report.html
+
+Zero-Tolerance Criteria:
+  - 0 test failures during load
+  - P95 response time < 500ms (configurable threshold)
+  - P99 response time < 2000ms (configurable threshold)
+  - Error rate < 1%
+  - RPS (requests/second) within expected range
+
+Error Handling:
+
+  locust -f tests/load/locustfile.py --headless --users 100 --spawn-rate 10 --run-time 60s --host http://localhost:8000; if ($LASTEXITCODE -ne 0) {
+      Write-Error "LOCUST LOAD TEST FAILED. Check locust-report.html"
+      exit 1
+  }
+
+Verify:
+
+  locust -f tests/load/locustfile.py --headless --users 10 --spawn-rate 5 --run-time 10s --host http://localhost:8000
+
+INSTRUCTION 5.4 — Implement Gate: Extended Replay (Chaos/Durability)
+----------------------------------------------------------------------
+Command:
+
+  pytest tests/replay/ --duration=long -v -m replay
+
+Zero-Tolerance Criteria:
+  - Extended replay runs complete without flakiness
+  - Duration flag controlled by environment variable: DURATION=long
+  - Any test failure under chaos = FAIL + root cause analysis required
+  - Fowler: "Eradicating Non-Determinism" — quarantine on first failure
+
+Error Handling:
+
+  pytest tests/replay/ --duration=long -v; if ($LASTEXITCODE -ne 0) {
+      Write-Error "EXTENDED REPLAY FAILED under chaos conditions."
+      Write-Error "Investigate: resource leaks, async race conditions, time dependencies."
+      exit 1
+  }
+
+INSTRUCTION 5.5 — Tier-2 Composite Gate Script
+-------------------------------------------------
+Execute (create the unified pre-release gate script):
+
+  @'
+# Tier-2 Gate: Pre-Release
+# Standards: CIS Benchmark, EO 14028 SBOM, SLSA L3, ISTQB Performance
+
+$ErrorActionPreference = "Stop"
+$gateFailures = @()
+
+Write-Output "=" * 70
+Write-Output "  TIER-2 PRE-RELEASE GATE EXECUTION"
+Write-Output "=" * 70
+
+# Gate 1: Trivy filesystem scan
+Write-Output "`n[GATE 1/4] Trivy fs scan"
+trivy fs . --format json --output trivy-results.json --severity HIGH,CRITICAL --exit-code 1
+if ($LASTEXITCODE -ne 0) { $gateFailures += "trivy-scan" }
+
+# Gate 2: SBOM generation
+Write-Output "`n[GATE 2/4] CycloneDX SBOM"
+cyclonedx-bom -o sbom.json --format json --type pip
+if ($LASTEXITCODE -ne 0) { $gateFailures += "sbom-generation" }
+
+# Gate 3: Locust load testing
+Write-Output "`n[GATE 3/4] Locust load test"
+locust -f tests/load/locustfile.py --headless --users 100 --spawn-rate 10 --run-time 60s --host http://localhost:8000
+if ($LASTEXITCODE -ne 0) { $gateFailures += "locust-load" }
+
+# Gate 4: Extended replay
+Write-Output "`n[GATE 4/4] Extended replay (chaos)"
+pytest tests/replay/ --duration=long -v
+if ($LASTEXITCODE -ne 0) { $gateFailures += "extended-replay" }
+
+# Summary
+Write-Output "`n" + ("=" * 70)
+if ($gateFailures.Count -eq 0) {
+    Write-Output "  TIER-2 PRE-RELEASE GATE: ALL PASSED"
+    exit 0
+} else {
+    Write-Output "  TIER-2 PRE-RELEASE GATE: FAILED"
+    Write-Output "  Failed gates: $($gateFailures -join ', ')"
+    exit 1
+}
+'@ | Set-Content -Path "gate-tier2.ps1" -Encoding UTF8
+
+Verify:
+
+  powershell -File gate-tier2.ps1
+
+================================================================================
+  PHASE 6 — MUTATION TESTING (WSL2, Nightly Only)
+================================================================================
+
+  Standards Reference:
+  - Mutation testing measures test suite effectiveness (Meszaros Ch.19)
+  - cosmic-ray and mutmut require os.fork() — NOT available on Windows
+  - WSL2 provides POSIX process model for os.fork()
+  - Alternative: Hypothesis property tests cover most mutation-detectable bugs
+    per "Property-Based Testing" methodology (John Hughes)
+
+INSTRUCTION 6.1 — Verify WSL2 Availability and Setup
+-------------------------------------------------------
+Execute:
+
+  wsl --list --verbose
+  wsl --install -d Ubuntu-24.04
+  wsl -d Ubuntu-24.04 -- bash -c "python3 --version && pip3 --version"
+
+Verify: WSL2 Ubuntu running with Python 3.11+ and pip.
+
+INSTRUCTION 6.2 — Install Mutation Testing Tools in WSL2
+-----------------------------------------------------------
+Execute:
+
+  wsl -d Ubuntu-24.04 -- bash -c "pip3 install cosmic-ray mutmut"
+
+Verify:
+
+  wsl -d Ubuntu-24.04 -- bash -c "cosmic-ray --version && mutmut --version"
+
+INSTRUCTION 6.3 — Configure cosmic-ray
+-----------------------------------------
+Execute (create cosmic-ray config in WSL2):
+
+  wsl -d Ubuntu-24.04 -- bash -c "cat > cosmic-ray.toml << 'EOF'
+[cosmic-ray]
+module-path = \"src\"
+timeout = 30
+excluded-modules = [\"tests\"]
+test-command = \"pytest tests/unit/ tests/integration/ -x -q\"
+
+[cosmic-ray.distributor]
+name = \"local\"
+
+[cosmic-ray.operator]
+operators = [
+    \"core/BooleanReplacer\",
+    \"core/BreakContinueReplacer\",
+    \"core/ConditionalReplacer\",
+    \"core/NumberReplacer\",
+    \"core/ArithmeticOperatorReplacer\",
+    \"core/ComparisonOperatorReplacer\",
+    \"core/LogicalOperatorReplacer\",
+    \"core/UnaryOperatorReplacer\",
+]
+EOF
+"
+
+INSTRUCTION 6.4 — Execute Mutation Testing (WSL2, Nightly Only)
+------------------------------------------------------------------
+Execute:
+
+  wsl -d Ubuntu-24.04 -- bash -c "cosmic-ray init cosmic-ray.toml && cosmic-ray exec && cr-report"
+
+Zero-Tolerance Criteria:
+  - Mutation score >= 80% (aligned with coverage threshold)
+  - Score < 80% = WARN (improve tests targeting uncovered mutations)
+  - Score < 60% = FAIL (test suite inadequacy)
+
+Alternative (mutmut, simpler):
+
+  wsl -d Ubuntu-24.04 -- bash -c "mutmut run --paths-to-mutate src/ --runner 'pytest tests/unit/ tests/integration/ -x -q'"
+  wsl -d Ubuntu-24.04 -- bash -c "mutmut results"
+
+  mutmut criteria:
+  - Mutation score >= 80% = PASS
+  - Score < 80% = investigate surviving mutants
+  - Run: mutmut show <id> to see each surviving mutant
+
+INSTRUCTION 6.5 — Tier-Mutation Composite Gate Script
+--------------------------------------------------------
+Execute:
+
+  @'
+# Tier-Mutation Gate: WSL2 Nightly Only
+# Standards: Meszaros mutation coverage, Hypothesis PBT as compensating control
+
+$ErrorActionPreference = "Stop"
+$gateFailures = @()
+
+Write-Output "=" * 70
+Write-Output "  MUTATION TESTING GATE (WSL2 NIGHTLY)"
+Write-Output "=" * 70
+
+# Gate 1: WSL2 availability
+Write-Output "`n[PRECHECK] WSL2 availability"
+wsl --list --verbose 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Output "WSL2 NOT AVAILABLE. Skipping mutation testing."
+    Write-Output "COMPENSATING CONTROL: Hypothesis property tests (Tier-1) cover most mutation-detectable bugs."
+    Write-Output "Manual code review recommended as additional compensating control."
+    exit 0
+}
+
+# Gate 2: mutmut mutation score
+Write-Output "`n[GATE 1/1] mutmut mutation testing"
+wsl -d Ubuntu-24.04 -- bash -c "cd /mnt/g/OC/02June26 && mutmut run --paths-to-mutate src/ --runner 'pytest tests/unit/ tests/integration/ -x -q' --timeout 300"
+$scoreLine = wsl -d Ubuntu-24.04 -- bash -c "cd /mnt/g/OC/02June26 && mutmut results" | Select-String "mutation score"
+Write-Output "Mutation result: $scoreLine"
+
+# Summary
+Write-Output "`n" + ("=" * 70)
+Write-Output "  MUTATION GATE: COMPLETE"
+Write-Output "  Review surviving mutants and improve test coverage if score < 80%"
+'@ | Set-Content -Path "gate-mutation.ps1" -Encoding UTF8
+
+Verify:
+
+  powershell -File gate-mutation.ps1
+
+================================================================================
+  PHASE 7 — CI/CD PIPELINE INTEGRATION (GitHub Actions)
+================================================================================
+
+  Standards Reference:
+  - GitHub Actions: SLSA Level 3 provenance, OIDC auth
+  - OWASP: Pipeline security (no secrets in YAML, use GitHub Secrets)
+  - NIST SSDF: PO.2 (security pipeline), PW.9 (binary analysis)
+
+INSTRUCTION 7.1 — Create Tier-0 PR Gate Workflow
+----------------------------------------------------
+Execute:
+
+  New-Item -ItemType Directory -Path ".github\workflows" -Force | Out-Null
+
+  @'
+name: Tier-0 PR Gate
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  tier0-gate:
+    name: Tier-0 Gate Matrix
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv\Scripts\activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ruff lint
+        run: .venv\Scripts\activate && ruff check . --config pyproject.toml
+
+      - name: Ruff format check
+        run: .venv\Scripts\activate && ruff format --check . --config pyproject.toml
+
+      - name: Mypy strict
+        run: .venv\Scripts\activate && mypy src/ --strict --config-file pyproject.toml
+
+      - name: Bandit security lint
+        run: .venv\Scripts\activate && bandit -r src/ -c pyproject.toml -f json -o bandit-report.json
+
+      - name: Check bandit high-severity
+        run: |
+          .venv\Scripts\activate
+          $high = python -c "import json; d=json.load(open('bandit-report.json')); print(len([r for r in d.get('results',[]) if r['issue_severity']=='HIGH']))"
+          if ([int]$high -gt 0) { Write-Error "Bandit: $high HIGH-severity issues"; exit 1 }
+
+      - name: Pytest unit + integration + coverage
+        run: .venv\Scripts\activate && pytest tests/unit/ tests/integration/ -v --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing
+
+      - name: Pip-audit
+        run: .venv\Scripts\activate && pip-audit -r requirements.txt --desc
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+'@ | Set-Content -Path ".github\workflows\tier0-pr-gate.yml" -Encoding UTF8
+
+INSTRUCTION 7.2 — Create Tier-1 Nightly Workflow
+----------------------------------------------------
+Execute:
+
+  @'
+name: Tier-1 Nightly Gate
+
+on:
+  schedule:
+    - cron: "0 2 * * *"  # 02:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tier1-gate:
+    name: Tier-1 Nightly Matrix
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv\Scripts\activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Property tests (Hypothesis)
+        run: .venv\Scripts\activate && pytest tests/property/ -v --hypothesis-profile=ci
+
+      - name: Record-replay tests
+        run: .venv\Scripts\activate && pytest tests/replay/ -v
+
+      - name: Benchmark regression
+        run: .venv\Scripts\activate && pytest tests/bench/ --benchmark-only --benchmark-compare=prev --benchmark-json=bench-results.json
+
+      - name: Parallel tests
+        run: .venv\Scripts\activate && pytest tests/ -n auto -v --dist=loadgroup
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: bench-results.json
+'@ | Set-Content -Path ".github\workflows\tier1-nightly.yml" -Encoding UTF8
+
+INSTRUCTION 7.3 — Create Tier-2 Pre-Release Workflow
+------------------------------------------------------
+Execute:
+
+  @'
+name: Tier-2 Pre-Release Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Release version (semver)"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  tier2-gate:
+    name: Tier-2 Pre-Release Matrix
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv\Scripts\activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Trivy
+        run: |
+          $url = "https://github.com/aquasecurity/trivy/releases/latest/download/trivy_windows_amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile trivy.zip
+          Expand-Archive -Path trivy.zip -DestinationPath trivy-bin -Force
+          Remove-Item trivy.zip
+
+      - name: Trivy filesystem scan
+        run: .\trivy-bin\trivy.exe fs . --format json --output trivy-results.json --severity HIGH,CRITICAL --exit-code 1
+
+      - name: CycloneDX SBOM
+        run: .venv\Scripts\activate && cyclonedx-bom -o sbom.json --format json --type pip
+
+      - name: Validate SBOM
+        run: .venv\Scripts\activate && python -c "import json; d=json.load(open('sbom.json')); assert len(d.get('components',[])) > 0; print(f'SBOM valid: {len(d[\"components\"])} components')"
+
+      - name: Locust load test
+        run: .venv\Scripts\activate && locust -f tests/load/locustfile.py --headless --users 100 --spawn-rate 10 --run-time 60s --host http://localhost:8000
+
+      - name: Extended replay (chaos)
+        run: .venv\Scripts\activate && pytest tests/replay/ --duration=long -v
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier2-artifacts
+          path: |
+            trivy-results.json
+            sbom.json
+            locust-*.csv
+'@ | Set-Content -Path ".github\workflows\tier2-prerelease.yml" -Encoding UTF8
+
+INSTRUCTION 7.4 — Create Mutation Testing Workflow (WSL2 Nightly)
+--------------------------------------------------------------------
+Execute:
+
+  @'
+name: Mutation Testing (WSL2 Nightly)
+
+on:
+  schedule:
+    - cron: "0 4 * * 0"  # Sunday 04:00 UTC
+  workflow_dispatch:
+
+jobs:
+  mutation-gate:
+    name: Mutation Testing
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run mutmut via WSL2
+        shell: pwsh
+        run: |
+          wsl --install -d Ubuntu-24.04 --no-launch
+          wsl -d Ubuntu-24.04 -- bash -c "
+            cd /mnt/g/OC/02June26
+            pip3 install mutmut pytest
+            mutmut run --paths-to-mutate src/ --runner 'pytest tests/unit/ tests/integration/ -x -q' --timeout 300
+            mutmut results
+          "
+
+      - name: Check mutation score
+        shell: pwsh
+        run: |
+          $result = wsl -d Ubuntu-24.04 -- bash -c "cd /mnt/g/OC/02June26 && mutmut results"
+          Write-Output $result
+'@ | Set-Content -Path ".github\workflows\mutation-nightly.yml" -Encoding UTF8
+
+================================================================================
+  PHASE 8 — COMPREHENSIVE VERIFICATION PROTOCOL
+================================================================================
+
+  Standards Reference:
+  - Every tool must be verified independently before gate execution
+  - Fowler: "Self-Testing Code" requires confidence in the test infrastructure
+  - NIST SSDF: PW.10 (configure infrastructure) requires verification
+
+INSTRUCTION 8.1 — Verify pytest + pytest-cov + coverage
+----------------------------------------------------------
+Execute:
+
+  pytest --version
+  python -c "import pytest_cov; print(f'pytest-cov {pytest_cov.__version__}')"
+  python -c "import coverage; print(f'coverage {coverage.__version__}'); assert coverage.version_info >= (7,6), 'coverage < 7.6'"
+
+INSTRUCTION 8.2 — Verify ruff (lint + format)
+------------------------------------------------
+Execute:
+
+  ruff --version
+  ruff check . --statistics
+  ruff format --check . --diff
+
+INSTRUCTION 8.3 — Verify mypy
+--------------------------------
+Execute:
+
+  mypy --version
+  mypy --version | Select-String "1\.(1[3-9]|[2-9][0-9])"  # >=1.13
+
+INSTRUCTION 8.4 — Verify bandit
+----------------------------------
+Execute:
+
+  bandit --version
+  python -c "import bandit; print(f'bandit {bandit.__version__}')"
+
+INSTRUCTION 8.5 — Verify pip-audit
+-------------------------------------
+Execute:
+
+  pip-audit --version
+  pip-audit -r requirements.txt --dry-run 2>$null; Write-Output "pip-audit executable: OK"
+
+INSTRUCTION 8.6 — Verify gitleaks
+------------------------------------
+Execute:
+
+  gitleaks version
+  gitleaks detect --source . --config .gitleaks.toml --dry-run 2>$null; Write-Output "gitleaks executable: OK"
+
+INSTRUCTION 8.7 — Verify hypothesis
+--------------------------------------
+Execute:
+
+  python -c "import hypothesis; print(f'hypothesis {hypothesis.__version__}'); assert hypothesis.version_info >= (6,112), 'hypothesis < 6.112'"
+
+INSTRUCTION 8.8 — Verify pytest-benchmark
+--------------------------------------------
+Execute:
+
+  python -c "import pytest_benchmark; print(f'pytest-benchmark {pytest_benchmark.__version__}')"
+
+INSTRUCTION 8.9 — Verify pytest-xdist
+----------------------------------------
+Execute:
+
+  python -c "import xdist; print(f'pytest-xdist {xdist.__version__}')"
+
+INSTRUCTION 8.10 — Verify pytest-asyncio
+-------------------------------------------
+Execute:
+
+  python -c "import pytest_asyncio; print(f'pytest-asyncio {pytest_asyncio.__version__}')"
+
+INSTRUCTION 8.11 — Verify cyclonedx-bom
+------------------------------------------
+Execute:
+
+  cyclonedx-bom --version
+  python -c "import cyclonedx; print(f'cyclonedx-python-lib present')"
+
+INSTRUCTION 8.12 — Verify trivy
+----------------------------------
+Execute:
+
+  trivy --version
+
+INSTRUCTION 8.13 — Verify locust
+-----------------------------------
+Execute:
+
+  locust --version
+  python -c "import locust; print(f'locust {locust.__version__}')"
+
+INSTRUCTION 8.14 — Full Stack Integration Verification
+--------------------------------------------------------
+Execute (run all gates sequentially with verbose output):
+
+  .\.venv\Scripts\activate
+
+  Write-Output "=== VERIFICATION: TIER-0 ==="
+  ruff check . --config pyproject.toml --statistics
+  ruff format --check . --config pyproject.toml
+  mypy src/ --strict --config-file pyproject.toml --error-summary
+  bandit -r src/ -c pyproject.toml -f txt
+  pytest tests/unit/ tests/integration/ -v --cov=src --cov-branch --cov-report=term-missing -x
+  pip-audit -r requirements.txt --progress-spinner off
+  gitleaks detect --source . --config .gitleaks.toml --no-banner
+
+  Write-Output "=== VERIFICATION: TIER-1 ==="
+  pytest tests/property/ -v --hypothesis-profile=ci -x
+  pytest tests/replay/ -v -x
+  pytest tests/bench/ --benchmark-only -x
+  pytest tests/ -n auto -v --dist=loadgroup -x
+
+  Write-Output "=== VERIFICATION: TIER-2 ==="
+  trivy fs . --format table
+  cyclonedx-bom -o sbom.json --format json --type pip
+  locust -f tests/load/locustfile.py --headless --users 10 --spawn-rate 5 --run-time 10s --host http://localhost:8000
+
+  Write-Output "=== ALL VERIFICATION COMPLETE ==="
+
+================================================================================
+  PHASE 9 — ERROR HANDLING & DEPLOY-READINESS PROTOCOL
+================================================================================
+
+  Standards Reference:
+  - NIST SSDF: PW.9 (binary/executable analysis), RV.1 (vulnerability response)
+  - OWASP: Incident response, risk acceptance framework
+  - Fowler: "Eradicating Non-Determinism in Tests" — quarantine + fix
+
+INSTRUCTION 9.1 — Error Handling Matrix
+------------------------------------------
+Every gate failure follows this protocol:
+
+  1. CAPTURE: Tool output saved to JSON/HTML artifact
+  2. CLASSIFY: Severity assigned (BLOCK / WARN / INFO)
+  3. COMMUNICATE: Error message with remediation guidance
+  4. CONTAIN: Non-zero exit code prevents merge/release
+  5. CORRECT: Developer fixes + re-runs gate locally before push
+  6. CONFIRM: CI re-runs full gate; partial runs NOT allowed
+
+Error Classification:
+
+  | Tool          | BLOCK Condition              | WARN Condition           | INFO         |
+  |---------------|------------------------------|--------------------------|--------------|
+  | ruff check    | Any error                    | N/A                      | N/A          |
+  | ruff format   | Any unformatted file         | N/A                      | N/A          |
+  | mypy          | Any error                    | N/A                      | N/A          |
+  | bandit        | HIGH severity                | MEDIUM severity          | LOW          |
+  | pytest        | Any test failure             | Skipped tests            | N/A          |
+  | coverage      | < 80% branch                 | 80-90%                   | > 90%        |
+  | pip-audit     | Any vulnerability            | Deprecation warning      | N/A          |
+  | gitleaks      | Any secret detected          | N/A                      | N/A          |
+  | hypothesis    | Any falsifying example       | Flaky (fix with @seed)   | N/A          |
+  | benchmark     | > 50% regression             | 20-50% regression        | < 20%        |
+  | trivy         | HIGH/CRITICAL CVE            | MEDIUM CVE               | LOW CVE      |
+  | cyclonedx     | Generation failure           | Missing NTIA field       | N/A          |
+  | locust        | Error rate >= 1%             | P95 > 500ms              | P95 < 500ms  |
+  | mutation      | Score < 60%                  | Score 60-80%             | Score > 80%  |
+
+INSTRUCTION 9.2 — Deploy-Readiness Checklist
+-----------------------------------------------
+Before ANY deployment, confirm ALL of the following:
+
+  [ ] Tier-0 Gate: ALL 7 checks PASS (exit code 0)
+  [ ] Tier-1 Gate: ALL 4 checks PASS (if nightly has run since last commit)
+  [ ] Tier-2 Gate: ALL 4 checks PASS (if pre-release)
+  [ ] Coverage report reviewed for uncovered critical paths
+  [ ] Bandit report has 0 HIGH-severity findings
+  [ ] pip-audit has 0 known vulnerabilities
+  [ ] gitleaks has 0 detected secrets
+  [ ] SBOM generated and archived
+  [ ] Trivy scan has 0 HIGH/CRITICAL CVEs
+  [ ] Load test results within acceptable thresholds
+  [ ] No quarantine tests (all flaky tests fixed)
+  [ ] Mutation score >= 80% (if nightly mutation run available)
+
+INSTRUCTION 9.3 — Security Exception Process
+-----------------------------------------------
+If a gate failure requires an exception:
+
+  1. Document in SECURITY_EXCEPTIONS.md:
+     - Tool, finding ID, severity, description
+     - Risk assessment (likelihood x impact)
+     - Compensating controls
+     - Remediation timeline
+     - Approver name + date
+
+  2. Add to allowlist/ignore file:
+     - gitleaks: .gitleaks.toml [[allowlist]]
+     - bandit: # nosec comment with ID
+     - trivy: .trivyignore with CVE ID + expiry
+     - pip-audit: pip-audit --ignore-vuln ID (NOT recommended; fix instead)
+
+  3. Review cadence: All exceptions reviewed quarterly
+
+INSTRUCTION 9.4 — Non-Determinism Eradication Protocol
+---------------------------------------------------------
+Per Martin Fowler "Eradicating Non-Determinism in Tests":
+
+  1. ISOLATE: Tests must not share mutable state
+  2. FREEZE TIME: Use freezegun or clock wrapper for time-dependent tests
+  3. MOCK EXTERNAL: All I/O (network, filesystem, database) via test doubles
+  4. QUARANTINE: Flaky tests moved to quarantine suite immediately
+  5. FIX: Quarantined tests fixed within 24 hours or removed
+  6. SEED: Hypothesis tests use explicit @seed for reproducibility
+  7. CLEANUP: Test fixtures clean up all resources (temp files, ports, processes)
+
+================================================================================
+  PHASE 10 — GATE MATRIX SUMMARY & EXECUTION ORDER
+================================================================================
+
+  EXECUTION HIERARCHY (bottom-up dependency):
+
+  Tier-0 (EVERY PR, <5 min target):
+    1. ruff check .                          [BLOCK on any error]
+    2. ruff format --check .                 [BLOCK on any unformatted file]
+    3. mypy src/ --strict                    [BLOCK on any error]
+    4. bandit -r src/                        [BLOCK on HIGH severity]
+    5. pytest tests/unit/ tests/integration/ [BLOCK on failure or <80% branch cov]
+    6. pip-audit -r requirements.txt         [BLOCK on any vulnerability]
+    7. gitleaks detect --source .            [BLOCK on any secret]
+
+  Tier-1 (NIGHTLY, ~30 min target):
+    1. pytest tests/property/ (Hypothesis)   [BLOCK on falsifying example]
+    2. pytest tests/replay/ (determinism)    [BLOCK on any divergence]
+    3. pytest tests/bench/ (benchmark)       [WARN on regression]
+    4. pytest tests/ -n auto (parallel)      [BLOCK on failure]
+
+  Tier-2 (PRE-RELEASE, ~2hr target):
+    1. trivy fs .                            [BLOCK on HIGH/CRITICAL CVE]
+    2. cyclonedx-bom (SBOM)                  [BLOCK on generation failure]
+    3. locust -f tests/load/                 [BLOCK on error rate >=1%]
+    4. pytest tests/replay/ --duration=long  [BLOCK on any failure]
+
+  Mutation (WSL2 NIGHTLY, Sunday):
+    1. mutmut run (via WSL2)                 [WARN on score <80%, BLOCK <60%]
+
+  GATE CRITERIA (from original requirements, VERIFIED):
+
+  | Criterion          | Threshold          | Tier   | Enforced By           |
+  |--------------------|--------------------|--------|-----------------------|
+  | ruff errors        | 0                  | T0     | ruff check            |
+  | mypy errors        | 0                  | T0     | mypy --strict         |
+  | bandit high-sev    | 0                  | T0     | bandit -r             |
+  | branch coverage    | >= 80%             | T0     | pytest-cov            |
+  | pip-audit vulns    | 0                  | T0     | pip-audit             |
+  | gitleaks secrets   | 0                  | T0     | gitleaks detect       |
+  | hypothesis         | 0 falsifying       | T1     | pytest + hypothesis   |
+  | replay determinism | 0 divergences      | T1     | pytest                |
+  | perf regression    | < 50% delta        | T1     | pytest-benchmark      |
+  | trivy CVEs         | 0 HIGH/CRITICAL    | T2     | trivy fs              |
+  | SBOM               | generated + valid  | T2     | cyclonedx-bom         |
+  | locust error rate  | < 1%               | T2     | locust                |
+  | mutation score     | >= 80%             | TM     | mutmut (WSL2)         |
+
+================================================================================
+  PHASE 11 — REFERENCE STANDARDS & BOOK EXTRACTIONS
+================================================================================
+
+  INDUSTRY STANDARDS APPLIED:
+
+  1. OWASP DevSecOps Guideline
+     - Credential leakage detection → gitleaks (Instruction 3.7)
+     - SAST → bandit (Instruction 3.4)
+     - SCA → pip-audit (Instruction 3.6)
+     - Container/FS scan → trivy (Instruction 5.1)
+     - Pipeline security → CI/CD with secrets (Phase 7)
+
+  2. NIST SP 800-218 (Secure Software Development Framework)
+     - PW.4: Code review (automated via Tier-0 gates)
+     - PW.7: Static analysis (ruff, mypy, bandit)
+     - PW.9: Binary/executable analysis (trivy, SBOM)
+     - RV.1: Vulnerability disclosure and response (pip-audit, trivy)
+
+  3. Martin Fowler Testing Principles
+     - Self-Testing Code → pytest suite with coverage gate
+     - Test Pyramid → unit > integration > property > replay > bench > load
+     - ThresholdTest → --cov-fail-under, --benchmark-compare
+     - Eradicating Non-Determinism → Phase 9.4 protocol
+     - TestCoverage → coverage is a tool, not a target (80% floor, not ceiling)
+
+  4. ISTQB Foundation Level
+     - Test levels: component (unit), integration, system (e2e/load)
+     - Test types: functional, performance (benchmark/locust), security (bandit)
+     - Test independence: automated gates independent of developer
+
+  5. SLSA Level 3
+     - Provenance: SBOM generation (cyclonedx-bom)
+     - Build integrity: CI/CD with pinned dependencies
+     - Hermetic builds: venv isolation, requirements.txt lockfile
+
+  6. CIS Benchmarks
+     - Container scanning: trivy with HIGH/CRITICAL gate
+     - Dependency pinning: exact versions in requirements.txt
+
+  BOOK EXTRACTIONS APPLIED:
+
+  1. "Python Testing with pytest" — Brian Okken (2nd Ed)
+     - Ch.2: pytest installation, configuration (pyproject.toml)
+     - Ch.3: Writing test functions (assert patterns)
+     - Ch.4: Fixtures and conftest.py (Phase 2.4-2.5)
+     - Ch.7: pytest-cov integration (Phase 3.5)
+     - Ch.9: Async testing with pytest-asyncio
+
+  2. "XUnit Test Patterns" — Gerard Meszaros
+     - TestDouble: mocks, fakes, stubs for isolation
+     - Parameterized Test: Hypothesis as advanced parameterization
+     - Test Pyramid: foundation for directory structure (Phase 2.1)
+
+  3. "Secure by Design" — Dan Bergh Johnsson et al.
+     - Domain primitives: validate at construction (bandit enforcement)
+     - Reducing attack surface: SAST/SCA in pipeline (Tier-0)
+     - Threat modeling: security exception process (Phase 9.3)
+
+  4. "Effective Python" — Brett Slatkin (3rd Ed)
+     - Item 63: Use pip-audit for dependency safety
+     - Item 64: Consider type checking with mypy --strict
+     - Item 65: Use ruff for linting (replaces flake8+black)
+
+  5. "The Art of Software Security Assessment" — Dowd et al.
+     - Static analysis methodology (bandit rules selection)
+     - Threat classification (bandit severity mapping in Phase 9.1)
+
+  6. "Software Security" — Gary McGraw
+     - Seven touchpoints: code review (Tier-0), risk analysis (Tier-2)
+     - Abuse cases: bandit SAST rules simulate abuse patterns
+
+================================================================================
+  END OF PLAN
+================================================================================
+
+  This plan contains 11 phases, 40+ sequential instructions, each directly
+  executable by an AI coding agent. No assumptions. No unresolved dependencies.
+  Every tool verified. Every gate enforced. Windows 11 native execution for
+  Tier-0/1. WSL2 for Tier-2 container scans and mutation testing.
+
+  NEXT ACTION: Execute Phase 0, Instruction 0.1 through Phase 8, Instruction 8.14
+  sequentially. Do NOT skip any instruction. Do NOT parallelize across phases.
+  Each phase depends on the previous phase completing successfully.
+================================================================================

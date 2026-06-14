@@ -1,0 +1,1938 @@
+# Phase 11: Signal Orchestration — Sequential AI-Agent Implementation PLAN
+
+> **Duration:** Weeks 24-26 | **Output:** `src/orchestrator/` with SignalOrchestrator, ConfidenceCombiner, SignalFetcher, TrailingStopMonitor, SessionManager — combines all signals into a unified TradeDecision with confidence score
+> **Environment:** Windows 11 + Python 3.12.7 + .venv at `G:\OC\02June26\indian-trading-bot\.venv`
+> **Reference Books:** López de Prado "Advances in Financial Machine Learning" Ch.8-9 (ensemble methods, signal combination, feature importance), Kleppmann "Designing Data-Intensive Applications" Ch.7 (circuit breakers, timeouts, fallbacks), Kaufman "Trading Systems and Methods" Ch.12 (system robustness, strategy combination)
+> **Reference Docs:** `SEBI_Algo_Trading_Regulation_Research.md` + `COMPLIANCE_SECURITY_MAPPING.md` + `tooling-reference.md`
+> **Extends:** Phase 0 scaffolding + Phase 5 strategy + Phase 10 risk — does NOT overwrite existing files
+> **CRITICAL:** This is a PLAN ONLY — no implementation, no other activity
+
+---
+
+## Critical Corrections Carried Forward (1-8 from Phase 0 + 9-20 new for Phase 11)
+
+| # | Issue | Original Assumption | Corrected Truth | Source |
+|---|-------|---------------------|-----------------|--------|
+| 1 | 500ms resting time | Must wait 500ms between orders | NOT a SEBI mandate — proposed 2016, dropped 2018 | SEBI/HO/MRD/DP/CIR/P/2018/62 |
+| 2 | Algo ID tagging | Bot must tag orders | Broker's responsibility per SEBI Feb 2025 | SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013 |
+| 3 | OPS threshold | Rate limit at 5 OPS | 10 OPS per NSE/INVG/67858; self-limit to 3 | NSE/INVG/67858 |
+| 4 | Zerodha sandbox | Test environment exists | NO sandbox — paper trading logs but doesn't send | KiteConnect API docs |
+| 5 | Bracket orders | Available for SL+target | Disabled since 2021 — trailing SL in bot logic | KiteConnect API docs |
+| 6 | Position limits | SEBI mandates 5/3 lots | Self-imposed — SEBI mandates exposure limits at client level | CIR/MRD/DP/09/2012 |
+| 7 | Self-trade prevention | Only broker RMS | Client-side addition as defense-in-depth | Zerodha RMS is primary |
+| 8 | Order modification limit | None specified | 25 per order per Zerodha API docs | Zerodha API docs |
+| 9 | Signal weights | 35/20/20/15/10 from Day 1 | Initially EQUAL (0.20 each); target weights after Phase 6 validation walk-forward | Plan.txt line 698; López de Prado Ch.9 (overfitting if tuned before validation) |
+| 10 | Confidence threshold | `combined_score > 0.6` | `abs(combined_score) > 0.6` — bearish trades have negative scores; plain `>` would reject all bearish signals | Score range [-1.0, +1.0]; this is a critical bug fix |
+| 11 | Decision: threshold only | Single gate (score > 0.6) | THREE gates: (a) threshold gate `abs(score) > 0.6`, (b) opposition gate `no signal source opposes with |weight×score| > 0.4`, (c) data quality gate `>= 3 of 5 sources available` | Kaufman Ch.12 (robustness); López de Prado Ch.8 (ensemble quality) |
+| 12 | Eval frequency | Every tick | Configurable interval, default 5 min — NOT per-tick (overtrading, OPS violation) | Kaufman Ch.9; Plan.txt line 110 |
+| 13 | Trailing stop | Simple 1.5×ATR | Ratchet mechanism: only moves in favorable direction, never retreats; minimum price move threshold (0.3% of entry) before ratchet advances | Kaufman Ch.10; Phase 5 correction #19 |
+| 14 | RAG signal | Direct numeric score | RAG returns qualitative text → convert to numeric via structured prompt: BULLISH=+0.6, NEUTRAL=0.0, BEARISH=-0.6, with confidence 0.0-1.0 | Phase 9 design; Kleppmann Ch.7 (fallback for unavailable) |
+| 15 | Phase 11 output | Places broker orders directly | Creates `TradeDecision` DTOs — does NOT call broker.place_order(); broker execution is separate concern (Phase 12 paper trading) | Stability principle; separation of concerns |
+| 16 | Orchestrator scope | Single global instance | Per-symbol orchestrator instances — NIFTY and BANKNIFTY have independent evaluation cycles, weights, circuit breakers | López de Prado Ch.8 (per-instrument models) |
+| 17 | Session lifecycle | Run only during 9:15-15:30 | Full session: PRE_OPEN (9:00-9:15) warmup, REGULAR (9:15-15:30) trading, POST_CLOSE (15:30-15:40) P&L log + cleanup | Phase 0 compliance.py TradingSession enum |
+| 18 | Signal source failure | Abort if any source missing | Circuit breaker per source (Kleppmann Ch.7): 3 consecutive failures → open for 5 min → half-open → close; weight redistribution for unavailable sources | Kleppmann Ch.7 (circuit breaker pattern) |
+| 19 | Signal combination | Simple weighted average | Weighted average + importance analysis (drop-one: López de Prado Ch.9) + weight normalization on missing sources | López de Prado Ch.9 (feature importance) |
+| 20 | Combined score range | [0, 1] | [-1.0, +1.0]: negative = bearish, positive = bullish, |score| = conviction strength | Consistent with Phase 5 Signal dataclass |
+
+---
+
+## Phase 0-10 Scaffolding Already Built (DO NOT recreate — EXTEND only)
+
+### Existing Files:
+- `src/strategy/base.py` — StrategyInterface (on_tick, on_order_update, start, stop, strategy_id, version)
+- `src/risk/manager.py` — RiskManager, PreTradeCheckDetail, PreTradeCheckResult, RiskCheckResult (PASS/FAIL/THROTTLED/KILLED), TokenBucketRateLimiter
+- `src/risk/compliance.py` — Segments, TradingSession, get_trading_session(), is_order_allowed(), validate_symbol(), format_algo_tag()
+- `src/risk/kill_switch.py` — KillSwitchLevel (INACTIVE/THROTTLE/PAUSE/KILL), KillSwitchEvent, KillSwitch class
+- `src/risk/audit.py` — AuditEvent, AuditLogger (SHA-256 chain, NTP-synchronized)
+- `src/brokers/base.py` — BrokerInterface (authenticate, place_order, cancel_order, cancel_all_orders, get_positions, get_margins, get_order_book, get_instruments)
+- `src/data/providers.py` — MarketDataProvider (get_quote, get_historical, subscribe)
+- `config/settings.py` — ComplianceSettings, RiskSettings, KillSwitchSettings, AuditSettings, BrokerSettings (all Pydantic BaseSettings)
+- `tests/conftest.py` — shared fixtures
+
+### What Phase 11 Adds (NEW files/classes):
+- `src/orchestrator/__init__.py` — Package init with public exports
+- `src/orchestrator/models.py` — SignalSource enum, SignalPayload, CombinedScore, TradeDecision, DecisionGate, CircuitBreakerState dataclasses
+- `src/orchestrator/confidence_combiner.py` — ConfidenceCombiner (weighted average, weight normalization, opposition gate, drop-one importance)
+- `src/orchestrator/signal_fetcher.py` — SignalFetcher (parallel fetch via asyncio.gather, circuit breaker per source, stub fallbacks for unimplemented phases)
+- `src/orchestrator/trailing_stop_monitor.py` — TrailingStopMonitor (ratchet mechanism, min move threshold, SL-M order generation)
+- `src/orchestrator/signal_orchestrator.py` — SignalOrchestrator (per-symbol, eval cycle, three decision gates, risk check delegation, audit logging)
+- `src/orchestrator/session_manager.py` — SessionManager (PRE_OPEN warmup, REGULAR trading, POST_CLOSE cleanup, daily P&L summary)
+- `config/settings.py` — ADD OrchestrationSettings (extend, don't overwrite)
+- New test files: `tests/orchestrator/test_models.py`, `tests/orchestrator/test_confidence_combiner.py`, `tests/orchestrator/test_signal_fetcher.py`, `tests/orchestrator/test_trailing_stop_monitor.py`, `tests/orchestrator/test_signal_orchestrator.py`, `tests/orchestrator/test_session_manager.py`
+
+---
+
+## New Dependencies
+
+```
+# No new runtime dependencies required for Phase 11.
+# All computation uses existing Phase 0-10 infrastructure:
+# "numpy>=1.26" — already from Phase 0
+# "pydantic>=2.5" — models (already from Phase 0)
+# "pydantic-settings>=2.1" — config (already from Phase 1)
+# "structlog>=23.2" — logging (already from Phase 0)
+# "pytest-asyncio>=0.23" — async test support (already in dev)
+```
+
+---
+
+## Instruction 1 — Add `OrchestrationSettings` to `config/settings.py`
+
+**Action:** EXTEND `config/settings.py` — add one new Pydantic BaseSettings class AFTER existing `BrokerSettings` class. Do NOT modify any existing class.
+
+### 1.1 OrchestrationSettings
+
+```python
+class OrchestrationSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ORCH_", env_file=".env", extra="ignore")
+
+    # --- Signal evaluation interval ---
+    SIGNAL_EVAL_INTERVAL_SECONDS: int = Field(
+        default=300, ge=60, le=3600,
+        description="Seconds between signal evaluations (default 5 min, Correction #12)"
+    )
+
+    # --- Signal weights (initially equal, Correction #9) ---
+    WEIGHT_TECHNICAL: float = Field(default=0.20, ge=0.0, le=1.0)
+    WEIGHT_VOLUME: float = Field(default=0.20, ge=0.0, le=1.0)
+    WEIGHT_SENTIMENT: float = Field(default=0.20, ge=0.0, le=1.0)
+    WEIGHT_MARKET_STRENGTH: float = Field(default=0.20, ge=0.0, le=1.0)
+    WEIGHT_RAG: float = Field(default=0.20, ge=0.0, le=1.0)
+
+    # --- Target weights (after Phase 6 walk-forward validation) ---
+    TARGET_WEIGHT_TECHNICAL: float = Field(default=0.35, ge=0.0, le=1.0)
+    TARGET_WEIGHT_VOLUME: float = Field(default=0.20, ge=0.0, le=1.0)
+    TARGET_WEIGHT_SENTIMENT: float = Field(default=0.20, ge=0.0, le=1.0)
+    TARGET_WEIGHT_MARKET_STRENGTH: float = Field(default=0.15, ge=0.0, le=1.0)
+    TARGET_WEIGHT_RAG: float = Field(default=0.10, ge=0.0, le=1.0)
+
+    # --- Confidence threshold (Correction #10: abs(score) > threshold) ---
+    CONFIDENCE_THRESHOLD: float = Field(
+        default=0.60, ge=0.0, le=1.0,
+        description="Minimum |combined_score| to trade (Correction #10)"
+    )
+
+    # --- Opposition gate (Correction #11) ---
+    OPPOSITION_GATE_THRESHOLD: float = Field(
+        default=0.40, ge=0.0, le=1.0,
+        description="If any source opposes with |weight*score| > this, block trade"
+    )
+
+    # --- Data quality gate (Correction #11) ---
+    MIN_SOURCES_REQUIRED: int = Field(
+        default=3, ge=1, le=5,
+        description="Minimum signal sources available to trade (Correction #11)"
+    )
+
+    # --- Circuit breaker (Correction #18, Kleppmann Ch.7) ---
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = Field(
+        default=3, ge=1, le=10,
+        description="Consecutive failures before opening circuit breaker"
+    )
+    CIRCUIT_BREAKER_OPEN_DURATION_SECONDS: float = Field(
+        default=300.0, ge=30.0, le=3600.0,
+        description="Duration circuit breaker stays open (default 5 min)"
+    )
+    CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS: int = Field(
+        default=1, ge=1, le=5,
+        description="Calls allowed in half-open state to test recovery"
+    )
+
+    # --- Trailing stop (Correction #13) ---
+    TRAILING_STOP_MIN_MOVE_PCT: float = Field(
+        default=0.003, ge=0.001, le=0.01,
+        description="Min price move (0.3% of entry) before ratchet advances (Correction #13)"
+    )
+
+    # --- RAG qualitative-to-numeric mapping (Correction #14) ---
+    RAG_BULLISH_SCORE: float = Field(default=0.60, ge=0.0, le=1.0)
+    RAG_NEUTRAL_SCORE: float = Field(default=0.0, ge=-1.0, le=1.0)
+    RAG_BEARISH_SCORE: float = Field(default=-0.60, ge=-1.0, le=0.0)
+
+    # --- Per-symbol orchestrator (Correction #16) ---
+    ENABLED_SYMBOLS: list[str] = Field(
+        default=["NIFTY", "BANKNIFTY"],
+        description="Symbols with independent orchestrator instances (Correction #16)"
+    )
+
+    # --- Session lifecycle (Correction #17) ---
+    PRE_OPEN_WARMUP_SECONDS: int = Field(
+        default=60, ge=30, le=300,
+        description="Seconds before market open to start warmup fetches"
+    )
+    POST_CLOSE_CLEANUP_SECONDS: int = Field(
+        default=60, ge=30, le=300,
+        description="Seconds after market close for P&L logging and cleanup"
+    )
+
+    # --- Audit ---
+    LOG_ALL_SIGNALS: bool = Field(
+        default=True,
+        description="Log all signal payloads even if no trade decision made"
+    )
+```
+
+### 1.2 Validation Rules:
+- Sum of all 5 WEIGHT_* fields must equal 1.0 (±0.001 tolerance for float arithmetic)
+- Sum of all 5 TARGET_WEIGHT_* fields must equal 1.0 (±0.001 tolerance)
+- `CONFIDENCE_THRESHOLD` must be >= 0.0 and <= 1.0
+- `OPPOSITION_GATE_THRESHOLD` must be < `CONFIDENCE_THRESHOLD` (opposition gate is a softer check)
+- `MIN_SOURCES_REQUIRED` must be >= 1 and <= 5
+- Add a `@model_validator(mode="after")` to enforce cross-field validation:
+
+```python
+@model_validator(mode="after")
+def validate_weights(self) -> "OrchestrationSettings":
+    weight_sum = (
+        self.WEIGHT_TECHNICAL + self.WEIGHT_VOLUME + self.WEIGHT_SENTIMENT
+        + self.WEIGHT_MARKET_STRENGTH + self.WEIGHT_RAG
+    )
+    if abs(weight_sum - 1.0) > 0.001:
+        raise ValueError(f"Signal weights must sum to 1.0, got {weight_sum:.4f}")
+    target_sum = (
+        self.TARGET_WEIGHT_TECHNICAL + self.TARGET_WEIGHT_VOLUME
+        + self.TARGET_WEIGHT_SENTIMENT + self.TARGET_WEIGHT_MARKET_STRENGTH
+        + self.TARGET_WEIGHT_RAG
+    )
+    if abs(target_sum - 1.0) > 0.001:
+        raise ValueError(f"Target weights must sum to 1.0, got {target_sum:.4f}")
+    if self.OPPOSITION_GATE_THRESHOLD >= self.CONFIDENCE_THRESHOLD:
+        raise ValueError(
+            f"OPPOSITION_GATE_THRESHOLD ({self.OPPOSITION_GATE_THRESHOLD}) must be < "
+            f"CONFIDENCE_THRESHOLD ({self.CONFIDENCE_THRESHOLD})"
+        )
+    return self
+```
+
+### 1.3 Verification Gate:
+- `python -c "from config.settings import OrchestrationSettings; s = OrchestrationSettings(); print(f'weights sum: {s.WEIGHT_TECHNICAL+s.WEIGHT_VOLUME+s.WEIGHT_SENTIMENT+s.WEIGHT_MARKET_STRENGTH+s.WEIGHT_RAG:.2f}'); assert abs(s.WEIGHT_TECHNICAL+s.WEIGHT_VOLUME+s.WEIGHT_SENTIMENT+s.WEIGHT_MARKET_STRENGTH+s.WEIGHT_RAG - 1.0) < 0.001; print('OrchestrationSettings OK')"`
+- Must pass without error
+
+---
+
+## Instruction 2 — Create `src/orchestrator/models.py` — Data Models
+
+**Action:** Create new file `src/orchestrator/models.py`. All models are frozen dataclasses (value objects, Phase 5 pattern). Score range is [-1.0, +1.0] (Correction #20).
+
+### 2.1 Enum SignalSource
+
+```python
+class SignalSource(Enum):
+    TECHNICAL = "TECHNICAL"          # Phase 3: AnalysisEngine TechnicalReport
+    VOLUME = "VOLUME"                # Phase 3: AnalysisEngine VolumeReport
+    SENTIMENT = "SENTIMENT"          # Phase 8: NLP pipeline sentiment score
+    MARKET_STRENGTH = "MARKET_STRENGTH"  # Phase 4: MarketStrengthEngine
+    RAG = "RAG"                      # Phase 9: RAG macro context
+```
+
+### 2.2 Dataclass SignalPayload
+
+```python
+@dataclass(frozen=True)
+class SignalPayload:
+    """Single signal from one source at a point in time.
+
+    Attributes:
+        source: Which signal source produced this.
+        symbol: Trading symbol (e.g., "NIFTY", "BANKNIFTY").
+        score: Signal score in [-1.0, +1.0]. Positive = bullish, negative = bearish.
+        confidence: Confidence in this signal [0.0, 1.0]. 0 = no data, 1 = fully confident.
+        timestamp: When the signal was computed (monotonic for ordering).
+        metadata: Source-specific details (e.g., indicators triggered, RAG text snippet).
+        is_stub: True if this is a fallback/stub value because the real source is unavailable.
+    """
+    source: SignalSource
+    symbol: str
+    score: float       # [-1.0, +1.0]
+    confidence: float   # [0.0, 1.0]
+    timestamp: float
+    metadata: dict = field(default_factory=dict)
+    is_stub: bool = False
+```
+
+### 2.3 Enum DecisionGateResult
+
+```python
+class DecisionGateResult(Enum):
+    PASS = "PASS"
+    FAIL_THRESHOLD = "FAIL_THRESHOLD"          # |combined_score| <= CONFIDENCE_THRESHOLD
+    FAIL_OPPOSITION = "FAIL_OPPOSITION"        # A source strongly opposes
+    FAIL_DATA_QUALITY = "FAIL_DATA_QUALITY"    # Too few sources available
+```
+
+### 2.4 Dataclass CombinedScore
+
+```python
+@dataclass(frozen=True)
+class CombinedScore:
+    """Result of combining all signal payloads via weighted average.
+
+    Attributes:
+        combined_score: Weighted average score in [-1.0, +1.0].
+        normalized_weights: Dict of source -> weight after normalization for available sources.
+        individual_scores: Dict of source -> SignalPayload that contributed.
+        missing_sources: List of sources that were unavailable (stub or missing).
+        importance: Dict of source -> drop-one importance (how much combined_score changes when source removed).
+        n_sources_available: Number of non-stub sources.
+    """
+    combined_score: float
+    normalized_weights: dict[SignalSource, float]
+    individual_scores: dict[SignalSource, SignalPayload]
+    missing_sources: list[SignalSource]
+    importance: dict[SignalSource, float]
+    n_sources_available: int
+```
+
+### 2.5 Dataclass TradeDecision
+
+```python
+@dataclass(frozen=True)
+class TradeDecision:
+    """Output of the orchestrator: a decision to trade or hold.
+
+    This is a DTO — it does NOT place orders. Broker execution is Phase 12.
+    (Correction #15)
+
+    Attributes:
+        symbol: Trading symbol.
+        action: SELL_SHORT, BUY_LONG, EXIT, or HOLD from Phase 5 SignalAction.
+        combined_score: The combined signal score.
+        confidence: Overall confidence [0.0, 1.0].
+        gate_result: PASS if all 3 gates passed, specific FAIL reason otherwise.
+        gate_details: List of gate check results.
+        strike: Selected option strike (from Phase 5 StrikeSelector).
+        lots: Number of lots (from Phase 5 PositionSizer).
+        trailing_stop_price: Initial trailing stop price.
+        trailing_stop_direction: +1 for long (ratchet up), -1 for short (ratchet down).
+        entry_price: Estimated entry price.
+        risk_check_result: PreTradeCheckResult from Phase 10 RiskManager (None if not run).
+        timestamp: When the decision was made.
+        session: Current TradingSession.
+        metadata: Additional context (signal details, regime, etc.).
+    """
+    symbol: str
+    action: str  # Phase 5 SignalAction: "SELL_SHORT" | "BUY_LONG" | "EXIT" | "HOLD"
+    combined_score: float
+    confidence: float
+    gate_result: DecisionGateResult
+    gate_details: list[str] = field(default_factory=list)
+    strike: str | None = None
+    lots: int | None = None
+    trailing_stop_price: float | None = None
+    trailing_stop_direction: int | None = None
+    entry_price: float | None = None
+    risk_check_result: object | None = None  # PreTradeCheckResult from Phase 10
+    timestamp: float | None = None
+    session: str | None = None  # TradingSession.value
+    metadata: dict = field(default_factory=dict)
+```
+
+### 2.6 Enum CircuitBreakerState
+
+```python
+class CircuitBreakerState(Enum):
+    CLOSED = "CLOSED"      # Normal: requests flow through
+    OPEN = "OPEN"          # Failing: requests rejected immediately
+    HALF_OPEN = "HALF_OPEN"  # Testing: limited requests allowed to probe recovery
+```
+
+### 2.7 Dataclass CircuitBreakerStatus
+
+```python
+@dataclass(frozen=True)
+class CircuitBreakerStatus:
+    """State of a circuit breaker for one signal source.
+
+    Attributes:
+        source: The signal source this breaker protects.
+        state: Current breaker state.
+        consecutive_failures: Current count of consecutive failures.
+        last_failure_time: Monotonic timestamp of last failure.
+        last_failure_reason: Error message from last failure.
+        open_until: Monotonic timestamp when breaker transitions from OPEN to HALF_OPEN.
+        total_failures: All-time failure count for this source.
+        total_successes: All-time success count for this source.
+    """
+    source: SignalSource
+    state: CircuitBreakerState
+    consecutive_failures: int
+    last_failure_time: float | None
+    last_failure_reason: str | None
+    open_until: float | None
+    total_failures: int
+    total_successes: int
+```
+
+### 2.8 Validation in `__post_init__`:
+- `SignalPayload.score` must be in [-1.0, +1.0] — raise ValueError if outside
+- `SignalPayload.confidence` must be in [0.0, 1.0] — raise ValueError if outside
+- `TradeDecision.combined_score` must be in [-1.0, +1.0]
+- `TradeDecision.trailing_stop_direction` must be -1 or +1 if not None
+
+---
+
+## Instruction 3 — Create `src/orchestrator/confidence_combiner.py` — Weighted Signal Combination
+
+**Action:** Create new file `src/orchestrator/confidence_combiner.py`.
+**Reference:** López de Prado Ch.8-9 (ensemble methods, drop-one feature importance)
+
+### 3.1 Class ConfidenceCombiner
+
+```python
+class ConfidenceCombiner:
+    """Combine multiple signal payloads into a single weighted score.
+
+    Implements:
+    - Weighted average with normalization for missing sources (Correction #9, #19)
+    - Opposition gate: block if any source strongly opposes (Correction #11)
+    - Data quality gate: require minimum sources (Correction #11)
+    - Drop-one importance analysis (López de Prado Ch.9)
+
+    Args:
+        settings: OrchestrationSettings for weights and thresholds.
+    """
+
+    def __init__(self, settings: OrchestrationSettings):
+        self._settings = settings
+        self._source_weights: dict[SignalSource, float] = {
+            SignalSource.TECHNICAL: settings.WEIGHT_TECHNICAL,
+            SignalSource.VOLUME: settings.WEIGHT_VOLUME,
+            SignalSource.SENTIMENT: settings.WEIGHT_SENTIMENT,
+            SignalSource.MARKET_STRENGTH: settings.WEIGHT_MARKET_STRENGTH,
+            SignalSource.RAG: settings.WEIGHT_RAG,
+        }
+
+    def combine(self, payloads: list[SignalPayload]) -> CombinedScore:
+        """Combine signal payloads into a weighted score.
+
+        Steps:
+        1. Separate available (non-stub) vs missing (stub/absent) sources
+        2. If available sources < MIN_SOURCES_REQUIRED: set combined_score = 0.0,
+           all gates will FAIL_DATA_QUALITY
+        3. Normalize weights: redistribute missing source weights proportionally
+           among available sources so they sum to 1.0
+           Formula: normalized_weight_i = weight_i / sum(available_weights)
+        4. Compute weighted average:
+           combined_score = sum(normalized_weight_i * score_i) for available sources
+        5. Compute drop-one importance (López de Prado Ch.9):
+           For each available source, recompute score with that source dropped.
+           importance_i = |full_score - score_without_i|
+        6. Return CombinedScore with all metadata
+
+        CRITICAL (Correction #10): score range is [-1.0, +1.0].
+        The threshold check must use abs(combined_score) > CONFIDENCE_THRESHOLD,
+        NOT combined_score > CONFIDENCE_THRESHOLD.
+        A bearish trade with combined_score = -0.75 should pass threshold gate.
+        """
+
+    def check_threshold_gate(self, combined: CombinedScore) -> DecisionGateResult:
+        """Gate 1: Is |combined_score| > CONFIDENCE_THRESHOLD?
+
+        (Correction #10: uses abs() for bearish signals)
+        Returns PASS or FAIL_THRESHOLD.
+        """
+        if abs(combined.combined_score) > self._settings.CONFIDENCE_THRESHOLD:
+            return DecisionGateResult.PASS
+        return DecisionGateResult.FAIL_THRESHOLD
+
+    def check_opposition_gate(self, combined: CombinedScore) -> DecisionGateResult:
+        """Gate 2: Does any source strongly oppose the combined direction?
+
+        (Correction #11): A source opposes if:
+        - sign(source_score) != sign(combined_score), AND
+        - |source_weight * source_score| > OPPOSITION_GATE_THRESHOLD
+
+        This prevents trading when a single source has a strong contrarian view.
+        Returns PASS or FAIL_OPPOSITION.
+        """
+
+    def check_data_quality_gate(self, combined: CombinedScore) -> DecisionGateResult:
+        """Gate 3: Are enough sources available?
+
+        (Correction #11): n_sources_available >= MIN_SOURCES_REQUIRED
+        Returns PASS or FAIL_DATA_QUALITY.
+        """
+
+    def _normalize_weights(self, available_sources: set[SignalSource]) -> dict[SignalSource, float]:
+        """Redistribute weights from missing sources to available sources.
+
+        Formula: normalized_w_i = raw_w_i / sum(raw_w_j for j in available)
+
+        This ensures weights always sum to 1.0 regardless of missing sources.
+        """
+
+    def _compute_drop_one_importance(self, payloads: list[SignalPayload], full_score: float) -> dict[SignalSource, float]:
+        """Compute feature importance via drop-one analysis.
+
+        For each available source i:
+        1. Remove source i from payloads
+        2. Recompute combined score without source i
+        3. importance_i = |full_score - score_without_i|
+
+        Per López de Prado Ch.9: this measures how much each source
+        contributes to the final decision. High importance = high influence.
+        """
+```
+
+### 3.2 Key Implementation Rules:
+- `combine()` must NEVER raise an exception — if all sources are missing, return `CombinedScore(combined_score=0.0, ...)` with `n_sources_available=0`
+- Weight normalization: if only TECHNICAL and VOLUME are available (weights 0.20 each), normalized = 0.50 each (0.20/0.40)
+- Opposition gate: only check sources whose `is_stub=False` — stub sources have no real opinion
+- Drop-one importance is computed ONLY for non-stub sources
+- All intermediate calculations use float; final results stored in frozen dataclass
+
+---
+
+## Instruction 4 — Create `src/orchestrator/signal_fetcher.py` — Parallel Signal Fetching with Circuit Breakers
+
+**Action:** Create new file `src/orchestrator/signal_fetcher.py`.
+**Reference:** Kleppmann Ch.7 (circuit breaker pattern, timeouts, fallbacks)
+
+### 4.1 Class SignalFetcher
+
+```python
+class SignalFetcher:
+    """Fetch all signal sources in parallel with circuit breaker protection.
+
+    Uses asyncio.gather() for parallel fetching (Correction #18).
+    Each source has its own circuit breaker (Kleppmann Ch.7).
+    If a source's circuit breaker is OPEN, return a stub payload immediately.
+    If a source's circuit breaker is HALF_OPEN, allow limited probing.
+
+    Args:
+        settings: OrchestrationSettings for circuit breaker params.
+        data_provider: MarketDataProvider for market data.
+        analysis_engine: Phase 3 AnalysisEngine (or None if not implemented).
+        market_strength_engine: Phase 4 MarketStrengthEngine (or None if not implemented).
+        sentiment_pipeline: Phase 8 sentiment pipeline (or None if not implemented).
+        rag_pipeline: Phase 9 RAG pipeline (or None if not implemented).
+    """
+
+    def __init__(
+        self,
+        settings: OrchestrationSettings,
+        data_provider: MarketDataProvider | None = None,
+        analysis_engine: object | None = None,
+        market_strength_engine: object | None = None,
+        sentiment_pipeline: object | None = None,
+        rag_pipeline: object | None = None,
+    ):
+        self._settings = settings
+        self._data_provider = data_provider
+        self._analysis_engine = analysis_engine
+        self._market_strength_engine = market_strength_engine
+        self._sentiment_pipeline = sentiment_pipeline
+        self._rag_pipeline = rag_pipeline
+        self._circuit_breakers: dict[SignalSource, _CircuitBreaker] = {
+            source: _CircuitBreaker(source, settings)
+            for source in SignalSource
+        }
+
+    async def fetch_all(self, symbol: str) -> list[SignalPayload]:
+        """Fetch all 5 signal sources in parallel.
+
+        Steps:
+        1. For each SignalSource, create an asyncio task for _fetch_source()
+        2. Run all tasks via asyncio.gather(*tasks, return_exceptions=True)
+        3. For any task that raised an exception:
+           - Record failure in circuit breaker
+           - Return stub payload for that source
+        4. For any task where circuit breaker was OPEN:
+           - Skip the fetch entirely, return stub immediately
+        5. Return list of 5 SignalPayloads (real or stub)
+
+        Timeout: each individual fetch has a 5-second timeout.
+        If a source takes > 5 seconds, cancel and return stub.
+        """
+
+    async def _fetch_source(self, source: SignalSource, symbol: str) -> SignalPayload:
+        """Fetch a single signal source.
+
+        Dispatch based on source:
+        - TECHNICAL: call analysis_engine.generate_technical_report(symbol)
+        - VOLUME: call analysis_engine.generate_volume_report(symbol)
+        - SENTIMENT: call sentiment_pipeline.get_sentiment(symbol)
+        - MARKET_STRENGTH: call market_strength_engine.evaluate(symbol)
+        - RAG: call rag_pipeline.query(symbol) -> convert qualitative to numeric (Correction #14)
+
+        If the engine/pipeline is None (phase not implemented): return stub with score=0.0, confidence=0.0
+        If the engine/pipeline raises an exception: re-raise (handled by fetch_all)
+
+        RAG conversion (Correction #14):
+        - response = rag_pipeline.query(f"Market outlook for {symbol}")
+        - Parse structured response for BULLISH/NEUTRAL/BEARISH keyword
+        - score = RAG_BULLISH_SCORE / RAG_NEUTRAL_SCORE / RAG_BEARISH_SCORE
+        - confidence = 0.5 (RAG is inherently lower confidence than quantitative)
+        """
+
+    def _make_stub(self, source: SignalSource, symbol: str, reason: str) -> SignalPayload:
+        """Create a stub payload for an unavailable source.
+
+        Stub: score=0.0, confidence=0.0, is_stub=True
+        Reason recorded in metadata["stub_reason"].
+        """
+
+    def get_circuit_breaker_status(self, source: SignalSource) -> CircuitBreakerStatus:
+        """Get current circuit breaker status for a source."""
+
+    def reset_circuit_breaker(self, source: SignalSource) -> None:
+        """Manually reset a circuit breaker to CLOSED state.
+        Only for admin/ops use — not called during normal trading."""
+```
+
+### 4.2 Class _CircuitBreaker (internal)
+
+```python
+class _CircuitBreaker:
+    """Circuit breaker per signal source (Kleppmann Ch.7).
+
+    States:
+    - CLOSED: Normal. Track consecutive failures.
+      On CIRCUIT_BREAKER_FAILURE_THRESHOLD consecutive failures -> transition to OPEN.
+    - OPEN: Reject all requests immediately.
+      After CIRCUIT_BREAKER_OPEN_DURATION_SECONDS -> transition to HALF_OPEN.
+    - HALF_OPEN: Allow CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS requests.
+      If they succeed -> transition to CLOSED.
+      If any fails -> transition back to OPEN.
+
+    Thread safety: use asyncio.Lock for state transitions.
+
+    Args:
+        source: The signal source this breaker protects.
+        settings: OrchestrationSettings for thresholds.
+    """
+
+    def __init__(self, source: SignalSource, settings: OrchestrationSettings):
+        self._source = source
+        self._settings = settings
+        self._state = CircuitBreakerState.CLOSED
+        self._consecutive_failures = 0
+        self._last_failure_time: float | None = None
+        self._last_failure_reason: str | None = None
+        self._open_until: float | None = None
+        self._half_open_calls: int = 0
+        self._total_failures = 0
+        self._total_successes = 0
+        self._lock = asyncio.Lock()
+
+    async def before_call(self) -> bool:
+        """Check if a call is allowed.
+
+        Returns:
+            True if the call should proceed, False if circuit is OPEN.
+        In HALF_OPEN, increments call counter and allows limited calls.
+        """
+
+    async def record_success(self) -> None:
+        """Record a successful call.
+
+        In CLOSED: reset consecutive_failures to 0.
+        In HALF_OPEN: if enough successes, transition to CLOSED.
+        """
+
+    async def record_failure(self, reason: str) -> None:
+        """Record a failed call.
+
+        In CLOSED: increment consecutive_failures.
+          If >= threshold, transition to OPEN.
+        In HALF_OPEN: immediately transition back to OPEN.
+        """
+
+    def get_status(self) -> CircuitBreakerStatus:
+        """Return current status as CircuitBreakerStatus dataclass."""
+```
+
+### 4.3 Key Implementation Rules:
+- `fetch_all()` uses `asyncio.gather(*tasks, return_exceptions=True)` — never let one source's failure crash others
+- Each source fetch has a 5-second timeout: `asyncio.wait_for(_fetch_source(), timeout=5.0)`
+- If `analysis_engine` is None, TECHNICAL and VOLUME return stubs (Phase 3 not implemented)
+- If `market_strength_engine` is None, MARKET_STRENGTH returns stub (Phase 4 not implemented)
+- If `sentiment_pipeline` is None, SENTIMENT returns stub (Phase 8 not implemented)
+- If `rag_pipeline` is None, RAG returns stub (Phase 9 not implemented)
+- All stubs have `is_stub=True`, `score=0.0`, `confidence=0.0`
+- Circuit breaker state transitions are logged via structlog
+- NEVER retry a fetch within the same eval cycle — one attempt per source per cycle
+
+---
+
+## Instruction 5 — Create `src/orchestrator/trailing_stop_monitor.py` — Ratchet Trailing Stop
+
+**Action:** Create new file `src/orchestrator/trailing_stop_monitor.py`.
+**Reference:** Kaufman Ch.10 (trailing stop design, ratchet mechanism)
+
+### 5.1 Dataclass TrailingStopState
+
+```python
+@dataclass
+class TrailingStopState:
+    """Mutable state for one position's trailing stop.
+
+    Attributes:
+        symbol: Trading symbol.
+        direction: +1 for long (ratchet up), -1 for short (ratchet down).
+        entry_price: Entry price of the position.
+        current_stop_price: Current trailing stop price level.
+        best_price: Best price seen since entry (highest for long, lowest for short).
+        stop_distance_pct: Stop distance as fraction of entry price (from Phase 5 StrategySettings).
+        min_move_pct: Minimum price move before ratchet advances (Correction #13).
+        last_ratchet_time: Monotonic timestamp of last ratchet advance.
+        n_ratchet_advances: Count of ratchet advances (for audit).
+        position_id: Unique identifier for the position being tracked.
+    """
+    symbol: str
+    direction: int  # +1 or -1
+    entry_price: float
+    current_stop_price: float
+    best_price: float
+    stop_distance_pct: float
+    min_move_pct: float
+    last_ratchet_time: float | None = None
+    n_ratchet_advances: int = 0
+    position_id: str | None = None
+```
+
+### 5.2 Class TrailingStopMonitor
+
+```python
+class TrailingStopMonitor:
+    """Ratchet trailing stop monitor for active positions.
+
+    Implements ratchet mechanism (Correction #13):
+    - Stop only moves in favorable direction (up for long, down for short)
+    - Stop NEVER retreats — once advanced, stays advanced
+    - Ratchet advances only when price moves >= min_move_pct from previous best
+    - When stop is hit, generates an EXIT TradeDecision
+
+    Per Kaufman Ch.10: trailing stops must adapt to volatility regime.
+    The stop_distance_pct is set at entry by Phase 5's AdaptiveTrailingStop
+    (which adjusts by VIX + market_strength + volume_spike).
+    Phase 11's monitor only executes the ratchet — it does NOT recompute distance.
+
+    Args:
+        settings: OrchestrationSettings for TRAILING_STOP_MIN_MOVE_PCT.
+    """
+
+    def __init__(self, settings: OrchestrationSettings):
+        self._settings = settings
+        self._positions: dict[str, TrailingStopState] = {}  # symbol -> state
+
+    def register_position(
+        self,
+        symbol: str,
+        direction: int,
+        entry_price: float,
+        stop_distance_pct: float,
+        position_id: str | None = None,
+    ) -> TrailingStopState:
+        """Register a new position for trailing stop monitoring.
+
+        Steps:
+        1. Create TrailingStopState with initial stop price
+        2. For long: initial_stop = entry_price * (1 - stop_distance_pct)
+        3. For short: initial_stop = entry_price * (1 + stop_distance_pct)
+        4. Store in self._positions[symbol]
+        5. Return the state
+
+        Raises ValueError if symbol already has an active position.
+        """
+
+    def update_tick(self, symbol: str, current_price: float, timestamp: float) -> TradeDecision | None:
+        """Update trailing stop on a new tick.
+
+        Steps:
+        1. If symbol not in _positions, return None
+        2. Get TrailingStopState for symbol
+        3. For long (direction=+1):
+           a. If current_price > best_price:
+              - Check if (current_price - best_price) / best_price >= min_move_pct
+              - If yes: ratchet stop up to current_price * (1 - stop_distance_pct)
+              - Update best_price = current_price
+              - Increment n_ratchet_advances
+           b. If current_price <= current_stop_price:
+              - STOP HIT: generate EXIT TradeDecision
+        4. For short (direction=-1):
+           a. If current_price < best_price:
+              - Check if (best_price - current_price) / best_price >= min_move_pct
+              - If yes: ratchet stop down to current_price * (1 + stop_distance_pct)
+              - Update best_price = current_price
+              - Increment n_ratchet_advances
+           b. If current_price >= current_stop_price:
+              - STOP HIT: generate EXIT TradeDecision
+
+        Ratchet rule (Correction #13): stop NEVER retreats.
+        If computed new stop is worse than current stop, keep current stop.
+
+        Returns: TradeDecision with action="EXIT" if stop hit, None otherwise.
+        """
+
+    def deregister_position(self, symbol: str) -> TrailingStopState | None:
+        """Remove a position from monitoring after exit."""
+
+    def get_state(self, symbol: str) -> TrailingStopState | None:
+        """Get current trailing stop state for a symbol."""
+
+    def get_all_states(self) -> dict[str, TrailingStopState]:
+        """Get all active trailing stop states."""
+```
+
+### 5.3 Key Implementation Rules:
+- Ratchet ONLY advances — never retreats. If `new_stop < current_stop` for long (or `new_stop > current_stop` for short), keep `current_stop`
+- `min_move_pct` prevents micro-ratcheting on noise (0.3% default = ~30 points on NIFTY at 24000)
+- Stop hit generates a `TradeDecision` with `action="EXIT"` — it does NOT place an order
+- All ratchet advances and stop hits are logged via structlog
+- If `current_price` is 0 or negative, skip update (data quality protection)
+- Thread safety: this monitor is used from the orchestrator's eval loop — single-threaded access per symbol (no lock needed)
+
+---
+
+## Instruction 6 — Create `src/orchestrator/signal_orchestrator.py` — Main Orchestrator
+
+**Action:** Create new file `src/orchestrator/signal_orchestrator.py`.
+**Reference:** All previous instructions; Plan.txt line 670-697 orchestration flow.
+
+### 6.1 Class SignalOrchestrator
+
+```python
+class SignalOrchestrator:
+    """Per-symbol signal orchestrator (Correction #16).
+
+    Implements the full orchestration flow from Plan.txt line 670-697:
+    1. Fetch all signals in parallel (SignalFetcher)
+    2. Combine signals with weighted average (ConfidenceCombiner)
+    3. Run three decision gates (threshold, opposition, data quality)
+    4. If PASS: select strike + lots via Phase 5 strategy
+    5. Run pre-trade risk check via Phase 10 RiskManager
+    6. If approved: create TradeDecision DTO
+    7. Log to audit trail
+
+    Each symbol (NIFTY, BANKNIFTY) has its own orchestrator instance
+    with independent eval cycles and circuit breakers.
+
+    Args:
+        symbol: Trading symbol this instance orchestrates.
+        settings: OrchestrationSettings.
+        signal_fetcher: SignalFetcher for parallel signal retrieval.
+        confidence_combiner: ConfidenceCombiner for weighted combination.
+        trailing_stop_monitor: TrailingStopMonitor for active positions.
+        risk_manager: Phase 10 RiskManager for pre-trade checks.
+        audit_logger: Phase 0 AuditLogger for audit trail.
+        strategy: Phase 5 StrategyInterface for strike/lot selection.
+        kill_switch: Phase 0 KillSwitch for emergency halt.
+    """
+
+    def __init__(
+        self,
+        symbol: str,
+        settings: OrchestrationSettings,
+        signal_fetcher: SignalFetcher,
+        confidence_combiner: ConfidenceCombiner,
+        trailing_stop_monitor: TrailingStopMonitor,
+        risk_manager: RiskManager | None = None,
+        audit_logger: AuditLogger | None = None,
+        strategy: StrategyInterface | None = None,
+        kill_switch: KillSwitch | None = None,
+    ):
+        self._symbol = symbol
+        self._settings = settings
+        self._fetcher = signal_fetcher
+        self._combiner = confidence_combiner
+        self._trailing_stop = trailing_stop_monitor
+        self._risk_manager = risk_manager
+        self._audit_logger = audit_logger
+        self._strategy = strategy
+        self._kill_switch = kill_switch
+        self._last_eval_time: float = 0.0
+        self._eval_count: int = 0
+        self._trade_count: int = 0
+        self._hold_count: int = 0
+        self._gate_fail_count: dict[DecisionGateResult, int] = {}
+        self._is_running = False
+
+    async def evaluate(self, current_time: float) -> TradeDecision | None:
+        """Run one evaluation cycle for this symbol.
+
+        Steps:
+        1. Check kill switch: if KILL or PAUSE, return HOLD decision
+        2. Throttle eval: skip if (current_time - last_eval_time) < SIGNAL_EVAL_INTERVAL_SECONDS
+        3. Fetch all signals via signal_fetcher.fetch_all(symbol)
+        4. Combine signals via confidence_combiner.combine(payloads)
+        5. Run Gate 1 (threshold): check_threshold_gate()
+        6. Run Gate 2 (opposition): check_opposition_gate()
+        7. Run Gate 3 (data quality): check_data_quality_gate()
+        8. If ANY gate fails:
+           - Log gate failure reason
+           - Return TradeDecision with action="HOLD" and gate_result=FAIL_*
+           - Increment gate_fail_count for failed gate
+        9. If ALL gates pass:
+           a. Determine direction: combined_score > 0 -> BUY_LONG, < 0 -> SELL_SHORT
+           b. If strategy is available: get strike, lots, stop_distance from strategy
+           c. If strategy is None: use defaults (ATM strike, 1 lot, 0.03 stop distance)
+           d. Run risk_manager.pre_trade_check() if available
+           e. If risk check FAIL/THROTTLED/KILLED: return HOLD with risk result
+           f. Register trailing stop for new position
+           g. Create TradeDecision with all fields populated
+           h. Log to audit trail
+           i. Return TradeDecision
+        10. Update eval_count, last_eval_time
+        """
+
+    async def check_exit_signals(self, current_price: float, current_time: float) -> TradeDecision | None:
+        """Check if any active position should exit.
+
+        Exit triggers (Plan.txt line 695):
+        1. Trailing stop hit (checked by TrailingStopMonitor.update_tick)
+        2. Regime change (from MarketStrengthEngine — if available)
+        3. Time stop (close to expiry — Phase 5 logic)
+        4. Target achieved (2:1 R:R for buying, 50% premium decay for selling)
+
+        Returns TradeDecision with action="EXIT" if any trigger fires, None otherwise.
+        """
+
+    def get_stats(self) -> dict:
+        """Get orchestrator statistics for monitoring.
+
+        Returns dict with:
+        - symbol, eval_count, trade_count, hold_count
+        - gate_fail_count by gate type
+        - circuit_breaker_status per source
+        - trailing_stop_states
+        - is_running
+        """
+```
+
+### 6.2 Key Implementation Rules:
+- `evaluate()` is called from SessionManager's eval loop — NOT directly from tick handler
+- Kill switch check is FIRST — if KILL/PAUSE, immediately return HOLD (no fetch, no combine)
+- Throttle: skip if interval hasn't elapsed — prevents over-evaluation on rapid ticks
+- If `risk_manager` is None, skip risk check (Phase 10 may not be fully implemented)
+- If `strategy` is None, use default strike/lot values — orchestrator must work without Phase 5
+- If `audit_logger` is None, skip audit logging (graceful degradation)
+- ALL decisions (HOLD and TRADE) are logged to structlog
+- `gate_fail_count` tracks gate failures for monitoring dashboards
+- The orchestrator NEVER calls broker.place_order() — it only creates TradeDecision DTOs (Correction #15)
+- Per-symbol isolation: one orchestrator instance per symbol, no shared mutable state
+
+---
+
+## Instruction 7 — Create `src/orchestrator/session_manager.py` — Session Lifecycle Manager
+
+**Action:** Create new file `src/orchestrator/session_manager.py`.
+**Reference:** Correction #17 (full session lifecycle); Phase 0 compliance.py TradingSession
+
+### 7.1 Class SessionManager
+
+```python
+class SessionManager:
+    """Manage the full trading session lifecycle (Correction #17).
+
+    Session phases:
+    1. PRE_OPEN (9:00-9:15 IST): Warmup — fetch initial data, pre-compute indicators,
+       establish WebSocket connections. No trading decisions.
+    2. REGULAR (9:15-15:30 IST): Active trading — run orchestrator eval cycles
+       every SIGNAL_EVAL_INTERVAL_SECONDS.
+    3. POST_CLOSE (15:30-15:40 IST): P&L logging, position summary,
+       audit trail finalization, cleanup.
+    4. CLOSED: Bot is idle. No operations.
+
+    Args:
+        settings: OrchestrationSettings.
+        orchestrators: Dict of symbol -> SignalOrchestrator.
+        compliance_settings: ComplianceSettings for session time checks.
+        audit_logger: AuditLogger for session events.
+        kill_switch: KillSwitch for emergency halt.
+    """
+
+    def __init__(
+        self,
+        settings: OrchestrationSettings,
+        orchestrators: dict[str, SignalOrchestrator],
+        compliance_settings: ComplianceSettings,
+        audit_logger: AuditLogger | None = None,
+        kill_switch: KillSwitch | None = None,
+    ):
+        self._settings = settings
+        self._orchestrators = orchestrators
+        self._compliance = compliance_settings
+        self._audit_logger = audit_logger
+        self._kill_switch = kill_switch
+        self._session_start_time: float | None = None
+        self._session_end_time: float | None = None
+        self._daily_pnl: Decimal = Decimal("0")
+        self._daily_trades: int = 0
+        self._is_running = False
+
+    async def run_session(self) -> None:
+        """Run the full trading session from PRE_OPEN through POST_CLOSE.
+
+        This is the main entry point called by the bot's main loop.
+
+        Steps:
+        1. Wait for PRE_OPEN time (9:00 IST minus PRE_OPEN_WARMUP_SECONDS)
+        2. Run warmup phase:
+           a. Fetch initial market data for all symbols
+           b. Pre-compute technical indicators (if Phase 3 available)
+           c. Load RAG macro context (if Phase 9 available)
+           d. Log "warmup_complete" to audit trail
+        3. Wait for REGULAR session (9:15 IST)
+        4. Run trading loop:
+           while session == REGULAR:
+             a. For each orchestrator: await evaluate(current_time)
+             b. For each orchestrator: await check_exit_signals(current_price, current_time)
+             c. Sleep for SIGNAL_EVAL_INTERVAL_SECONDS (or remaining interval)
+             d. Check kill switch status
+        5. On POST_CLOSE (15:30 IST):
+           a. Log daily P&L summary
+           b. Log daily trade count and gate failure stats
+           c. Finalize audit trail
+           d. Clear trailing stop states
+        6. Return (session complete)
+        """
+
+    async def _warmup_phase(self) -> None:
+        """PRE_OPEN warmup: fetch initial data, establish connections.
+
+        Per Correction #17: warmup starts PRE_OPEN_WARMUP_SECONDS before 9:15.
+        Fetches initial data for all enabled symbols.
+        Does NOT make any trade decisions.
+        """
+
+    async def _trading_loop(self) -> None:
+        """Main trading loop during REGULAR session.
+
+        Per Correction #12: eval every SIGNAL_EVAL_INTERVAL_SECONDS (default 5 min).
+        Per Correction #16: each symbol has its own orchestrator.
+        Per Correction #15: orchestrator creates TradeDecision DTOs, not broker calls.
+        """
+
+    async def _post_close_phase(self) -> None:
+        """POST_CLOSE: P&L logging, audit finalization, cleanup.
+
+        Per Correction #17: runs for POST_CLOSE_CLEANUP_SECONDS after 15:30.
+        Logs:
+        - Daily realized + unrealized P&L
+        - Total trades, holds, gate failures
+        - Circuit breaker statistics
+        - Trailing stop ratchet statistics
+        """
+
+    def get_session_stats(self) -> dict:
+        """Get current session statistics.
+
+        Returns dict with:
+        - session_duration_seconds
+        - daily_pnl, daily_trades
+        - per-symbol stats (from each orchestrator.get_stats())
+        - kill_switch_status
+        """
+```
+
+### 7.2 Key Implementation Rules:
+- `run_session()` is a long-running coroutine — called once from the bot's main entry point
+- Warmup does NOT trade — only prepares data and connections
+- Trading loop checks `get_trading_session()` on each iteration to detect session transitions
+- If kill switch is activated during trading loop, immediately exit loop to POST_CLOSE
+- POST_CLOSE phase always runs even if session was killed — ensures audit trail integrity
+- All phase transitions are logged via structlog and audit trail
+- Daily P&L is accumulated from TradeDecision metadata (not from broker fills — that's Phase 12)
+- Session stats are available for Prometheus/Grafana monitoring (Phase 13)
+
+---
+
+## Instruction 8 — Create `src/orchestrator/__init__.py` — Package Exports
+
+**Action:** Create new file `src/orchestrator/__init__.py`.
+
+### 8.1 Contents:
+
+```python
+"""Signal orchestration package.
+
+Combines all signals into a unified decision with confidence score.
+Per Plan.txt Phase 11 (line 667-705): orchestration flow from market open
+through signal combine → strike select → risk check → order → trailing stop → exit → P&L log.
+"""
+
+from src.orchestrator.models import (
+    CircuitBreakerState,
+    CircuitBreakerStatus,
+    CombinedScore,
+    DecisionGateResult,
+    SignalPayload,
+    SignalSource,
+    TradeDecision,
+)
+from src.orchestrator.confidence_combiner import ConfidenceCombiner
+from src.orchestrator.signal_fetcher import SignalFetcher
+from src.orchestrator.trailing_stop_monitor import TrailingStopMonitor, TrailingStopState
+from src.orchestrator.signal_orchestrator import SignalOrchestrator
+from src.orchestrator.session_manager import SessionManager
+
+__all__ = [
+    "CircuitBreakerState",
+    "CircuitBreakerStatus",
+    "CombinedScore",
+    "ConfidenceCombiner",
+    "DecisionGateResult",
+    "SessionManager",
+    "SignalFetcher",
+    "SignalOrchestrator",
+    "SignalPayload",
+    "SignalSource",
+    "TradeDecision",
+    "TrailingStopMonitor",
+    "TrailingStopState",
+]
+```
+
+### 8.2 Verification Gate:
+- `python -c "from src.orchestrator import SignalOrchestrator, ConfidenceCombiner, SignalFetcher, TrailingStopMonitor, SessionManager; print('Phase 11 package imports OK')"`
+- Must pass without error
+
+---
+
+## Instruction 9 — Write `tests/orchestrator/test_models.py` — Models Unit Tests
+
+**Action:** Create new file `tests/orchestrator/test_models.py`.
+
+### 9.1 Test Coverage:
+
+```python
+"""Unit tests for src/orchestrator/models.py.
+
+Covers:
+- SignalSource enum values
+- SignalPayload creation and validation
+- CombinedScore creation
+- TradeDecision creation and validation
+- DecisionGateResult enum values
+- CircuitBreakerState and CircuitBreakerStatus
+- Boundary validation: score out of range, confidence out of range
+"""
+
+import time
+
+import pytest
+
+from src.orchestrator.models import (
+    CircuitBreakerState,
+    CircuitBreakerStatus,
+    CombinedScore,
+    DecisionGateResult,
+    SignalPayload,
+    SignalSource,
+    TradeDecision,
+)
+```
+
+### 9.2 Test Cases:
+
+```
+Test 1: SignalSource enum has exactly 5 members
+- SignalSource.TECHNICAL, VOLUME, SENTIMENT, MARKET_STRENGTH, RAG
+- len(SignalSource) == 5
+
+Test 2: SignalPayload creation with valid values
+- source=SignalSource.TECHNICAL, symbol="NIFTY", score=0.7, confidence=0.85, timestamp=time.monotonic()
+- Verify all fields match
+
+Test 3: SignalPayload frozen — cannot modify after creation
+- payload.score = 0.5 -> raises FrozenInstanceError
+
+Test 4: SignalPayload score boundary validation
+- score=1.0 -> valid
+- score=-1.0 -> valid
+- score=1.01 -> raises ValueError
+- score=-1.01 -> raises ValueError
+
+Test 5: SignalPayload confidence boundary validation
+- confidence=0.0 -> valid
+- confidence=1.0 -> valid
+- confidence=-0.01 -> raises ValueError
+- confidence=1.01 -> raises ValueError
+
+Test 6: SignalPayload is_stub flag
+- is_stub=True for fallback payloads
+- is_stub=False by default
+
+Test 7: CombinedScore creation
+- combined_score=0.65, normalized_weights dict, individual_scores dict, missing_sources list, importance dict, n_sources_available=5
+
+Test 8: TradeDecision with all fields
+- action="BUY_LONG", combined_score=0.75, confidence=0.80, gate_result=DecisionGateResult.PASS
+
+Test 9: TradeDecision combined_score boundary validation
+- combined_score=1.01 -> raises ValueError
+- combined_score=-1.01 -> raises ValueError
+
+Test 10: TradeDecision trailing_stop_direction validation
+- trailing_stop_direction=1 -> valid
+- trailing_stop_direction=-1 -> valid
+- trailing_stop_direction=0 -> raises ValueError
+
+Test 11: DecisionGateResult has 4 members
+- PASS, FAIL_THRESHOLD, FAIL_OPPOSITION, FAIL_DATA_QUALITY
+
+Test 12: CircuitBreakerState has 3 members
+- CLOSED, OPEN, HALF_OPEN
+
+Test 13: CircuitBreakerStatus creation
+- source, state, consecutive_failures, etc.
+
+Test 14: SignalPayload with metadata dict
+- metadata={"indicators": ["RSI", "MACD"], "regime": "trending"}
+
+Test 15: Hypothesis property test — any valid score in [-1, 1] and confidence in [0, 1] creates valid payload
+- Use hypothesis.strategies.floats(min_value=-1.0, max_value=1.0) for score
+- Use hypothesis.strategies.floats(min_value=0.0, max_value=1.0) for confidence
+```
+
+### 9.3 Run:
+```
+pytest tests/orchestrator/test_models.py -v --cov=src/orchestrator/models --cov-report=term-missing
+```
+Target: 100% line coverage on `models.py`
+
+---
+
+## Instruction 10 — Write `tests/orchestrator/test_confidence_combiner.py` — Combiner Unit Tests
+
+**Action:** Create new file `tests/orchestrator/test_confidence_combiner.py`.
+
+### 10.1 Test Coverage:
+
+```python
+"""Unit tests for src/orchestrator/confidence_combiner.py.
+
+Covers:
+- Weighted average computation
+- Weight normalization for missing sources
+- Threshold gate (abs(score) > threshold) — Correction #10
+- Opposition gate — Correction #11
+- Data quality gate — Correction #11
+- Drop-one importance — López de Prado Ch.9
+- Edge cases: all sources missing, single source, all sources agree, sources disagree
+"""
+
+import pytest
+
+from config.settings import OrchestrationSettings
+from src.orchestrator.confidence_combiner import ConfidenceCombiner
+from src.orchestrator.models import (
+    CombinedScore,
+    DecisionGateResult,
+    SignalPayload,
+    SignalSource,
+)
+```
+
+### 10.2 Test Cases:
+
+```
+Test 1: All 5 sources available, all bullish -> positive combined_score
+- TECHNICAL=0.7, VOLUME=0.5, SENTIMENT=0.6, MARKET_STRENGTH=0.4, RAG=0.3
+- With equal weights (0.20 each): combined = (0.7+0.5+0.6+0.4+0.3) * 0.20 = 0.50
+- abs(0.50) < 0.60 -> FAIL_THRESHOLD
+
+Test 2: All sources strongly bullish -> PASS threshold gate
+- TECHNICAL=0.9, VOLUME=0.8, SENTIMENT=0.7, MARKET_STRENGTH=0.8, RAG=0.6
+- combined = (0.9+0.8+0.7+0.8+0.6) * 0.20 = 0.76
+- abs(0.76) > 0.60 -> PASS threshold
+
+Test 3: Bearish signals -> negative combined_score, abs() threshold check (Correction #10)
+- TECHNICAL=-0.8, VOLUME=-0.7, SENTIMENT=-0.6, MARKET_STRENGTH=-0.5, RAG=-0.3
+- combined = -0.58
+- abs(-0.58) < 0.60 -> FAIL_THRESHOLD
+- If TECHNICAL=-0.9, VOLUME=-0.8: combined = -0.66, abs() > 0.60 -> PASS
+
+Test 4: Weight normalization with 3 of 5 sources available
+- Only TECHNICAL(0.20), VOLUME(0.20), SENTIMENT(0.20) available
+- Available weight sum = 0.60
+- Normalized: each = 0.20/0.60 = 0.333
+- Verify normalized_weights sum to 1.0
+
+Test 5: Data quality gate — only 2 sources available
+- MIN_SOURCES_REQUIRED=3, only 2 non-stub payloads
+- gate_result = FAIL_DATA_QUALITY
+
+Test 6: Opposition gate — one source strongly opposes
+- Combined direction is bullish (combined_score = 0.70)
+- SENTIMENT = -0.9 with weight 0.20
+- |weight * score| = |0.20 * -0.9| = 0.18 < 0.40 -> PASS (not strong enough)
+- If weight=0.35 (after Phase 6): |0.35 * -0.9| = 0.315 < 0.40 -> still PASS
+- If SENTIMENT=-1.0 and weight=0.45: |0.45 * -1.0| = 0.45 > 0.40 -> FAIL_OPPOSITION
+
+Test 7: Drop-one importance
+- Full combined_score = 0.76
+- Without TECHNICAL: recompute -> 0.68 -> importance(TECHNICAL) = |0.76 - 0.68| = 0.08
+- Without RAG: recompute -> 0.80 -> importance(RAG) = |0.76 - 0.80| = 0.04
+- TECHNICAL has higher importance than RAG (expected)
+
+Test 8: All sources missing -> combined_score = 0.0
+- All 5 payloads are stubs (is_stub=True)
+- n_sources_available = 0
+- FAIL_DATA_QUALITY
+
+Test 9: Single source available -> combined = that source's score
+- Only TECHNICAL available, weight normalized to 1.0
+- combined_score = TECHNICAL.score
+
+Test 10: Mixed bullish and bearish -> score near 0
+- TECHNICAL=0.8, SENTIMENT=-0.8, others=0.0
+- combined ≈ 0.0 -> FAIL_THRESHOLD
+
+Test 11: Hypothesis property test — combined_score is always in [-1.0, +1.0]
+- Generate random payloads with valid scores
+- Combined score must never exceed range
+
+Test 12: Custom weights (target weights after Phase 6)
+- WEIGHT_TECHNICAL=0.35, others adjusted
+- Verify combined_score changes with different weights
+
+Test 13: Stub sources excluded from opposition gate
+- SENTIMENT is stub (score=0.0, is_stub=True)
+- Opposition gate should not count stub as opposing
+```
+
+### 10.3 Run:
+```
+pytest tests/orchestrator/test_confidence_combiner.py -v --cov=src/orchestrator/confidence_combiner --cov-report=term-missing
+```
+Target: 100% line coverage on `confidence_combiner.py`
+
+---
+
+## Instruction 11 — Write `tests/orchestrator/test_signal_fetcher.py` — Fetcher Unit Tests
+
+**Action:** Create new file `tests/orchestrator/test_signal_fetcher.py`.
+
+### 11.1 Test Coverage:
+
+```python
+"""Unit tests for src/orchestrator/signal_fetcher.py.
+
+Covers:
+- Parallel fetch via asyncio.gather
+- Circuit breaker state transitions (CLOSED -> OPEN -> HALF_OPEN -> CLOSED)
+- Stub fallback for unimplemented phases
+- Timeout handling (5-second limit per source)
+- Error handling: one source fails, others succeed
+"""
+
+import asyncio
+
+import pytest
+
+from config.settings import OrchestrationSettings
+from src.orchestrator.models import CircuitBreakerState, SignalPayload, SignalSource
+from src.orchestrator.signal_fetcher import SignalFetcher
+```
+
+### 11.2 Test Cases:
+
+```
+Test 1: All sources None -> all stubs returned
+- SignalFetcher with no engines/pipelines
+- fetch_all("NIFTY") returns 5 stub payloads
+- All stubs have is_stub=True, score=0.0, confidence=0.0
+
+Test 2: Stub payloads have correct source and symbol
+- Each stub's source matches a SignalSource enum member
+- Each stub's symbol matches the requested symbol
+
+Test 3: Circuit breaker transitions CLOSED -> OPEN after 3 consecutive failures
+- Mock a source that always raises RuntimeError
+- Call fetch_all 3 times
+- After 3rd call: circuit breaker state = OPEN
+- 4th call: source returns stub immediately (no actual fetch attempt)
+
+Test 4: Circuit breaker transitions OPEN -> HALF_OPEN after timeout
+- Force circuit breaker to OPEN
+- Advance time by CIRCUIT_BREAKER_OPEN_DURATION_SECONDS + 1
+- Call fetch_all -> breaker in HALF_OPEN, allows limited probe
+
+Test 5: Circuit breaker HALF_OPEN -> CLOSED on success
+- Breaker in HALF_OPEN
+- Mock source returns success
+- After success: breaker transitions to CLOSED
+
+Test 6: Circuit breaker HALF_OPEN -> OPEN on failure
+- Breaker in HALF_OPEN
+- Mock source raises exception
+- After failure: breaker transitions back to OPEN
+
+Test 7: One source timeout, others succeed
+- Mock TECHNICAL to take 10 seconds (exceeds 5s timeout)
+- Mock VOLUME to return instantly
+- TECHNICAL returns stub (timeout), VOLUME returns real payload
+
+Test 8: asyncio.gather isolation — one failure doesn't affect others
+- Mock SENTIMENT to raise ValueError
+- Mock MARKET_STRENGTH to return valid payload
+- SENTIMENT returns stub, MARKET_STRENGTH returns real payload
+
+Test 9: get_circuit_breaker_status returns correct state
+- After normal operation: all breakers CLOSED
+- After injecting failures: correct breaker in OPEN
+
+Test 10: reset_circuit_breaker forces CLOSED
+- Manually open a breaker
+- reset_circuit_breaker -> state = CLOSED
+
+Test 11: RAG qualitative-to-numeric conversion (Correction #14)
+- Mock RAG pipeline to return "BULLISH" text
+- Verify score = RAG_BULLISH_SCORE (0.60)
+- Mock RAG pipeline to return "BEARISH" text
+- Verify score = RAG_BEARISH_SCORE (-0.60)
+
+Test 12: Concurrent fetch_all calls don't corrupt circuit breaker state
+- Call fetch_all from 2 concurrent tasks
+- Verify circuit breaker state is consistent
+```
+
+### 11.3 Run:
+```
+pytest tests/orchestrator/test_signal_fetcher.py -v --cov=src/orchestrator/signal_fetcher --cov-report=term-missing
+```
+Target: >=95% line coverage on `signal_fetcher.py`
+
+---
+
+## Instruction 12 — Write `tests/orchestrator/test_trailing_stop_monitor.py` — Trailing Stop Unit Tests
+
+**Action:** Create new file `tests/orchestrator/test_trailing_stop_monitor.py`.
+
+### 12.1 Test Coverage:
+
+```python
+"""Unit tests for src/orchestrator/trailing_stop_monitor.py.
+
+Covers:
+- Position registration with initial stop price
+- Ratchet mechanism (only advances, never retreats) — Correction #13
+- Minimum move threshold before ratchet advances
+- Stop hit detection for long and short positions
+- Deregistration after exit
+"""
+
+import pytest
+
+from config.settings import OrchestrationSettings
+from src.orchestrator.models import TradeDecision
+from src.orchestrator.trailing_stop_monitor import TrailingStopMonitor, TrailingStopState
+```
+
+### 12.2 Test Cases:
+
+```
+Test 1: Long position registration
+- direction=+1, entry_price=24000, stop_distance_pct=0.03
+- initial_stop = 24000 * (1 - 0.03) = 23280
+- best_price = 24000
+
+Test 2: Short position registration
+- direction=-1, entry_price=24000, stop_distance_pct=0.03
+- initial_stop = 24000 * (1 + 0.03) = 24720
+- best_price = 24000
+
+Test 3: Long ratchet advances on price increase >= min_move_pct
+- entry=24000, best=24200, current=24300
+- move = (24300-24200)/24200 = 0.00413 > 0.003 (min_move_pct)
+- new_stop = 24300 * (1-0.03) = 23571
+- Verify n_ratchet_advances incremented
+
+Test 4: Long ratchet does NOT advance on small price move
+- entry=24000, best=24200, current=24250
+- move = (24250-24200)/24200 = 0.00207 < 0.003 (min_move_pct)
+- Stop stays at current level, no ratchet advance
+
+Test 5: Long stop NEVER retreats (Correction #13)
+- current_stop = 23571
+- Price drops: current=24100
+- new computed stop = 24100 * (1-0.03) = 23377
+- 23377 < 23571 -> stop stays at 23571 (ratchet only advances)
+
+Test 6: Long stop hit
+- current_stop = 23280
+- current_price = 23200 (< 23280)
+- Returns TradeDecision with action="EXIT"
+
+Test 7: Short ratchet advances on price decrease >= min_move_pct
+- entry=24000, best=23800, current=23700
+- move = (23800-23700)/23800 = 0.00420 > 0.003
+- new_stop = 23700 * (1+0.03) = 24411
+
+Test 8: Short stop hit
+- current_stop = 24720
+- current_price = 24800 (> 24720)
+- Returns TradeDecision with action="EXIT"
+
+Test 9: Deregister position after exit
+- After stop hit, call deregister_position
+- get_state returns None
+
+Test 10: Register duplicate symbol -> raises ValueError
+- Already have NIFTY position, try to register again
+
+Test 11: Zero or negative current_price -> skip update (data quality)
+- current_price = 0 -> update_tick returns None, no state change
+
+Test 12: Hypothesis property test — stop price only moves in favorable direction
+- For long: new_stop >= previous_stop always
+- For short: new_stop <= previous_stop always
+- Generate random price sequences and verify invariant holds
+
+Test 13: Multiple ratchet advances in sequence
+- Long position, price goes 24000 -> 24300 -> 24600 -> 24900
+- Each advance > min_move_pct -> ratchet each time
+- Verify n_ratchet_advances = 3
+
+Test 14: get_all_states returns all monitored positions
+- Register NIFTY and BANKNIFTY
+- get_all_states returns dict with 2 entries
+```
+
+### 12.3 Run:
+```
+pytest tests/orchestrator/test_trailing_stop_monitor.py -v --cov=src/orchestrator/trailing_stop_monitor --cov-report=term-missing
+```
+Target: 100% line coverage on `trailing_stop_monitor.py`
+
+---
+
+## Instruction 13 — Write `tests/orchestrator/test_signal_orchestrator.py` — Orchestrator Unit Tests
+
+**Action:** Create new file `tests/orchestrator/test_signal_orchestrator.py`.
+
+### 13.1 Test Coverage:
+
+```python
+"""Unit tests for src/orchestrator/signal_orchestrator.py.
+
+Covers:
+- Full evaluation cycle: fetch -> combine -> gate -> decision
+- Kill switch check (first priority)
+- Eval interval throttling
+- Three decision gates: threshold, opposition, data quality
+- Trade direction: positive score -> BUY_LONG, negative -> SELL_SHORT
+- Risk manager delegation
+- Audit logging
+- Stats tracking
+- Graceful degradation with None dependencies
+"""
+
+import asyncio
+import time
+
+import pytest
+
+from config.settings import OrchestrationSettings
+from src.orchestrator.models import DecisionGateResult, SignalPayload, SignalSource, TradeDecision
+from src.orchestrator.signal_orchestrator import SignalOrchestrator
+```
+
+### 13.2 Test Cases:
+
+```
+Test 1: Kill switch PAUSE -> returns HOLD immediately
+- kill_switch.is_order_allowed() returns False
+- evaluate() returns TradeDecision with action="HOLD"
+- No signal fetch attempted
+
+Test 2: Eval interval throttling
+- First eval at t=0: runs
+- Second eval at t=60: skipped (interval=300s)
+- Third eval at t=300: runs
+
+Test 3: All gates pass -> BUY_LONG decision
+- Mock fetcher returns bullish payloads
+- Combined score > 0.6
+- No opposition
+- >= 3 sources available
+- Returns TradeDecision with action="BUY_LONG"
+
+Test 4: All gates pass -> SELL_SHORT decision (bearish)
+- Mock fetcher returns bearish payloads
+- Combined score < -0.6
+- abs(score) > 0.6 -> PASS threshold (Correction #10)
+- Returns TradeDecision with action="SELL_SHORT"
+
+Test 5: Threshold gate fail -> HOLD
+- Combined score = 0.40 (below 0.60 threshold)
+- Returns HOLD with gate_result=FAIL_THRESHOLD
+
+Test 6: Opposition gate fail -> HOLD
+- Strong bullish combined score, but one source strongly opposes
+- Returns HOLD with gate_result=FAIL_OPPOSITION
+
+Test 7: Data quality gate fail -> HOLD
+- Only 2 sources available (below MIN_SOURCES_REQUIRED=3)
+- Returns HOLD with gate_result=FAIL_DATA_QUALITY
+
+Test 8: Risk manager rejects -> HOLD
+- All gates pass, but risk_manager.pre_trade_check() returns FAIL
+- Returns HOLD with risk_check_result populated
+
+Test 9: No risk manager (None) -> skip risk check
+- risk_manager=None
+- All gates pass -> returns trade decision without risk check
+
+Test 10: No strategy (None) -> default strike/lots
+- strategy=None
+- All gates pass -> TradeDecision with default values (ATM strike, 1 lot, 0.03 stop)
+
+Test 11: Trailing stop registered on new trade
+- Trade decision made -> trailing_stop_monitor.register_position() called
+- Verify TrailingStopMonitor has the new position
+
+Test 12: check_exit_signals — trailing stop hit
+- Active position in trailing stop monitor
+- update_tick returns EXIT TradeDecision
+- check_exit_signals returns that EXIT decision
+
+Test 13: check_exit_signals — no exit trigger -> None
+- Active position, price hasn't hit stop
+- Returns None
+
+Test 14: Stats tracking after multiple evals
+- 5 evals: 1 trade, 2 HOLD (threshold), 1 HOLD (opposition), 1 HOLD (data quality)
+- get_stats() shows eval_count=5, trade_count=1, hold_count=4
+- gate_fail_count: {FAIL_THRESHOLD: 2, FAIL_OPPOSITION: 1, FAIL_DATA_QUALITY: 1}
+
+Test 15: Audit logging on trade decision
+- Mock audit_logger
+- Trade decision made -> audit_logger.log_event() called
+- Verify audit event has correct type and metadata
+
+Test 16: Multiple symbols independent
+- Two orchestrators: NIFTY and BANKNIFTY
+- NIFTY returns trade, BANKNIFTY returns HOLD
+- Each independent, no shared state corruption
+
+Test 17: Hypothesis property test — TradeDecision.combined_score always in [-1, 1]
+- Generate random signal payloads
+- Combined score always within valid range
+```
+
+### 13.3 Run:
+```
+pytest tests/orchestrator/test_signal_orchestrator.py -v --cov=src/orchestrator/signal_orchestrator --cov-report=term-missing
+```
+Target: >=95% line coverage on `signal_orchestrator.py`
+
+---
+
+## Instruction 14 — Write `tests/orchestrator/test_session_manager.py` — Session Manager Unit Tests
+
+**Action:** Create new file `tests/orchestrator/test_session_manager.py`.
+
+### 14.1 Test Coverage:
+
+```python
+"""Unit tests for src/orchestrator/session_manager.py.
+
+Covers:
+- Session lifecycle: PRE_OPEN -> REGULAR -> POST_CLOSE -> CLOSED
+- Warmup phase (no trading)
+- Trading loop with eval cycles
+- Post-close P&L logging and cleanup
+- Kill switch during trading loop
+- Session statistics
+"""
+
+import asyncio
+from datetime import datetime, time
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from config.settings import ComplianceSettings, OrchestrationSettings
+from src.orchestrator.session_manager import SessionManager
+from src.orchestrator.signal_orchestrator import SignalOrchestrator
+```
+
+### 14.2 Test Cases:
+
+```
+Test 1: Warmup phase runs but does not trade
+- Mock orchestrators
+- Call _warmup_phase()
+- Verify no evaluate() calls on any orchestrator
+
+Test 2: Trading loop calls evaluate on each orchestrator
+- Mock 2 orchestrators (NIFTY, BANKNIFTY)
+- Call _trading_loop() with mocked session time
+- Verify evaluate() called on both orchestrators
+
+Test 3: Trading loop respects SIGNAL_EVAL_INTERVAL_SECONDS
+- interval = 300s
+- Mock time to advance 300s per iteration
+- Verify evaluate() called once per interval
+
+Test 4: Post-close phase logs P&L and cleans up
+- Mock audit_logger
+- Call _post_close_phase()
+- Verify audit event logged with daily P&L summary
+- Verify trailing stop states cleared
+
+Test 5: Kill switch during trading loop
+- kill_switch is_order_allowed() returns False after 2 iterations
+- Trading loop exits and transitions to POST_CLOSE
+- POST_CLOSE still runs (audit integrity)
+
+Test 6: Session transitions detected via get_trading_session()
+- Mock compliance module to return PRE_MARKET, REGULAR, POST_MARKET, CLOSED
+- Verify SessionManager transitions through all phases
+
+Test 7: get_session_stats returns expected fields
+- session_duration_seconds, daily_pnl, daily_trades
+- per-symbol stats from orchestrators
+
+Test 8: Empty orchestrators dict — no crash
+- orchestrators = {}
+- Session runs without error, no evaluations
+
+Test 9: Full run_session with time mocking
+- Mock all time-dependent functions
+- Verify complete lifecycle: warmup -> trading -> post-close
+
+Test 10: Concurrent safety — multiple session stats calls during trading
+- Call get_session_stats() while trading loop is running
+- No corruption or errors
+```
+
+### 14.3 Run:
+```
+pytest tests/orchestrator/test_session_manager.py -v --cov=src/orchestrator/session_manager --cov-report=term-missing
+```
+Target: >=90% line coverage on `session_manager.py`
+
+---
+
+## Instruction 15 — Full Integration Test + Lint + Type Check + Security Scan
+
+**Action:** Run full verification pipeline on all Phase 11 code.
+
+### 15.1 Create Integration Test File
+
+**Action:** Create `tests/integration/test_orchestrator_pipeline.py`
+
+```python
+"""Integration test: full orchestration pipeline from fetch through decision.
+
+Tests the complete flow:
+SignalFetcher -> ConfidenceCombiner -> SignalOrchestrator -> TradeDecision
+with mock data sources and real combination logic.
+"""
+
+import asyncio
+import time
+
+import pytest
+
+from config.settings import OrchestrationSettings
+from src.orchestrator import (
+    ConfidenceCombiner,
+    SignalFetcher,
+    SignalOrchestrator,
+    TrailingStopMonitor,
+)
+```
+
+### 15.2 Integration Test Cases:
+
+```
+Test 1: End-to-end bullish pipeline
+- Create SignalFetcher with mock analysis engine (bullish)
+- Create ConfidenceCombiner with equal weights
+- Create TrailingStopMonitor
+- Create SignalOrchestrator for "NIFTY"
+- Call evaluate() -> TradeDecision with action="BUY_LONG"
+
+Test 2: End-to-end bearish pipeline
+- Mock analysis engine returns bearish signals
+- evaluate() -> TradeDecision with action="SELL_SHORT"
+
+Test 3: Pipeline with partial source failure
+- Mock: TECHNICAL and VOLUME succeed, SENTIMENT times out
+- Circuit breaker opens for SENTIMENT
+- Still get trade decision (3+ sources available)
+
+Test 4: Pipeline with all sources failing
+- All sources return stubs
+- n_sources_available = 0 < 3
+- HOLD with FAIL_DATA_QUALITY
+
+Test 5: Trailing stop lifecycle
+- Open position via orchestrator
+- Simulate price movement through trailing stop
+- Verify stop ratchets and eventually triggers EXIT
+```
+
+### 15.3 Run Full Verification Pipeline:
+
+```bash
+# Step 1: Lint all Phase 11 code
+ruff check src/orchestrator/ tests/orchestrator/ tests/integration/test_orchestrator_pipeline.py --fix
+
+# Step 2: Type check all Phase 11 code
+mypy src/orchestrator/ --strict --ignore-missing-imports
+
+# Step 3: Security scan
+bandit -r src/orchestrator/ -f json -o bandit_orchestrator_report.json
+# Must have 0 HIGH severity findings
+
+# Step 4: Dependency audit
+pip-audit --desc
+
+# Step 5: Run ALL Phase 11 tests with coverage
+pytest tests/orchestrator/ tests/integration/test_orchestrator_pipeline.py -v \
+  --cov=src/orchestrator \
+  --cov-report=term-missing \
+  --cov-fail-under=90 \
+  -n auto \
+  --asyncio-mode=auto
+
+# Step 6: Property-based tests (hypothesis)
+pytest tests/orchestrator/ -v -k "hypothesis or property" --hypothesis-max-examples=200
+
+# Step 7: Benchmark critical paths
+pytest tests/orchestrator/ -v -k "benchmark" --benchmark-only
+
+# Step 8: Verify no regressions in existing tests
+pytest tests/ -v --tb=short -x
+```
+
+### 15.4 Verification Gates (ALL must pass):
+
+| Gate | Command | Expected |
+|------|---------|----------|
+| Ruff lint | `ruff check src/orchestrator/` | 0 errors |
+| MyPy strict | `mypy src/orchestrator/ --strict` | 0 errors |
+| Bandit HIGH | `bandit -r src/orchestrator/` | 0 HIGH |
+| Coverage | `pytest --cov-fail-under=90` | >= 90% |
+| All tests | `pytest tests/ -x` | All pass |
+| No regressions | `pytest tests/risk/ tests/strategy/` | All pass |
+
+### 15.5 Final File Inventory:
+
+| File | Lines (est.) | Purpose |
+|------|-------------|---------|
+| `config/settings.py` (extended) | +60 | OrchestrationSettings |
+| `src/orchestrator/__init__.py` | ~40 | Package exports |
+| `src/orchestrator/models.py` | ~150 | All data models |
+| `src/orchestrator/confidence_combiner.py` | ~200 | Weighted combination + gates |
+| `src/orchestrator/signal_fetcher.py` | ~250 | Parallel fetch + circuit breakers |
+| `src/orchestrator/trailing_stop_monitor.py` | ~180 | Ratchet trailing stop |
+| `src/orchestrator/signal_orchestrator.py` | ~250 | Main orchestrator |
+| `src/orchestrator/session_manager.py` | ~200 | Session lifecycle |
+| `tests/orchestrator/test_models.py` | ~150 | Models unit tests |
+| `tests/orchestrator/test_confidence_combiner.py` | ~200 | Combiner unit tests |
+| `tests/orchestrator/test_signal_fetcher.py` | ~200 | Fetcher unit tests |
+| `tests/orchestrator/test_trailing_stop_monitor.py` | ~180 | Trailing stop tests |
+| `tests/orchestrator/test_signal_orchestrator.py` | ~200 | Orchestrator tests |
+| `tests/orchestrator/test_session_manager.py` | ~150 | Session manager tests |
+| `tests/integration/test_orchestrator_pipeline.py` | ~100 | Integration test |
+| **Total** | **~2,510** | |
+
+---
+
+## Appendix A — Signal Score Mapping Reference
+
+Phase 11 consumes outputs from Phases 3, 4, 5, 8, 9. Score mapping for each source:
+
+| Signal Source | Phase | Output Type | Score Mapping to [-1.0, +1.0] |
+|---------------|-------|-------------|-------------------------------|
+| TECHNICAL | 3 | TechnicalReport with indicators | Bullish indicators → +0.5 to +1.0; Bearish → -0.5 to -1.0; Neutral → -0.2 to +0.2 |
+| VOLUME | 3 | VolumeReport with volume analysis | Volume confirms trend → ±0.3 to ±0.7; No confirmation → 0.0 |
+| SENTIMENT | 8 | Sentiment score from NLP | Positive sentiment → +0.1 to +0.8; Negative → -0.1 to -0.8; Neutral → -0.1 to +0.1 |
+| MARKET_STRENGTH | 4 | MarketStrength + MarketRegime | TRENDING_UP → +0.6; TRENDING_DOWN → -0.6; RANGE_BOUND → 0.0; VOLATILE → 0.0 (no trade) |
+| RAG | 9 | Qualitative text response | BULLISH → +0.6; NEUTRAL → 0.0; BEARISH → -0.6 (Correction #14) |
+
+## Appendix B — Circuit Breaker State Machine
+
+```
+CLOSED ──[failure_count >= threshold]──> OPEN
+   ^                                        |
+   |                                        |
+   |                                        v
+   └──[success in half-open]── HALF_OPEN <──[open_duration elapsed]
+                                        |
+                                        └──[failure in half-open]──> OPEN
+```
+
+Per Kleppmann Ch.7: Circuit breaker prevents cascading failures by failing fast
+when a downstream service (signal source) is unhealthy.
+
+## Appendix C — Orchestration Flow Diagram
+
+```
+Market Open (9:15 IST)
+│
+├── SessionManager._warmup_phase()
+│   ├── Fetch initial market data
+│   ├── Pre-compute indicators
+│   └── Load RAG macro context
+│
+├── SessionManager._trading_loop()
+│   └── Every SIGNAL_EVAL_INTERVAL_SECONDS:
+│       ├── For each symbol orchestrator:
+│       │   ├── SignalFetcher.fetch_all() ──> 5 SignalPayloads
+│       │   │   ├── [Parallel: asyncio.gather with circuit breakers]
+│       │   │   ├── TECHNICAL ──> Phase 3 AnalysisEngine
+│       │   │   ├── VOLUME ──> Phase 3 AnalysisEngine
+│       │   │   ├── SENTIMENT ──> Phase 8 NLP Pipeline
+│       │   │   ├── MARKET_STRENGTH ──> Phase 4 MarketStrengthEngine
+│       │   │   └── RAG ──> Phase 9 RAG Pipeline
+│       │   │
+│       │   ├── ConfidenceCombiner.combine() ──> CombinedScore
+│       │   │   ├── Weight normalization for available sources
+│       │   │   ├── Weighted average: [-1.0, +1.0]
+│       │   │   └── Drop-one importance analysis
+│       │   │
+│       │   ├── Gate 1: abs(score) > 0.6? ──> PASS / FAIL_THRESHOLD
+│       │   ├── Gate 2: No strong opposition? ──> PASS / FAIL_OPPOSITION
+│       │   ├── Gate 3: >= 3 sources? ──> PASS / FAIL_DATA_QUALITY
+│       │   │
+│       │   ├── [If ALL PASS]:
+│       │   │   ├── Direction: + → BUY_LONG, - → SELL_SHORT
+│       │   │   ├── Strike + Lots (from Phase 5 or defaults)
+│       │   │   ├── RiskManager.pre_trade_check()
+│       │   │   ├── TrailingStopMonitor.register_position()
+│       │   │   └── Create TradeDecision DTO
+│       │   │
+│       │   └── [If ANY FAIL]:
+│       │       └── Create HOLD TradeDecision
+│       │
+│       └── check_exit_signals():
+│           ├── Trailing stop hit? ──> EXIT
+│           ├── Regime change? ──> EXIT
+│           ├── Time stop? ──> EXIT
+│           └── Target achieved? ──> EXIT
+│
+└── SessionManager._post_close_phase()
+    ├── Log daily P&L summary
+    ├── Log trade/gate statistics
+    ├── Finalize audit trail
+    └── Clear trailing stop states
+```
+
+## Appendix D — Walk-Forward Weight Optimization Roadmap (Phase 6)
+
+Phase 11 starts with equal weights (0.20 each). Target weights after Phase 6 validation:
+
+| Source | Equal (Phase 11) | Target (Post Phase 6) | Rationale |
+|--------|-------------------|----------------------|-----------|
+| TECHNICAL | 0.20 | 0.35 | Most predictive for options (Kaufman Ch.9; Chan Ch.5-6) |
+| VOLUME | 0.20 | 0.20 | Confirmation signal, not primary driver |
+| SENTIMENT | 0.20 | 0.20 | Contrarian indicator for selling (Chan Ch.5) |
+| MARKET_STRENGTH | 0.20 | 0.15 | Regime filter, not directional signal |
+| RAG | 0.20 | 0.10 | Qualitative, lower confidence (Correction #14) |
+
+Weight optimization method (Phase 6):
+1. Walk-forward backtesting with 6-month rolling windows
+2. Out-of-sample validation on each window
+3. Drop-one importance analysis to identify noisy sources
+4. Weight adjustment based on Sharpe contribution per source
+5. Final weights must pass stability test: performance doesn't degrade ±10% from optimal
+
+Per López de Prado Ch.9: avoid overfitting by using at least 3 independent out-of-sample periods.
