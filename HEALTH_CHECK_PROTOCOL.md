@@ -71,6 +71,24 @@ $PSVersionTable.PSVersion
 # Should be 5.1 or higher
 ```
 
+#### **Virtual Environment Setup (Required First Step)**
+
+Before running health checks, ensure the virtual environment is created:
+
+```powershell
+# Navigate to project directory
+cd g:\OC\SBITB-150626
+
+# Create virtual environment named SBITB150626 (if not exists)
+python -m venv SBITB150626
+
+# Activate virtual environment
+.\SBITB150626\Scripts\Activate.ps1
+
+# Install dependencies (if not already installed)
+pip install -e .[dev]
+```
+
 #### **Method 1: Direct Execution (Recommended)**
 
 **Open PowerShell as Administrator and execute:**
@@ -78,6 +96,9 @@ $PSVersionTable.PSVersion
 ```powershell
 # Navigate to project directory
 cd g:\OC\SBITB-150626
+
+# Activate virtual environment (IMPORTANT - must do this first!)
+.\SBITB150626\Scripts\Activate.ps1
 
 # Run full health check
 .\verify-project-health.ps1
@@ -94,6 +115,9 @@ If you encounter "execution policy" errors:
 # Allow script execution for current session
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
+# Activate virtual environment
+.\SBITB150626\Scripts\Activate.ps1
+
 # Then run the script
 .\verify-project-health.ps1
 ```
@@ -103,11 +127,11 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 Execute from any PowerShell location:
 
 ```powershell
-# Full check
-powershell -ExecutionPolicy Bypass -File "g:\OC\SBITB-150626\verify-project-health.ps1"
+# Full check (with virtual environment activation)
+cd g:\OC\SBITB-150626; .\SBITB150626\Scripts\Activate.ps1; .\verify-project-health.ps1
 
 # Quick check
-powershell -ExecutionPolicy Bypass -File "g:\OC\SBITB-150626\verify-project-health.ps1" -Quick
+cd g:\OC\SBITB-150626; .\SBITB150626\Scripts\Activate.ps1; .\verify-project-health.ps1 -Quick
 ```
 
 #### **Method 4: Windows Terminal**
@@ -116,11 +140,31 @@ Using Windows Terminal (recommended for better experience):
 
 1. **Open Windows Terminal** (Ctrl+Shift+T)
 2. **Select PowerShell tab** (or create new)
-3. **Execute verification script**:
+3. **Execute commands**:
    ```powershell
    cd g:\OC\SBITB-150626
+   .\SBITB150626\Scripts\Activate.ps1
    .\verify-project-health.ps1
    ```
+
+#### **CRITICAL EXECUTION WARNINGS**
+
+⚠️ **You MUST activate the virtual environment before running health checks!**
+
+**Correct Order:**
+1. Navigate to project directory: `cd g:\OC\SBITB-150626`
+2. Activate virtual environment: `.\SBITB150626\Scripts\Activate.ps1`
+3. Run verification script: `.\verify-project-health.ps1`
+
+**Incorrect Order (Will cause errors):**
+- Running `.\verify-project-health.ps1` WITHOUT activating `SBITB150626` virtual environment
+- This will use system Python which may not have required dependencies installed
+
+**Verification of Virtual Environment:**
+After activation, your PowerShell prompt should show `(SBITB150626)` prefix:
+```powershell
+(SBITB150626) PS g:\OC\SBITB-150626>
+```
 
 ---
 

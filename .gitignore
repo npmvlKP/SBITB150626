@@ -1,6 +1,6 @@
 __pycache__/
 *.pyc
-.venv/
+SBITB150626/
 .env
 secrets.env
 *.egg-info/

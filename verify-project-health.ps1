@@ -106,6 +106,13 @@ if ($LASTEXITCODE -eq 0) {
     Write-TestResult "pip installed" $false "pip not found"
 }
 
+# Check virtual environment
+if (Test-Path "SBITB150626" -PathType Container) {
+    Write-TestResult "Virtual environment (SBITB150626)" $true "Directory exists"
+} else {
+    Write-TestResult "Virtual environment (SBITB150626)" $false "Directory not found - run: python -m venv SBITB150626"
+}
+
 # Check Git
 $gitVersion = git --version 2>&1
 if ($LASTEXITCODE -eq 0) {
