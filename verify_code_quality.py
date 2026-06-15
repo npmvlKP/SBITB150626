@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 SBITB-150626 Code Quality Verification
-Runs ruff linter and checks for code quality issues
+Runs ruff linter and format checks
 """
 
 import sys
 import subprocess
 import re
+
+# Fix Windows console encoding
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 def run_ruff_check():
     """Run ruff linter on source code."""

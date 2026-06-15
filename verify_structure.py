@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 SBITB-150626 Project Structure Verification
 Validates core files, directories, and module structure
@@ -6,6 +7,11 @@ Validates core files, directories, and module structure
 
 import sys
 from pathlib import Path
+
+# Fix Windows console encoding
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 def check_required_files():
     """Check if required files exist."""

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 SBITB-150626 Dependencies Verification
 Checks if required Python packages are installed
@@ -6,6 +7,11 @@ Checks if required Python packages are installed
 
 import sys
 import subprocess
+
+# Fix Windows console encoding
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 def check_core_dependencies():
     """Check if core dependencies are installed."""

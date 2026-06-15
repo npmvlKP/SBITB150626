@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 SBITB-150626 Environment Verification
 Checks Python version, pip, and virtual environment setup
@@ -7,6 +8,11 @@ Checks Python version, pip, and virtual environment setup
 import sys
 import subprocess
 from pathlib import Path
+
+# Fix Windows console encoding
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 def check_python_version():
     """Check if Python 3.11+ is installed."""

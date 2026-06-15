@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 SBITB-150626 Git Repository Verification
-Checks git status, commit history, and remote configuration
+Checks git status, commits, and remote configuration
 """
 
 import sys
 import subprocess
 from pathlib import Path
+
+# Fix Windows console encoding
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 def check_git_repository():
     """Check if we're in a git repository."""

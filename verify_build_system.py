@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 SBITB-150626 Build System Verification
 Validates pyproject.toml and package configuration
@@ -6,6 +7,11 @@ Validates pyproject.toml and package configuration
 
 import sys
 from pathlib import Path
+
+# Fix Windows console encoding
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 def check_pyproject_toml():
     """Check if pyproject.toml exists."""

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 SBITB-150626 Test Suite Verification
 Runs pytest and validates test results
@@ -7,6 +8,11 @@ Runs pytest and validates test results
 import sys
 import subprocess
 import re
+
+# Fix Windows console encoding
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 def run_pytest():
     """Run pytest test suite."""
