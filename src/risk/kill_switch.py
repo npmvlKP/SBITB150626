@@ -20,9 +20,10 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from src.risk.audit import KILL_SWITCH_ACTIVATED, KILL_SWITCH_DEACTIVATED, AuditLogger
+
 if TYPE_CHECKING:
     from config.settings import KillSwitchSettings
-    from src.risk.audit import AuditLogger
 
 logger = structlog.get_logger(__name__)
 
@@ -135,6 +136,19 @@ class KillSwitch:
                 previous_level=previous_level.value,
             )
 
+            if self._audit_logger is not None:
+                await self._audit_logger.log_event(
+                    event_type=KILL_SWITCH_ACTIVATED,
+                    source="kill_switch",
+                    details={
+                        "level": level.value,
+                        "trigger_source": source,
+                        "reason": reason,
+                        "previous_level": previous_level.value,
+                        "event_id": str(event.timestamp.timestamp()),
+                    },
+                )
+
             if level == KillSwitchLevel.KILL:
                 await self._cancel_all_orders()
 
@@ -174,6 +188,19 @@ class KillSwitch:
                     reason=reason,
                     previous_level=previous_level.value,
                 )
+
+                if self._audit_logger is not None:
+                    await self._audit_logger.log_event(
+                        event_type=KILL_SWITCH_DEACTIVATED,
+                        source="kill_switch",
+                        details={
+                            "trigger_source": source,
+                            "reason": reason,
+                            "previous_level": previous_level.value,
+                            "event_id": str(event.timestamp.timestamp()),
+                        },
+                    )
+
                 return event
 
         raise RuntimeError("Auto-resume not permitted — REQUIRE_MANUAL_RE_ENABLE is True")
