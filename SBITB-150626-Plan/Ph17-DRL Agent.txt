@@ -1,0 +1,1627 @@
+===============================================================================
+  PHASE 17 — DEEP REINFORCEMENT LEARNING (DRL) AGENT
+  Production-Grade Implementation Plan
+===============================================================================
+  Status    : PLAN ONLY — no implementation
+  Created   : 2026-06-07
+  Approach  : PPO (CleanRL-style) + Custom Gymnasium Env + ONNX Export
+  References: Sutton & Barto (2018), Zai & Brown "Deep RL in Action" (2020)
+===============================================================================
+
+═══════════════════════════════════════════════════════════════════════════════
+ SECTION 0 — CRITICAL CORRECTIONS
+═══════════════════════════════════════════════════════════════════════════════
+
+  CC-01  DRL is SECOND OPINION, not sole strategy
+         Weight starts at 0% (DISABLED), ramps to 15% (ACTIVE), caps at 25%
+         (ESCALATED_2). Never exceeds 25% under any condition.
+
+  CC-02  No Stable-Baselines3, Ray RLlib, or FinRL
+         These add opaque abstraction layers that conflict with Phase 2-9
+         infrastructure. Use CleanRL-style single-file PPO (~300 LOC) for
+         full transparency and auditability (Zai & Brown Ch.4 pattern).
+
+  CC-03  Custom Gymnasium env only — IndianMarketEnv
+         FinRL's env classes enforce rigid observation/action spaces that
+         cannot represent our 23-feature, 3-action, masked paradigm.
+         Build from gymnasium.Env base class.
+
+  CC-04  ONNX export for production inference, NOT PyTorch
+         PyTorch CPU inference ~200ms per step. ONNX Runtime CPU ~15-40ms.
+         Training uses PyTorch on Colab T4; production uses ONNX on Win11.
+         Target: <50ms per inference step on CPU.
+
+  CC-05  Episode = one trading day; step = one 5-min bar
+         Aligns with Phase 11 eval_cycle=5min. NSE session 09:15-15:30
+         = 75 bars/day. Episode terminates on RiskManager kill_switch
+         or daily_loss_limit breach (Phase 10 constraints).
+
+  CC-06  Observation normalization from training stats only
+         Never recompute normalization on live data. Store running mean/std
+         from training. Apply fixed normalization at inference time.
+         Violating this causes distribution shift → silent PPO failure.
+
+  CC-07  Action masking, NOT penalty-based invalid action handling
+         Zai & Brown Ch.3: masking is superior to penalty because penalties
+         require exploration of invalid actions to learn they are bad.
+         Masking simply prevents them. Use MaskedCategorical distribution.
+
+  CC-08  NIFTY lot size = 25 (not 50)
+         Corrected in Phase 5. All reward calculations, position sizing,
+         and env step logic must use lot_size=25.
+
+  CC-09  DSR (Decision-Sharpe Ratio) as primary metric
+         Phase 6 defines DSR. DRL agent must report DSR alongside
+         Sharpe, Sortino, max drawdown, and Calmar ratio. DSR accounts
+         for number of independent bets — critical for intraday evaluation.
+
+  CC-10  Purge + embargo on train/validate split
+         Phase 6 defines purge (remove overlapping bars) and embargo
+         (minimum gap between train and validate). Apply to episode-level
+         splits: 2022-2023 train, 2024 train, 2024-2025 OOS validate.
+         5-day embargo between splits.
+
+  CC-11  No retraining on live data
+         Training happens ONLY on Colab with historical data. Production
+         agent is frozen. Retraining requires full pipeline: train on
+         Colab → validate OOS → export ONNX → deploy. No online updates.
+
+  CC-12  Gradient clipping at 0.5
+         PPO with unclipped gradients diverges on financial data.
+         Zai & Brown Ch.4: clip_norm=0.5 is standard for PPO.
+         Also clip rewards to [-10, 10] to prevent outlier-driven collapse.
+
+  CC-13  GAE lambda = 0.95, gamma = 0.99
+         Standard PPO parameters. Gamma=0.99 because intraday episodes
+         are short (75 steps). Lambda=0.95 balances bias-variance in
+         advantage estimation (Sutton & Barto Ch.12).
+
+  CC-14  No reward shaping beyond PnL + risk penalty
+         Shaped rewards (e.g., "reward for holding winning position")
+         create unexpected agent behaviors. Use:
+           reward = realized_pnl_this_step - risk_penalty
+         where risk_penalty = 0.001 * |position_value| per step.
+         Simple, auditable, no hidden incentives.
+
+  CC-15  Checkpoint every 100k steps to Google Drive on Colab
+         Colab free tier has ~12hr max session, T4 GPU 16GB VRAM.
+         Checkpoint: model weights, optimizer state, normalization stats,
+         training metrics JSON. Resume from latest checkpoint.
+
+  CC-16  SignalSource.DRL as 6th member of SignalSource enum
+         Phase 11 defines: TECHNICAL, VOLUME, SENTIMENT, MARKET_STRENGTH, RAG
+         DRL is added as 6th. Not a Strategy (Phase 3 StrategyInterface);
+         it is a signal source consumed by OrchestrationEngine.
+
+  CC-17  OrchestrationSettings weight rebalancing required
+         Current 5 weights sum to 1.0. Adding DRL weight requires
+         proportional reduction of all 5 existing weights:
+           new_w_i = old_w_i * (1 - drl_weight) / sum(old_weights)
+         DRL weight transitions via state machine (CC-01).
+
+  CC-18  No GPU/CUDA dependency in production code
+         Production runs on Windows 11 CPU only. ONNX Runtime uses CPU
+         execution provider. Any import of torch in production code
+         is a hard error (caught by import linting in CI).
+
+  CC-19  Seed everything for reproducibility
+         torch.manual_seed, np.random.seed, random.seed, gymnasium.seed
+         All set from config. Log seed in training metadata. Required for
+         audit trail and regression testing.
+
+  CC-20  Episode boundary = NSE trading calendar
+         Episodes must respect NSE trading calendar (exclude holidays,
+         half-days). Use same calendar as Phase 6 backtesting.
+
+  CC-21  Feature staleness detection
+         If any observation feature is older than 5 minutes (one bar),
+         emit warning and use last known value. If older than 15 minutes,
+         force SELL/FLAT action via masking. Never feed stale data.
+
+  CC-22  No leverage in DRL env
+         DRL agent trades 1 lot per action. Position sizing is handled
+         by RiskManager (Phase 10), not by the DRL agent. Agent decides
+         direction only: LONG, SHORT, FLAT.
+
+  CC-23  Maximum episode steps = 75 (09:15 to 15:30, 5-min bars)
+         Hard cap. If RiskManager hasn't terminated episode, force
+         FLAT at step 75 (15:25-15:30 bar = final exit window).
+         No overnight positions from DRL agent.
+
+  CC-24  Validation uses walk-forward, NOT random split
+         Phase 6 walk-forward: train on expanding window, validate on
+         next period. 2022→2023 train, validate on Q1-2024. Then
+         2022-2023+Q1-2024 train, validate on Q2-2024. Etc.
+
+  CC-25  Entropy coefficient schedule, not fixed
+         Start entropy_coef=0.01, linearly decay to 0.001 over
+         total training steps. Prevents premature convergence to
+         deterministic policy (Zai & Brown Ch.4).
+
+  CC-26  Target KL divergence = 0.015 for early stopping
+         If approx_kl > 0.015, stop PPO update epoch early.
+         Prevents destructive policy updates (Schulman et al. 2017).
+
+  CC-27  No custom CUDA kernels or Triton ops
+         Must run on Colab T4 with standard PyTorch CUDA. No custom
+         compiled ops that break portability or Colab compatibility.
+
+═══════════════════════════════════════════════════════════════════════════════
+ SECTION 1 — BOOK EXTRACTIONS
+═══════════════════════════════════════════════════════════════════════════════
+
+  1.1  Sutton & Barto — Reinforcement Learning: An Introduction (2018)
+  ─────────────────────────────────────────────────────────────────────
+
+  | Ch  | Concept              | Application in Phase 17                          |
+  |-----|----------------------|--------------------------------------------------|
+  | 3   | Policy Gradient      | PPO is a policy gradient method. Log-prob        |
+  |     |                      | objective with clipped surrogate.                |
+  | 4   | Temporal Difference  | GAE (lambda-returns) is TD(lambda). Advantage    |
+  |     |                      | = sum of gamma-discounted TD residuals.          |
+  | 5   | N-step returns       | GAE generalizes n-step returns with lambda       |
+  |     |                      | interpolation. lambda=0.95 approx many-step.     |
+  | 12  | Eligibility traces   | GAE is the forward-view equivalent of eligibility |
+  |     |                      | traces. No backward-view needed in PPO.          |
+  | 13  | Policy gradient      | REINFORCE → Actor-Critic → PPO progression.      |
+  |     |                      | PPO clips ratio r_t(theta) in [1-eps, 1+eps].   |
+
+  Key equations (for implementation reference):
+  * Advantage: A_t = SUM_{l=0}^{T-t-1} (gamma*lambda)^l * delta_{t+l}
+    where delta_t = r_t + gamma*V(s_{t+1}) - V(s_t)
+  * PPO clip: L^CLIP = E_t[min(r_t(theta)*A_t, clip(r_t(theta), 1-eps, 1+eps)*A_t)]
+  * Entropy bonus: L^S = -E_t[pi_theta(a_t|s_t) * log pi_theta(a_t|s_t)]
+  * Total loss: L = L^CLIP - c_1 * L^VF + c_2 * L^S
+    where c_1=0.5 (value loss coef), c_2=entropy_coef (scheduled)
+
+  1.2  Zai & Brown — Deep Reinforcement Learning in Action (2020)
+  ─────────────────────────────────────────────────────────────────────
+
+  | Ch  | Concept              | Application in Phase 17                          |
+  |-----|----------------------|--------------------------------------------------|
+  | 3   | Action masking       | Mask invalid actions (e.g., SELL when flat)      |
+  |     |                      | before sampling. MaskedCategorical distribution. |
+  | 4   | PPO implementation   | CleanRL-style: single file, vectorized envs,     |
+  |     |                      | synchronous update. No distributed complexity.   |
+  | 4   | Reward normalization | Running mean/std normalization of returns.       |
+  |     |                      | Prevents reward scale sensitivity.               |
+  | 5   | Environment design   | Observation space, action space, reward signal    |
+  |     |                      | must be carefully designed. Wrong reward = wrong |
+  |     |                      | agent behavior. Keep simple (CC-14).             |
+  | 6   | Overfitting in RL    | Financial RL overfits easily. Use OOS validation |
+  |     |                      | walk-forward. If OOS Sharpe < 0.5 * train Sharpe |
+  |     |                      | then overfitting detected, reduce model capacity.|
+
+═══════════════════════════════════════════════════════════════════════════════
+ SECTION 2 — INSTRUCTIONS
+═══════════════════════════════════════════════════════════════════════════════
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 1 — Project Structure & Dependency Setup
+  ──────────────────────────────────────────────────────────────────────
+
+  1.1  Create directory structure under src/drl/:
+
+       src/drl/
+       ├── __init__.py              # Package init, version
+       ├── env.py                   # IndianMarketEnv (Gymnasium)
+       ├── features.py              # Feature vector construction (23 features)
+       ├── normalizer.py            # RunningMeanStd, fixed inference normalizer
+       ├── agent.py                 # PPOAgent (CleanRL-style, ~300 LOC)
+       ├── network.py               # ActorCritic network (MLP)
+       ├── masking.py               # ActionMasker + MaskedCategorical
+       ├── export.py                # ONNX export utility
+       ├── inference.py             # ONNX Runtime inference wrapper
+       ├── weight_fsm.py            # DRL weight state machine
+       └── metrics.py               # DRL-specific metrics (DSR, Sharpe, etc.)
+
+       src/drl/training/
+       ├── __init__.py
+       ├── train.py                 # Training entry point (Colab notebook driver)
+       ├── rollout.py               # Episode rollout buffer
+       └── callbacks.py             # Checkpoint, early stopping, logging
+
+       src/drl/validation/
+       ├── __init__.py
+       ├── walk_forward.py          # Walk-forward validation splits
+       ├── oos_eval.py              # OOS evaluation with DSR
+       └── degradation.py           # OOS degradation detector
+
+       tests/drl/
+       ├── __init__.py
+       ├── test_env.py              # IndianMarketEnv tests
+       ├── test_features.py         # Feature construction tests
+       ├── test_normalizer.py       # Normalizer tests
+       ├── test_agent.py            # PPOAgent unit tests
+       ├── test_network.py          # Network architecture tests
+       ├── test_masking.py          # Action masking tests
+       ├── test_export.py           # ONNX export tests
+       ├── test_inference.py        # ONNX inference tests
+       ├── test_weight_fsm.py       # Weight FSM state transition tests
+       ├── test_metrics.py          # Metrics calculation tests
+       ├── test_rollout.py          # Rollout buffer tests
+       ├── test_walk_forward.py     # Walk-forward split tests
+       ├── test_degradation.py      # Degradation detector tests
+       └── conftest.py              # DRL-specific fixtures
+
+       notebooks/
+       └── drl_train_colab.ipynb    # Google Colab training notebook
+
+  1.2  Add to pyproject.toml [drl] optional dependency group:
+
+       [project.optional-dependencies]
+       drl = [
+           "gymnasium>=0.29.1,<1.0",
+           "onnxruntime>=1.17.0,<2.0",
+           "onnx>=1.15.0,<2.0",
+       ]
+       drl-train = [
+           "drl",
+           "torch>=2.2.0,<3.0",
+           "torchvision>=0.17.0",
+           "stable-baselines3-common>=0.1.0",  # Only for VecEnv wrapper
+           "wandb>=0.16.0",                     # Training logging (optional)
+       ]
+
+       Note: torch is NOT in [drl] — only in [drl-train].
+       Production needs only gymnasium + onnxruntime + onnx.
+
+  1.3  Add to pyproject.toml [tool.ruff] per-file-ignores:
+
+       [tool.ruff.lint.per-file-ignores]
+       "src/drl/training/*.py" = ["Torch"]  # torch allowed in training only
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 2 — Configuration: DRLSettings & OrchestrationSettings
+  ──────────────────────────────────────────────────────────────────────
+
+  2.1  Add DRLSettings to config/settings.py:
+
+       @dataclass(frozen=True)
+       class DRLSettings:
+           enabled: bool = False
+           model_path: str = "models/drl/ppo_nifty.onnx"
+           norm_stats_path: str = "models/drl/norm_stats.json"
+           weight_state: str = "DISABLED"   # DISABLED|REDUCED|ACTIVE|ESCALATED_1|ESCALATED_2
+           max_weight: float = 0.25
+           inference_timeout_ms: float = 50.0
+           feature_staleness_warn_s: float = 300.0   # 5 min
+           feature_staleness_force_s: float = 900.0  # 15 min
+           seed: int = 42
+           observation_dim: int = 23
+           action_dim: int = 3            # LONG, SHORT, FLAT
+           lot_size: int = 25             # NIFTY lot size (CC-08)
+           max_episode_steps: int = 75    # 09:15-15:30 in 5-min bars (CC-23)
+
+       @dataclass(frozen=True)
+       class PPOTrainSettings:
+           learning_rate: float = 3e-4
+           gamma: float = 0.99           # CC-13
+           gae_lambda: float = 0.95      # CC-13
+           clip_epsilon: float = 0.2
+           entropy_coef_start: float = 0.01   # CC-25
+           entropy_coef_end: float = 0.001    # CC-25
+           value_loss_coef: float = 0.5
+           max_grad_norm: float = 0.5    # CC-12
+           reward_clip: float = 10.0     # CC-12
+           target_kl: float = 0.015      # CC-26
+           num_steps: int = 2048         # Steps per rollout
+           num_epochs: int = 10          # PPO update epochs per rollout
+           num_minibatches: int = 32
+           total_timesteps: int = 5_000_000
+           checkpoint_every: int = 100_000  # CC-15
+           checkpoint_dir: str = "/content/drive/MyDrive/drl_checkpoints"
+
+  2.2  Modify OrchestrationSettings (add DRL fields):
+
+       @dataclass(frozen=True)
+       class OrchestrationSettings:
+           # ... existing fields ...
+           drl_weight: float = 0.0       # Starts at 0 (DISABLED state)
+           signal_sources: tuple = (
+               "TECHNICAL", "VOLUME", "SENTIMENT",
+               "MARKET_STRENGTH", "RAG", "DRL"
+           )
+
+       Weight rebalancing rule (CC-17):
+         When drl_weight changes, proportionally scale all non-DRL weights:
+         scale_factor = (1.0 - drl_weight) / sum(existing_weights)
+         new_w_i = old_w_i * scale_factor
+
+  2.3  Add SignalSource.DRL to Phase 11 enum:
+
+       class SignalSource(Enum):
+           TECHNICAL = "technical"
+           VOLUME = "volume"
+           SENTIMENT = "sentiment"
+           MARKET_STRENGTH = "market_strength"
+           RAG = "rag"
+           DRL = "drl"                  # CC-16
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 3 — Feature Vector Construction (23 Features)
+  ──────────────────────────────────────────────────────────────────────
+
+  3.1  Feature groups and indices in observation vector (dim=23):
+
+       Group 1: Technical (indices 0-9)
+         0: rsi_14                    # RSI(14) normalized to [0,1]
+         1: ema_9_ratio               # close / EMA(9)
+         2: ema_21_ratio              # close / EMA(21)
+         3: bollinger_pct             # % position within Bollinger bands
+         4: macd_hist                 # MACD histogram (normalized by close)
+         5: atr_14_pct                # ATR(14) / close
+         6: vwap_ratio                # close / VWAP
+         7: return_1bar               # 1-bar log return
+         8: return_5bar               # 5-bar log return
+         9: return_20bar              # 20-bar log return
+
+       Group 2: Sentiment (indices 10-12)
+        10: sentiment_score           # Phase 8 sentiment [-1, 1]
+        11: sentiment_confidence      # Phase 8 confidence [0, 1]
+        12: news_volume_z            # Z-score of news count vs 20-bar avg
+
+       Group 3: Market Strength (indices 13-14)
+        13: adv_dec_ratio             # NSE advance/decline ratio
+        14: sector_momentum           # NIFTY sector momentum score
+
+       Group 4: OI + Volume (indices 15-17)
+        15: oi_change_pct             # % change in OI from prev bar
+        16: volume_ratio              # bar volume / 20-bar avg volume
+        17: oi_volume_divergence      # OI up+Price down or OI down+Price up flag
+
+       Group 5: VIX (index 18)
+        18: india_vix_z              # Z-score of India VIX vs 20-bar mean
+
+       Group 6: Greeks (indices 19-22)
+        19: delta_atm                # ATM option delta
+        20: gamma_atm                # ATM option gamma (normalized)
+        21: vega_atm_pct             # ATM vega / underlying price
+        22: theta_atm_pct            # ATM |theta| / underlying price
+
+  3.2  Feature construction rules:
+       * All features must be finite — replace NaN/Inf with 0.0
+       * Log returns, not simple returns (statistical stationarity)
+       * Z-scores computed from 20-bar rolling window (not expanding)
+       * Greeks from ATM options (Phase 9 data pipeline)
+       * Sentiment from Phase 8 SentimentAnalyzer output
+       * Features constructed in features.py, consumed by env.py
+
+  3.3  Feature staleness handling (CC-21):
+       * Each feature carries a timestamp (market data time)
+       * If age > feature_staleness_warn_s (300s): log warning, use stale
+       * If age > feature_staleness_force_s (900s): mask to FLAT only
+       * Staleness check in features.py, not in env.py
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 4 — IndianMarketEnv (Gymnasium)
+  ──────────────────────────────────────────────────────────────────────
+
+  4.1  Class definition:
+
+       class IndianMarketEnv(gymnasium.Env):
+           metadata = {"render_modes": ["human", "log"]}
+
+           observation_space: spaces.Box(shape=(23,), low=-5.0, high=5.0, dtype=np.float32)
+           action_space: spaces.Discrete(3)  # 0=FLAT, 1=LONG, 2=SHORT
+
+  4.2  Constructor:
+
+       def __init__(
+           self,
+           data_loader,          # Callable[date -> pd.DataFrame] for bar data
+           risk_manager,         # Phase 10 RiskManager instance
+           feature_builder,      # FeatureBuilder from features.py
+           config: DRLSettings,
+           calendar,             # NSE trading calendar
+       ):
+           self.lot_size = config.lot_size  # 25 (CC-08)
+           self.max_steps = config.max_episode_steps  # 75 (CC-23)
+           self.current_position = 0  # -1, 0, +1 (lots)
+           self.entry_price = 0.0
+           self.step_count = 0
+           self.episode_pnl = 0.0
+           self.episode_trades = 0
+
+  4.3  reset():
+
+       def reset(self, seed=None, options=None):
+           super().reset(seed=seed)
+           self.current_date = self._next_trading_date()  # CC-20
+           self.current_bar_idx = 0
+           self.current_position = 0
+           self.entry_price = 0.0
+           self.step_count = 0
+           self.episode_pnl = 0.0
+           self.episode_trades = 0
+           self.done = False
+           obs = self._get_observation()
+           info = {"date": str(self.current_date), "mask": self._get_mask()}
+           return obs, info
+
+  4.4  step(action):
+
+       def step(self, action):
+           # 1. Validate action against mask (CC-07)
+           if not self._valid_mask()[action]:
+               action = 0  # Force FLAT if invalid
+
+           # 2. Execute action -> position transition
+           prev_position = self.current_position
+           reward, trade_info = self._execute_action(action)
+
+           # 3. Check RiskManager kill conditions (Phase 10)
+           if self.risk_manager.kill_switch_active:
+               self.done = True
+               reward += self._force_close_pnl()
+
+           # 4. Check daily loss limit (Phase 10)
+           if self.episode_pnl < -self.risk_manager.daily_loss_limit:
+               self.done = True
+               reward += self._force_close_pnl()
+
+           # 5. Check max steps (CC-23)
+           self.step_count += 1
+           if self.step_count >= self.max_steps:
+               self.done = True
+               reward += self._force_close_pnl()
+
+           # 6. Get next observation
+           self.current_bar_idx += 1
+           obs = self._get_observation()
+           mask = self._get_mask()
+
+           # 7. Clip reward (CC-12)
+           reward = np.clip(reward, -10.0, 10.0)
+
+           info = {
+               "mask": mask,
+               "pnl": self.episode_pnl,
+               "position": self.current_position,
+               "trade": trade_info,
+               "step": self.step_count,
+           }
+           return obs, reward, self.done, False, info
+
+  4.5  Action masking logic (CC-07):
+
+       def _get_mask(self) -> np.ndarray:
+           """Returns boolean mask [FLAT_valid, LONG_valid, SHORT_valid]"""
+           mask = np.ones(3, dtype=bool)
+
+           # Cannot go LONG if already LONG (no pyramid, CC-22)
+           if self.current_position == 1:
+               mask[1] = False  # Cannot go LONG again
+               mask[2] = False  # Must FLAT first (no reversal)
+
+           # Cannot go SHORT if already SHORT
+           if self.current_position == -1:
+               mask[2] = False  # Cannot go SHORT again
+               mask[1] = False  # Must FLAT first (no reversal)
+
+           # Staleness: if features stale > 15min, force FLAT only (CC-21)
+           if self._feature_staleness() > self.config.feature_staleness_force_s:
+               mask = np.array([True, False, False], dtype=bool)
+
+           return mask
+
+  4.6  Reward function (CC-14):
+
+       def _execute_action(self, action) -> tuple[float, dict]:
+           reward = 0.0
+           trade_info = {}
+
+           if action == 0:  # FLAT
+               if self.current_position != 0:
+                   # Close position
+                   pnl = self._calculate_pnl()
+                   reward = pnl
+                   self.episode_pnl += pnl
+                   self.current_position = 0
+                   self.entry_price = 0.0
+                   trade_info = {"action": "close", "pnl": pnl}
+
+           elif action == 1:  # LONG
+               if self.current_position == 0:
+                   self.current_position = 1
+                   self.entry_price = self._current_price()
+                   trade_info = {"action": "open_long", "price": self.entry_price}
+
+           elif action == 2:  # SHORT
+               if self.current_position == 0:
+                   self.current_position = -1
+                   self.entry_price = self._current_price()
+                   trade_info = {"action": "open_short", "price": self.entry_price}
+
+           # Risk penalty (CC-14)
+           risk_penalty = 0.001 * abs(self.current_position * self._current_price() * self.lot_size)
+           reward -= risk_penalty
+
+           return reward, trade_info
+
+  4.7  Environment registration:
+
+       gymnasium.register(
+           id="IndianMarket-v0",
+           entry_point="src.drl.env:IndianMarketEnv",
+       )
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 5 — Observation Normalization
+  ──────────────────────────────────────────────────────────────────────
+
+  5.1  RunningMeanStd class (normalizer.py):
+
+       class RunningMeanStd:
+           """Welford's online algorithm for computing mean/variance."""
+           def __init__(self, shape: tuple[int, ...] = (23,)):
+               self.mean = np.zeros(shape, dtype=np.float64)
+               self.var = np.ones(shape, dtype=np.float64)
+               self.count = 0
+
+           def update(self, batch: np.ndarray):
+               batch_mean = batch.mean(axis=0)
+               batch_var = batch.var(axis=0)
+               batch_count = batch.shape[0]
+               self._merge(batch_mean, batch_var, batch_count)
+
+           def _merge(self, b_mean, b_var, b_count):
+               # Parallel Welford merge
+               ...
+
+           def normalize(self, x: np.ndarray) -> np.ndarray:
+               return (x - self.mean) / (np.sqrt(self.var) + 1e-8)
+
+  5.2  Fixed normalizer for inference (CC-06):
+       * After training completes, save mean/var/count to norm_stats.json
+       * Inference loads norm_stats.json once at startup
+       * InferenceNormalizer applies fixed (mean, var) — never updates
+       * Mismatch between training and inference normalization = silent bug
+
+  5.3  Serialization format (norm_stats.json):
+
+       {
+           "mean": [0.0, 0.0, ...],      # 23 floats
+           "var": [1.0, 1.0, ...],       # 23 floats
+           "count": 5000000,
+           "feature_names": ["rsi_14", "ema_9_ratio", ...],
+           "created_at": "2026-06-07T10:00:00Z",
+           "training_run_id": "abc123"
+       }
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 6 — ActorCritic Network Architecture
+  ──────────────────────────────────────────────────────────────────────
+
+  6.1  Network definition (network.py):
+
+       class ActorCritic(nn.Module):
+           def __init__(self, obs_dim: int = 23, action_dim: int = 3):
+               super().__init__()
+               self.shared = nn.Sequential(
+                   nn.Linear(obs_dim, 128),
+                   nn.ReLU(),
+                   nn.Linear(128, 128),
+                   nn.ReLU(),
+               )
+               self.actor = nn.Sequential(
+                   nn.Linear(128, 64),
+                   nn.ReLU(),
+                   nn.Linear(64, action_dim),
+               )
+               self.critic = nn.Sequential(
+                   nn.Linear(128, 64),
+                   nn.ReLU(),
+                   nn.Linear(64, 1),
+               )
+               # Orthogonal initialization (standard in PPO)
+               self._init_weights()
+
+           def _init_weights(self):
+               for module in self.modules():
+                   if isinstance(module, nn.Linear):
+                       nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+                       nn.init.constant_(module.bias, 0.0)
+               # Last actor layer: small gain for near-uniform initial policy
+               nn.init.orthogonal_(self.actor[-1].weight, gain=0.01)
+
+           def forward(self, obs, mask=None):
+               hidden = self.shared(obs)
+               logits = self.actor(hidden)
+               value = self.critic(hidden)
+               if mask is not None:
+                   logits[~mask] = -1e10  # Mask invalid actions (CC-07)
+               return logits, value
+
+  6.2  Architecture decisions:
+       * Shared backbone (128->128) + separate actor/critic heads
+       * 2-layer MLP is standard for financial RL (no spatial/temporal structure)
+       * No LSTM/GRU — adds complexity, harder to export to ONNX,
+         and 75-step episodes don't need long memory
+       * Orthogonal init with gain=sqrt(2) for hidden layers,
+         gain=0.01 for actor final layer (Zai & Brown Ch.4)
+       * Total params: ~25k — small enough to avoid overfitting on
+         ~500 trading days of data
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 7 — MaskedCategorical Distribution
+  ──────────────────────────────────────────────────────────────────────
+
+  7.1  MaskedCategorical (masking.py):
+
+       class MaskedCategorical:
+           """Categorical distribution with action masking (CC-07)."""
+           def __init__(self, logits: torch.Tensor, mask: torch.Tensor):
+               self.logits = logits.clone()
+               self.logits[~mask] = -1e10  # Set invalid action logits to -inf approx
+               self.probs = F.softmax(self.logits, dim=-1)
+               self.log_probs = F.log_softmax(self.logits, dim=-1)
+
+           def sample(self) -> torch.Tensor:
+               return torch.multinomial(self.probs, 1).squeeze(-1)
+
+           def log_prob(self, action: torch.Tensor) -> torch.Tensor:
+               return self.log_probs.gather(-1, action.unsqueeze(-1)).squeeze(-1)
+
+           def entropy(self) -> torch.Tensor:
+               return -(self.probs * self.log_probs).sum(-1)
+
+  7.2  ActionMasker class:
+
+       class ActionMasker:
+           """Converts env info['mask'] to torch tensor for network."""
+           def __call__(self, mask: np.ndarray) -> torch.Tensor:
+               return torch.tensor(mask, dtype=torch.bool)
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 8 — PPO Agent (CleanRL-style)
+  ──────────────────────────────────────────────────────────────────────
+
+  8.1  PPOAgent class (agent.py) — ~300 LOC following CleanRL pattern:
+
+       class PPOAgent:
+           def __init__(self, config: PPOTrainSettings, env_config: DRLSettings):
+               self.config = config
+               self.env_config = env_config
+               self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+               self.network = ActorCritic(
+                   obs_dim=env_config.observation_dim,
+                   action_dim=env_config.action_dim,
+               ).to(self.device)
+               self.optimizer = torch.optim.Adam(
+                   self.network.parameters(),
+                   lr=config.learning_rate,
+                   eps=1e-5,
+               )
+               self.normalizer = RunningMeanStd(shape=(env_config.observation_dim,))
+
+           def train(self):
+               """Main training loop — runs on Colab T4."""
+               obs, info = self.envs.reset(seed=self.env_config.seed)  # CC-19
+               for global_step in range(1, self.config.total_timesteps + 1):
+                   # 1. Collect rollout
+                   obs, actions, log_probs, rewards, dones, values, masks = \
+                       self._collect_rollout(obs, info)
+
+                   # 2. Compute advantages (GAE, CC-13)
+                   advantages, returns = self._compute_gae(rewards, values, dones)
+
+                   # 3. Normalize advantages
+                   advantages = (advantages - advantages.mean()) / \
+                                (advantages.std() + 1e-8)
+
+                   # 4. PPO update
+                   self._ppo_update(obs, actions, log_probs, advantages, returns, masks)
+
+                   # 5. Entropy schedule (CC-25)
+                   progress = global_step / self.config.total_timesteps
+                   self.entropy_coef = self.config.entropy_coef_start + \
+                       (self.config.entropy_coef_end - self.config.entropy_coef_start) * progress
+
+                   # 6. Checkpoint (CC-15)
+                   if global_step % self.config.checkpoint_every == 0:
+                       self._checkpoint(global_step)
+
+                   # 7. Validation (every 500k steps)
+                   if global_step % 500_000 == 0:
+                       self._validate()
+
+  8.2  Rollout storage (rollout.py):
+
+       class RolloutBuffer:
+           def __init__(self, num_steps: int, num_envs: int, obs_dim: int):
+               self.obs = np.zeros((num_steps, num_envs, obs_dim), dtype=np.float32)
+               self.actions = np.zeros((num_steps, num_envs), dtype=np.int64)
+               self.log_probs = np.zeros((num_steps, num_envs), dtype=np.float32)
+               self.rewards = np.zeros((num_steps, num_envs), dtype=np.float32)
+               self.dones = np.zeros((num_steps, num_envs), dtype=np.bool_)
+               self.values = np.zeros((num_steps, num_envs), dtype=np.float32)
+               self.masks = np.zeros((num_steps, num_envs, 3), dtype=np.bool_)
+               self.ptr = 0
+
+           def insert(self, **kwargs):
+               for k, v in kwargs.items():
+                   getattr(self, k)[self.ptr] = v
+               self.ptr += 1
+
+           def get(self):
+               return {k: v[:self.ptr] for k, v in self.__dict__.items()
+                       if isinstance(v, np.ndarray) and k != "ptr"}
+
+  8.3  GAE computation (CC-13):
+
+       def _compute_gae(self, rewards, values, dones):
+           advantages = np.zeros_like(rewards)
+           last_gae = 0
+           for t in reversed(range(len(rewards))):
+               if t == len(rewards) - 1:
+                   next_value = 0  # Bootstrap from value function if not done
+                   next_non_terminal = 1.0 - dones[t]
+               else:
+                   next_value = values[t + 1]
+                   next_non_terminal = 1.0 - dones[t]
+               delta = rewards[t] + self.config.gamma * next_value * next_non_terminal - values[t]
+               advantages[t] = last_gae = delta + self.config.gamma * \
+                   self.config.gae_lambda * next_non_terminal * last_gae
+           returns = advantages + values
+           return advantages, returns
+
+  8.4  PPO update (clipped surrogate, CC-12, CC-26):
+
+       def _ppo_update(self, obs, actions, old_log_probs, advantages, returns, masks):
+           # Flatten batches
+           b_obs = torch.tensor(obs.reshape(-1, *obs.shape[2:]), device=self.device)
+           b_actions = torch.tensor(actions.flatten(), device=self.device)
+           b_old_log_probs = torch.tensor(old_log_probs.flatten(), device=self.device)
+           b_advantages = torch.tensor(advantages.flatten(), device=self.device)
+           b_returns = torch.tensor(returns.flatten(), device=self.device)
+           b_masks = torch.tensor(masks.reshape(-1, *masks.shape[2:]), device=self.device)
+
+           for epoch in range(self.config.num_epochs):
+               # Mini-batch updates
+               for idx in np.random.permutation(len(b_obs))[::self.config.num_minibatches]:
+                   mb_obs = b_obs[idx:idx+self.config.num_minibatches]
+                   mb_actions = b_actions[idx:idx+self.config.num_minibatches]
+                   mb_old_log_probs = b_old_log_probs[idx:idx+self.config.num_minibatches]
+                   mb_advantages = b_advantages[idx:idx+self.config.num_minibatches]
+                   mb_returns = b_returns[idx:idx+self.config.num_minibatches]
+                   mb_masks = b_masks[idx:idx+self.config.num_minibatches]
+
+                   # Forward pass
+                   logits, value = self.network(mb_obs, mask=mb_masks)
+                   dist = MaskedCategorical(logits, mb_masks)
+                   log_prob = dist.log_prob(mb_actions)
+                   entropy = dist.entropy().mean()
+
+                   # Clipped surrogate (PPO)
+                   ratio = (log_prob - mb_old_log_probs).exp()
+                   surr1 = ratio * mb_advantages
+                   surr2 = torch.clamp(ratio, 1 - self.config.clip_epsilon,
+                                       1 + self.config.clip_epsilon) * mb_advantages
+                   policy_loss = -torch.min(surr1, surr2).mean()
+
+                   # Value loss
+                   value_loss = 0.5 * ((value.squeeze() - mb_returns) ** 2).mean()
+
+                   # Total loss (Sutton & Barto Ch.13)
+                   loss = policy_loss - self.entropy_coef * entropy + \
+                          self.config.value_loss_coef * value_loss
+
+                   # Gradient step
+                   self.optimizer.zero_grad()
+                   loss.backward()
+                   nn.utils.clip_grad_norm_(          # CC-12
+                       self.network.parameters(),
+                       self.config.max_grad_norm,
+                   )
+                   self.optimizer.step()
+
+               # Early stopping on KL divergence (CC-26)
+                   with torch.no_grad():
+                       approx_kl = (ratio - 1) - (log_prob - mb_old_log_probs)
+                       if approx_kl.mean() > self.config.target_kl:
+                           break  # Early stop this epoch
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 9 — ONNX Export
+  ──────────────────────────────────────────────────────────────────────
+
+  9.1  Export function (export.py):
+
+       def export_to_onnx(
+           network: ActorCritic,
+           norm_stats: dict,
+           output_path: str,
+           opset_version: int = 17,
+       ):
+           network.eval()
+           dummy_obs = torch.randn(1, 23)
+           dummy_mask = torch.ones(1, 3, dtype=torch.bool)
+
+           torch.onnx.export(
+               network,
+               (dummy_obs, dummy_mask),
+               output_path,
+               opset_version=opset_version,
+               input_names=["observation", "mask"],
+               output_names=["logits", "value"],
+               dynamic_axes={
+                   "observation": {0: "batch"},
+                   "mask": {0: "batch"},
+               },
+           )
+
+           # Verify ONNX model
+           onnx_model = onnx.load(output_path)
+           onnx.checker.check_model(onnx_model)
+
+           # Also export norm_stats alongside
+           norm_path = output_path.replace(".onnx", "_norm_stats.json")
+           with open(norm_path, "w") as f:
+               json.dump(norm_stats, f, indent=2)
+
+  9.2  Export verification:
+       * Run exported ONNX model vs PyTorch model on 100 random inputs
+       * Assert max absolute difference < 1e-5 for both logits and value
+       * Assert ONNX Runtime CPU latency < 50ms for batch_size=1 (CC-04)
+       * If latency exceeds 50ms, simplify with onnx-simplifier
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 10 — ONNX Runtime Inference
+  ──────────────────────────────────────────────────────────────────────
+
+  10.1  Inference class (inference.py):
+
+       class DRLInference:
+           def __init__(self, model_path: str, norm_stats_path: str, config: DRLSettings):
+               self.session = onnxruntime.InferenceSession(
+                   model_path,
+                   providers=["CPUExecutionProvider"],  # CC-18
+               )
+               self.normalizer = InferenceNormalizer.from_json(norm_stats_path)  # CC-06
+               self.config = config
+
+           def predict(self, observation: np.ndarray, mask: np.ndarray) -> tuple[int, float]:
+               # 1. Normalize observation (CC-06)
+               norm_obs = self.normalizer.normalize(observation).astype(np.float32)
+
+               # 2. Run inference
+               inputs = {
+                   "observation": norm_obs.reshape(1, -1),
+                   "mask": mask.reshape(1, -1).astype(bool),
+               }
+               logits, value = self.session.run(None, inputs)
+
+               # 3. Sample action from masked distribution
+               logits = logits[0]
+               logits[~mask] = -1e10
+               probs = np.exp(logits) / np.exp(logits).sum()
+               action = np.random.choice(3, p=probs)
+
+               return int(action), float(value[0, 0])
+
+  10.2  Inference contract:
+       * Input: raw (unnormalized) observation + boolean mask
+       * Output: action (int 0/1/2) + value estimate (float)
+       * Latency: <50ms on Windows 11 CPU (CC-04)
+       * No torch import in inference.py (CC-18)
+       * Thread-safe for concurrent calls (ONNX Runtime session is thread-safe)
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 11 — DRL Weight State Machine
+  ──────────────────────────────────────────────────────────────────────
+
+  11.1  WeightFSM (weight_fsm.py):
+
+       States and transitions:
+       DISABLED(0%) --OOS Sharpe>=0.5 for 5d--> REDUCED(5%)
+       REDUCED(5%)  --OOS Sharpe>=0.8 for 20d--> ACTIVE(15%)
+       ACTIVE(15%)  --OOS Sharpe>=1.0 for 30d--> ESCALATED_1(20%)
+       ESCALATED_1(20%) --OOS Sharpe>=1.5 for 30d--> ESCALATED_2(25%)
+       Any state    --OOS Sharpe<0.5 for 10d--> REDUCED(5%) (auto-reduce)
+
+  11.2  Degradation detection (validation/degradation.py):
+
+       class DegradationDetector:
+           """Monitors OOS performance and triggers weight reduction."""
+           def __init__(self, window: int = 10, threshold: float = 0.5):
+               self.window = window
+               self.threshold = threshold
+               self.recent_sharpes: list[float] = []
+
+           def update(self, daily_sharpe: float) -> str | None:
+               self.recent_sharpes.append(daily_sharpe)
+               if len(self.recent_sharpes) > self.window:
+                   self.recent_sharpes = self.recent_sharpes[-self.window:]
+               if len(self.recent_sharpes) >= self.window:
+                   avg = sum(self.recent_sharpes) / len(self.recent_sharpes)
+                   if avg < self.threshold:
+                       return "DEGRADE"
+               return None
+
+  11.3  WeightFSM implementation:
+
+       class WeightFSM:
+           STATES = {
+               "DISABLED": 0.0,
+               "REDUCED": 0.05,
+               "ACTIVE": 0.15,
+               "ESCALATED_1": 0.20,
+               "ESCALATED_2": 0.25,
+           }
+
+           def __init__(self, initial_state: str = "DISABLED"):
+               self.state = initial_state
+               self.consecutive_good_days = 0
+               self.degradation_detector = DegradationDetector()
+
+           @property
+           def weight(self) -> float:
+               return self.STATES[self.state]
+
+           def transition(self, daily_sharpe: float) -> float:
+               degrade = self.degradation_detector.update(daily_sharpe)
+
+               if degrade == "DEGRADE":
+                   self.state = "REDUCED"
+                   self.consecutive_good_days = 0
+               elif daily_sharpe >= self._threshold_for_escalation():
+                   self.consecutive_good_days += 1
+                   if self._should_escalate():
+                       self._escalate()
+               else:
+                   self.consecutive_good_days = 0
+
+               return self.weight
+
+           def _threshold_for_escalation(self) -> float:
+               thresholds = {
+                   "DISABLED": 0.5,
+                   "REDUCED": 0.8,
+                   "ACTIVE": 1.0,
+                   "ESCALATED_1": 1.5,
+                   "ESCALATED_2": float("inf"),
+               }
+               return thresholds[self.state]
+
+           def _should_escalate(self) -> bool:
+               required_days = {
+                   "DISABLED": 5,
+                   "REDUCED": 20,
+                   "ACTIVE": 30,
+                   "ESCALATED_1": 30,
+                   "ESCALATED_2": 0,
+               }
+               return self.consecutive_good_days >= required_days[self.state]
+
+           def _escalate(self):
+               order = ["DISABLED", "REDUCED", "ACTIVE", "ESCALATED_1", "ESCALATED_2"]
+               idx = order.index(self.state)
+               if idx < len(order) - 1:
+                   self.state = order[idx + 1]
+                   self.consecutive_good_days = 0
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 12 — Walk-Forward Validation
+  ──────────────────────────────────────────────────────────────────────
+
+  12.1  Walk-forward splits (validation/walk_forward.py):
+
+       Walk-Forward Plan (CC-24, CC-10):
+
+       Fold  Train              Validate        Embargo
+       ----  ------------------  --------------- -------
+       1     2022-01 to 2023-12  2024-01 to 03   5 days
+       2     2022-01 to 2024-03  2024-04 to 06   5 days
+       3     2022-01 to 2024-06  2024-07 to 09   5 days
+       4     2022-01 to 2024-09  2024-10 to 12   5 days
+       5     2022-01 to 2024-12  2025-01 to 03   5 days
+
+       Purge: Remove last 5 bars of training before embargo.
+       Embargo: 5 trading days gap between train end and validate start.
+
+  12.2  WalkForwardValidator:
+
+       class WalkForwardValidator:
+           def __init__(self, calendar, embargo_days: int = 5, purge_bars: int = 5):
+               ...
+
+           def splits(self, start_year: int, end_year: int) -> list[dict]:
+               """Returns list of {train_start, train_end, val_start, val_end} dicts."""
+               ...
+
+           def evaluate(self, agent, data) -> dict:
+               """Run agent on each validation fold, return metrics."""
+               results = []
+               for split in self.splits(...):
+                   val_metrics = self._evaluate_fold(agent, data, split)
+                   results.append(val_metrics)
+               return self._aggregate(results)
+
+           def _aggregate(self, results: list[dict]) -> dict:
+               """Aggregate across folds: mean DSR, mean Sharpe, worst drawdown."""
+               return {
+                   "mean_dsr": np.mean([r["dsr"] for r in results]),
+                   "mean_sharpe": np.mean([r["sharpe"] for r in results]),
+                   "worst_max_drawdown": max(r["max_drawdown"] for r in results),
+                   "fold_count": len(results),
+                   "overfitting_ratio": ...,  # CC-25 Zai & Brown Ch.6
+               }
+
+  12.3  Overfitting detection (Zai & Brown Ch.6, CC-25):
+       * Compute train Sharpe and OOS Sharpe for each fold
+       * If OOS Sharpe < 0.5 * train Sharpe then overfitting detected
+       * Response: reduce network capacity (128->64 hidden units)
+         or increase entropy coefficient
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 13 — DRL Metrics
+  ──────────────────────────────────────────────────────────────────────
+
+  13.1  Metrics (metrics.py):
+
+       class DRLMetrics:
+           @staticmethod
+           def sharpe_ratio(returns: np.ndarray, annualize: bool = True) -> float:
+               ...
+
+           @staticmethod
+           def sortino_ratio(returns: np.ndarray) -> float:
+               ...
+
+           @staticmethod
+           def max_drawdown(equity_curve: np.ndarray) -> float:
+               ...
+
+           @staticmethod
+           def calmar_ratio(returns: np.ndarray, equity_curve: np.ndarray) -> float:
+               ...
+
+           @staticmethod
+           def dsr(returns: np.ndarray, n_bets: int) -> float:
+               """Deflated Sharpe Ratio (Phase 6 pattern).
+               DSR = Sharpe * sqrt(1 - skew * Sharpe/4 + kurt * Sharpe^2/24)
+               Adjusted for number of independent bets.
+               """
+               ...
+
+           @staticmethod
+           def win_rate(trades: list[dict]) -> float:
+               ...
+
+           @staticmethod
+           def profit_factor(trades: list[dict]) -> float:
+               ...
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 14 — Training Pipeline (Colab)
+  ──────────────────────────────────────────────────────────────────────
+
+  14.1  Colab notebook structure (notebooks/drl_train_colab.ipynb):
+
+       Cell 1:  Mount Google Drive
+       Cell 2:  Install dependencies (pip install -e ".[drl-train]")
+       Cell 3:  Verify GPU (torch.cuda.is_available(), T4 confirmed)
+       Cell 4:  Import modules, set seeds (CC-19)
+       Cell 5:  Load historical data (from Drive or download)
+       Cell 6:  Create IndianMarketEnv instances (vectorized, N=4)
+       Cell 7:  Initialize PPOAgent with PPOTrainSettings
+       Cell 8:  Run training loop (agent.train())
+       Cell 9:  Walk-forward validation
+       Cell 10: Export ONNX model + norm_stats.json
+       Cell 11: Copy artifacts to Google Drive
+       Cell 12: Download ONNX + norm_stats for local deployment
+
+  14.2  Colab constraints:
+       * T4 GPU: 16GB VRAM -> batch_size limited to ~2048 steps x 4 envs
+       * ~12hr max session -> must complete within 12hr or resume from checkpoint
+       * Google Drive checkpoint every 100k steps (CC-15)
+       * Resume: load latest checkpoint, continue training
+
+  14.3  Checkpoint format (callbacks.py):
+
+       Checkpoint directory structure:
+       /content/drive/MyDrive/drl_checkpoints/
+       ├── step_100000/
+       │   ├── model.pt              # network state_dict
+       │   ├── optimizer.pt          # optimizer state_dict
+       │   ├── normalizer.npz        # RunningMeanStd state
+       │   ├── config.json           # All settings
+       │   └── metrics.json          # Training metrics so far
+       ├── step_200000/
+       │   └── ...
+       └── latest -> step_XXXXXX/    # Symlink to latest
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 15 — Orchestration Integration
+  ──────────────────────────────────────────────────────────────────────
+
+  15.1  DRL as SignalSource in OrchestrationEngine (Phase 11):
+
+       class DRLSignalProvider:
+           """Produces SignalPayload for OrchestrationEngine."""
+           def __init__(self, inference: DRLInference, feature_builder, weight_fsm: WeightFSM):
+               self.inference = inference
+               self.feature_builder = feature_builder
+               self.weight_fsm = weight_fsm
+
+           def fetch(self, market_data: dict) -> SignalPayload:
+               obs = self.feature_builder.build(market_data)
+               mask = self.feature_builder.get_mask(market_data)
+               action, value = self.inference.predict(obs, mask)
+
+               # Convert action to signal
+               direction_map = {0: "FLAT", 1: "BULLISH", 2: "BEARISH"}
+               confidence = min(abs(value) / 2.0, 1.0)  # Value as proxy for confidence
+
+               return SignalPayload(
+                   source=SignalSource.DRL,
+                   direction=direction_map[action],
+                   confidence=confidence,
+                   weight=self.weight_fsm.weight,
+                   timestamp=datetime.now(IST),
+                   metadata={"action": action, "value": value},
+               )
+
+  15.2  Weight rebalancing in OrchestrationEngine:
+
+       When DRL weight changes (via WeightFSM transition):
+       1. Log weight change event
+       2. Recalculate all non-DRL weights proportionally (CC-17)
+       3. Verify sum of all weights = 1.0
+       4. Emit WeightRebalancedEvent for audit trail
+
+  15.3  DRL signal consumption:
+       * OrchestrationEngine calls DRLSignalProvider.fetch() every eval_cycle
+       * DRL signal is combined with other 5 sources via ConfidenceCombiner
+       * If DRL is DISABLED (weight=0), fetch() is not called (skip entirely)
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 16 — Test Suite
+  ──────────────────────────────────────────────────────────────────────
+
+  16.1  Test files and coverage targets:
+
+       tests/drl/test_env.py          -> 95% coverage of env.py
+       tests/drl/test_features.py     -> 95% coverage of features.py
+       tests/drl/test_normalizer.py   -> 100% coverage of normalizer.py
+       tests/drl/test_agent.py        -> 90% coverage of agent.py
+       tests/drl/test_network.py      -> 100% coverage of network.py
+       tests/drl/test_masking.py      -> 100% coverage of masking.py
+       tests/drl/test_export.py       -> 95% coverage of export.py
+       tests/drl/test_inference.py    -> 95% coverage of inference.py
+       tests/drl/test_weight_fsm.py   -> 100% coverage of weight_fsm.py
+       tests/drl/test_metrics.py      -> 95% coverage of metrics.py
+       tests/drl/test_rollout.py      -> 95% coverage of rollout.py
+       tests/drl/test_walk_forward.py -> 90% coverage of walk_forward.py
+       tests/drl/test_degradation.py  -> 100% coverage of degradation.py
+
+  16.2  Key test scenarios:
+
+       test_env.py:
+       - Episode terminates at 75 steps
+       - Episode terminates on kill_switch
+       - Episode terminates on daily_loss_limit breach
+       - Action masking: cannot go LONG if already LONG
+       - Action masking: cannot SHORT if already SHORT
+       - Force FLAT on stale features (>15min)
+       - Reward clipping to [-10, 10]
+       - Reset produces valid observation
+       - NSE holiday is skipped (CC-20)
+       - Lot size = 25 in all calculations (CC-08)
+
+       test_masking.py:
+       - MaskedCategorical samples only from valid actions
+       - Invalid action logits are -1e10
+       - Entropy is computed correctly with mask
+       - All-valid mask = standard Categorical
+
+       test_weight_fsm.py:
+       - DISABLED->REDUCED on 5 consecutive good days
+       - REDUCED->ACTIVE on 20 consecutive good days
+       - Any state->REDUCED on degradation signal
+       - ESCALATED_2 is max state
+       - Weight values match state names
+
+       test_inference.py:
+       - ONNX output matches PyTorch within 1e-5
+       - Inference latency <50ms
+       - No torch import in inference.py
+       - Observation normalization applied correctly
+       - Mask correctly disables invalid actions
+
+       test_export.py:
+       - ONNX model passes onnx.checker
+       - Exported model produces same logits/value as PyTorch
+       - norm_stats.json is valid JSON with correct shape
+
+  16.3  Hypothesis property-based tests (tests/drl/):
+
+       test_features_hypothesis.py:
+       - Any finite float input -> output is finite (no NaN/Inf)
+       - Any observation shape -> correct output shape (23,)
+       - Extreme values -> clipped/normalized, no crash
+
+       test_normalizer_hypothesis.py:
+       - Sequential updates = batch update (same result)
+       - Normalize then denormalize approx original (within float precision)
+       - Zero variance feature -> no division by zero
+
+       test_masking_hypothesis.py:
+       - For any mask with at least one True: probabilities sum to 1.0
+       - Sampled action always satisfies mask
+       - Entropy >= 0 for any valid mask
+
+  16.4  Benchmark tests (pytest-benchmark):
+
+       test_inference_benchmark.py:
+       - benchmark_predict_single: <50ms per inference
+       - benchmark_predict_batch_100: <500ms for 100 inferences
+       - benchmark_feature_build: <10ms per feature vector
+
+  16.5  Test runner commands:
+
+       pytest tests/drl/ -v --cov=src/drl --cov-report=term-missing
+       pytest tests/drl/ -n auto                        # xdist parallel
+       pytest tests/drl/test_inference_benchmark.py --benchmark-only
+       ruff check src/drl/ tests/drl/
+       mypy src/drl/ --strict
+       bandit -r src/drl/
+       pip-audit
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 17 — Security & Audit
+  ──────────────────────────────────────────────────────────────────────
+
+  17.1  Security requirements:
+       * No secrets/keys in model files, norm_stats, or checkpoints
+       * ONNX model file integrity: SHA-256 hash checked at load time
+       * norm_stats.json integrity: SHA-256 hash checked at load time
+       * Model path must be within allowed directory (configurable)
+       * No network calls during inference (offline-only)
+       * gitleaks scan on every commit touching src/drl/
+       * bandit scan on src/drl/ — must pass with no high-severity findings
+       * pip-audit — no known vulnerabilities in [drl] or [drl-train] deps
+
+  17.2  Audit trail:
+       * Every DRL signal logged with: timestamp, observation hash, action,
+         value, mask, weight_state, confidence
+       * Weight FSM transitions logged with: from_state, to_state, trigger
+       * Model version logged at startup and on model reload
+       * Training metadata (seed, data range, final metrics) saved with model
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 18 — Colab Training Notebook
+  ──────────────────────────────────────────────────────────────────────
+
+  18.1  Notebook cells (see Instruction 14.1 for outline)
+
+  18.2  Additional Colab-specific details:
+       * Use !pip install -e ".[drl-train]" from repo root on Drive
+       * Verify T4 GPU: torch.cuda.get_device_name(0) must contain "T4"
+       * Set CUDA_LAUNCH_BLOCKING=1 for deterministic GPU execution
+       * Log to Weights & Biases (wandb) if WANDB_API_KEY env var is set
+       * If no wandb key, log to local CSV files in checkpoint directory
+       * At end of training, run full walk-forward validation
+       * Print summary: train Sharpe, OOS Sharpe, DSR, overfitting ratio
+       * If overfitting ratio > 2.0, print WARNING and recommend capacity reduction
+       * Export ONNX + norm_stats.json + SHA-256 hashes
+       * Copy all artifacts to Google Drive for persistence
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 19 — Production Deployment
+  ──────────────────────────────────────────────────────────────────────
+
+  19.1  Deployment steps:
+       1. Copy ppo_nifty.onnx and norm_stats.json to models/drl/
+       2. Verify SHA-256 hashes match training artifacts
+       3. Set DRLSettings.enabled = True in config
+       4. Set DRLSettings.weight_state = "DISABLED" (start disabled)
+       5. Set DRLSettings.model_path = "models/drl/ppo_nifty.onnx"
+       6. Set DRLSettings.norm_stats_path = "models/drl/norm_stats.json"
+       7. Run inference latency test: <50ms on target hardware
+       8. Run OOS backtest with DRL signals (Phase 6 framework)
+       9. Verify weight sum = 1.0 after DRL integration
+       10. Start with DISABLED, manually promote to REDUCED after review
+
+  19.2  Deployment verification:
+       * ONNX model loads without error
+       * Inference produces valid actions (0, 1, or 2)
+       * Inference latency < 50ms
+       * No torch import in production code path
+       * WeightFSM starts at DISABLED
+       * OrchestrationEngine correctly combines DRL signal
+       * Audit log captures DRL signals
+
+  19.3  Rollback plan:
+       * Set DRLSettings.enabled = False to immediately disable
+       * Or set DRLSettings.weight_state = "DISABLED" (weight=0%)
+       * Existing 5 signal sources continue independently
+       * No data loss or corruption from disabling DRL
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 20 — Monitoring & Alerting
+  ──────────────────────────────────────────────────────────────────────
+
+  20.1  Metrics to monitor in production:
+       * drl_inference_latency_ms (target: <50ms)
+       * drl_signal_direction (FLAT/LONG/SHORT counts)
+       * drl_weight_state (current FSM state)
+       * drl_weight_value (current weight 0-0.25)
+       * drl_daily_pnl (realized PnL attributed to DRL signals)
+       * drl_observability_score (how many features are non-stale)
+       * drl_mask_forced_flat_count (staleness-forced FLAT actions)
+
+  20.2  Alerts:
+       * CRITICAL: inference latency > 50ms for 3 consecutive calls
+       * WARNING: staleness-forced FLAT > 10 times in a day
+       * WARNING: DRL weight reduced (state transition to REDUCED)
+       * INFO: DRL weight escalated (state transition up)
+       * CRITICAL: ONNX model file hash mismatch
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 21 — Dependency Matrix
+  ──────────────────────────────────────────────────────────────────────
+
+  21.1  DRL module dependencies on existing project:
+
+       src/drl/         depends on              Phase
+       --------------------------------------------- --------
+       env.py           RiskManager              Phase 10
+       env.py           NSE trading calendar     Phase 6
+       features.py      SentimentAnalyzer        Phase 8
+       features.py      MarketDataProvider       Phase 2
+       features.py      OptionsData (Greeks)     Phase 9
+       inference.py     ONNX Runtime             External
+       weight_fsm.py    OrchestrationSettings    Phase 11
+       DRLSignalProvider  SignalPayload          Phase 11
+       DRLSignalProvider  OrchestrationEngine    Phase 11
+       metrics.py       DSR calculation          Phase 6
+       walk_forward.py  Purge+embargo logic      Phase 6
+
+  21.2  External dependency versions (pinned):
+
+       gymnasium>=0.29.1,<1.0
+       onnxruntime>=1.17.0,<2.0
+       onnx>=1.15.0,<2.0
+       torch>=2.2.0,<3.0              # [drl-train] only
+       pytest-xdist                    # dev
+       hypothesis                      # dev
+       bandit                          # dev
+       pip-audit                       # dev
+
+  ──────────────────────────────────────────────────────────────────────
+  Instruction 22 — File Manifest & Artifact Checklist
+  ──────────────────────────────────────────────────────────────────────
+
+  Production artifacts (to be created during implementation):
+  [ ] src/drl/__init__.py
+  [ ] src/drl/env.py
+  [ ] src/drl/features.py
+  [ ] src/drl/normalizer.py
+  [ ] src/drl/agent.py
+  [ ] src/drl/network.py
+  [ ] src/drl/masking.py
+  [ ] src/drl/export.py
+  [ ] src/drl/inference.py
+  [ ] src/drl/weight_fsm.py
+  [ ] src/drl/metrics.py
+  [ ] src/drl/training/__init__.py
+  [ ] src/drl/training/train.py
+  [ ] src/drl/training/rollout.py
+  [ ] src/drl/training/callbacks.py
+  [ ] src/drl/validation/__init__.py
+  [ ] src/drl/validation/walk_forward.py
+  [ ] src/drl/validation/oos_eval.py
+  [ ] src/drl/validation/degradation.py
+  [ ] tests/drl/__init__.py
+  [ ] tests/drl/conftest.py
+  [ ] tests/drl/test_env.py
+  [ ] tests/drl/test_features.py
+  [ ] tests/drl/test_normalizer.py
+  [ ] tests/drl/test_agent.py
+  [ ] tests/drl/test_network.py
+  [ ] tests/drl/test_masking.py
+  [ ] tests/drl/test_export.py
+  [ ] tests/drl/test_inference.py
+  [ ] tests/drl/test_weight_fsm.py
+  [ ] tests/drl/test_metrics.py
+  [ ] tests/drl/test_rollout.py
+  [ ] tests/drl/test_walk_forward.py
+  [ ] tests/drl/test_degradation.py
+  [ ] notebooks/drl_train_colab.ipynb
+  [ ] models/drl/ppo_nifty.onnx          (produced by training)
+  [ ] models/drl/norm_stats.json          (produced by training)
+  [ ] models/drl/ppo_nifty.onnx.sha256    (produced by training)
+
+═══════════════════════════════════════════════════════════════════════════════
+ SECTION 3 — VERIFICATION GATES
+═══════════════════════════════════════════════════════════════════════════════
+
+  Gate 1 — Environment & Features
+  ─────────────────────────────────
+  [ ] IndianMarketEnv conforms to gymnasium.Env API
+  [ ] reset() returns (obs, info) with valid shape and mask
+  [ ] step() returns (obs, reward, terminated, truncated, info)
+  [ ] All 23 features produce finite values for any valid market data
+  [ ] Action masking prevents invalid actions
+  [ ] Episode terminates at 75 steps
+  [ ] Episode terminates on kill_switch / daily_loss_limit
+  [ ] Stale features force FLAT action
+  [ ] Lot size = 25 in all calculations
+  [ ] pytest tests/drl/test_env.py tests/drl/test_features.py — ALL PASS
+
+  Gate 2 — Network & PPO Agent
+  ─────────────────────────────
+  [ ] ActorCritic forward pass produces correct shapes
+  [ ] MaskedCategorical samples only valid actions
+  [ ] GAE computation matches Sutton & Barto formula
+  [ ] PPO clipped surrogate loss computed correctly
+  [ ] Gradient clipping at 0.5
+  [ ] Entropy coefficient schedule decays linearly
+  [ ] KL divergence early stopping works
+  [ ] Seeds produce reproducible results
+  [ ] pytest tests/drl/test_agent.py tests/drl/test_network.py
+      tests/drl/test_masking.py tests/drl/test_rollout.py — ALL PASS
+
+  Gate 3 — ONNX Export & Inference
+  ─────────────────────────────────
+  [ ] ONNX model passes onnx.checker
+  [ ] ONNX output matches PyTorch within 1e-5
+  [ ] Inference latency < 50ms on CPU
+  [ ] No torch import in inference.py
+  [ ] Observation normalization applied from saved stats
+  [ ] Mask correctly disables invalid actions in ONNX
+  [ ] pytest tests/drl/test_export.py tests/drl/test_inference.py — ALL PASS
+
+  Gate 4 — Weight FSM & Orchestration
+  ─────────────────────────────────────
+  [ ] WeightFSM state transitions match specification
+  [ ] Degradation detector triggers on 10 consecutive low-Sharpe days
+  [ ] Weight values: DISABLED=0, REDUCED=0.05, ACTIVE=0.15,
+      ESCALATED_1=0.20, ESCALATED_2=0.25
+  [ ] OrchestrationSettings weight sum = 1.0 after DRL integration
+  [ ] DRLSignalProvider produces valid SignalPayload
+  [ ] pytest tests/drl/test_weight_fsm.py tests/drl/test_degradation.py — ALL PASS
+
+  Gate 5 — Walk-Forward Validation
+  ─────────────────────────────────
+  [ ] 5 walk-forward folds with 5-day embargo
+  [ ] Purge applied between train and validate
+  [ ] OOS Sharpe > 0 for at least 3 of 5 folds
+  [ ] Overfitting ratio < 2.0 (OOS Sharpe > 0.5 * train Sharpe)
+  [ ] DSR computed correctly per Phase 6 specification
+  [ ] pytest tests/drl/test_walk_forward.py — ALL PASS
+
+  Gate 6 — Security & Deployment
+  ──────────────────────────────
+  [ ] bandit -r src/drl/ — no high-severity findings
+  [ ] pip-audit — no known vulnerabilities in [drl] deps
+  [ ] gitleaks — no secrets in src/drl/
+  [ ] ONNX model SHA-256 verified at load time
+  [ ] No network calls during inference
+  [ ] Production code has zero torch imports
+  [ ] All DRL signals logged with audit trail
+  [ ] Rollback works (disable DRL -> system continues normally)
+
+═══════════════════════════════════════════════════════════════════════════════
+ SECTION 4 — APPENDICES
+═══════════════════════════════════════════════════════════════════════════════
+
+  Appendix A — Hyperparameter Summary
+  ────────────────────────────────────
+
+  | Parameter              | Value        | Source                    |
+  |------------------------|--------------|---------------------------|
+  | learning_rate          | 3e-4         | CleanRL default           |
+  | gamma                  | 0.99         | CC-13, S&B Ch.12          |
+  | gae_lambda             | 0.95         | CC-13, S&B Ch.12          |
+  | clip_epsilon           | 0.2          | Schulman et al. 2017      |
+  | entropy_coef_start     | 0.01         | CC-25                     |
+  | entropy_coef_end       | 0.001        | CC-25                     |
+  | value_loss_coef        | 0.5          | CleanRL default           |
+  | max_grad_norm          | 0.5          | CC-12                     |
+  | reward_clip            | 10.0         | CC-12                     |
+  | target_kl              | 0.015        | CC-26                     |
+  | num_steps (rollout)    | 2048         | CleanRL default           |
+  | num_epochs             | 10           | CleanRL default           |
+  | num_minibatches        | 32           | CleanRL default           |
+  | total_timesteps        | 5,000,000    | ~1000 episodes x 75 steps |
+  | checkpoint_every       | 100,000      | CC-15                     |
+  | observation_dim        | 23           | Feature spec              |
+  | action_dim             | 3            | FLAT/LONG/SHORT           |
+  | lot_size               | 25           | CC-08                     |
+  | max_episode_steps      | 75           | CC-23                     |
+
+  Appendix B — DRL Weight FSM State Table
+  ─────────────────────────────────────────
+
+  | State        | Weight | Entry Condition                | Exit Down   | Exit Up     |
+  |--------------|--------|--------------------------------|-------------|-------------|
+  | DISABLED     | 0.00   | Initial / manual disable       | N/A         | 5 days >=0.5|
+  | REDUCED      | 0.05   | Degradation or initial ramp    | N/A         | 20d >=0.8   |
+  | ACTIVE       | 0.15   | Stable OOS performance         | 10d <0.5    | 30d >=1.0   |
+  | ESCALATED_1  | 0.20   | Strong OOS performance         | 10d <0.5    | 30d >=1.5   |
+  | ESCALATED_2  | 0.25   | Exceptional OOS (max allowed)  | 10d <0.5    | N/A         |
+
+  Appendix C — Feature Dependency Map
+  ─────────────────────────────────────
+
+  | Feature              | Data Source           | Phase | Computation      |
+  |----------------------|-----------------------|-------|------------------|
+  | rsi_14               | OHLCV                 | 2     | talib.RSI        |
+  | ema_9_ratio          | OHLCV                 | 2     | talib.EMA        |
+  | ema_21_ratio         | OHLCV                 | 2     | talib.EMA        |
+  | bollinger_pct        | OHLCV                 | 2     | talib.BBANDS     |
+  | macd_hist            | OHLCV                 | 2     | talib.MACD       |
+  | atr_14_pct           | OHLCV                 | 2     | talib.ATR        |
+  | vwap_ratio           | OHLCV + Volume        | 2     | Custom           |
+  | return_1bar          | OHLCV                 | 2     | np.log           |
+  | return_5bar          | OHLCV                 | 2     | np.log           |
+  | return_20bar         | OHLCV                 | 2     | np.log           |
+  | sentiment_score      | SentimentAnalyzer     | 8     | Phase 8 API      |
+  | sentiment_confidence | SentimentAnalyzer     | 8     | Phase 8 API      |
+  | news_volume_z        | News count            | 8     | Z-score          |
+  | adv_dec_ratio        | NSE market breadth    | 2     | MarketDataProvider|
+  | sector_momentum      | NIFTY sector indices  | 2     | MarketDataProvider|
+  | oi_change_pct        | OI data               | 4     | Phase 4 pipeline |
+  | volume_ratio         | Volume                | 2     | 20-bar avg       |
+  | oi_volume_divergence | OI + Price            | 4     | Divergence logic |
+  | india_vix_z          | India VIX             | 2     | Z-score          |
+  | delta_atm            | ATM options           | 9     | Phase 9 Greeks   |
+  | gamma_atm            | ATM options           | 9     | Phase 9 Greeks   |
+  | vega_atm_pct         | ATM options           | 9     | Phase 9 Greeks   |
+  | theta_atm_pct        | ATM options           | 9     | Phase 9 Greeks   |
+
+  Appendix D — Cost Model for DRL Env
+  ──────────────────────────────────────
+
+  | Cost Component        | Value      | Notes                        |
+  |-----------------------|------------|------------------------------|
+  | Brokerage per lot     | Rs 20      | Zerodha flat per order       |
+  | STT (sell side)       | 0.017%     | On sell side only            |
+  | Transaction tax       | 0.00125%   | Exchange transaction charge  |
+  | GST on brokerage      | 18%        | On brokerage amount          |
+  | SEBI fee              | Rs 10/cr   | On turnover                  |
+  | Stamp duty            | 0.002%     | On buy side                  |
+  | Slippage              | 0.01%      | 1 tick on NIFTY              |
+  | Total per round turn  | ~Rs 80/lot | Must be subtracted from PnL  |
+
+  Appendix E — Colab Resource Budget
+  ─────────────────────────────────────
+
+  | Resource            | Limit        | Usage Estimate              |
+  |---------------------|--------------|-----------------------------|
+  | GPU                 | T4 (16GB)    | ~4GB for model + rollout    |
+  | RAM                 | ~12GB        | ~4GB for data + buffer      |
+  | Disk                | ~70GB        | ~10GB data + checkpoints    |
+  | Session time        | ~12 hours    | ~8hr training + 2hr eval    |
+  | Google Drive        | 15GB free    | ~2GB for checkpoints        |
+
+  Appendix F — Implementation Order (Recommended)
+  ──────────────────────────────────────────────────
+
+  Step 1:  src/drl/normalizer.py + tests         (no dependencies)
+  Step 2:  src/drl/masking.py + tests            (no dependencies)
+  Step 3:  src/drl/features.py + tests           (depends on Phase 2,8,9 APIs)
+  Step 4:  src/drl/env.py + tests                (depends on features, normalizer, masking)
+  Step 5:  src/drl/network.py + tests            (depends on masking)
+  Step 6:  src/drl/metrics.py + tests            (no dependencies)
+  Step 7:  src/drl/weight_fsm.py + tests         (depends on metrics)
+  Step 8:  src/drl/validation/degradation.py + tests (depends on metrics)
+  Step 9:  src/drl/training/rollout.py + tests   (depends on env, network)
+  Step 10: src/drl/agent.py + tests              (depends on all above)
+  Step 11: src/drl/export.py + tests             (depends on network)
+  Step 12: src/drl/inference.py + tests          (depends on export, normalizer)
+  Step 13: src/drl/validation/walk_forward.py + tests (depends on agent)
+  Step 14: src/drl/validation/oos_eval.py + tests (depends on walk_forward, metrics)
+  Step 15: src/drl/training/callbacks.py + tests (depends on agent)
+  Step 16: src/drl/training/train.py + tests     (depends on agent, callbacks)
+  Step 17: DRLSignalProvider (Phase 11 integration)
+  Step 18: Config updates (DRLSettings, OrchestrationSettings, SignalSource.DRL)
+  Step 19: Colab notebook
+  Step 20: Production deployment + monitoring
+
+===============================================================================
+  END OF PHASE 17 PLAN
+===============================================================================

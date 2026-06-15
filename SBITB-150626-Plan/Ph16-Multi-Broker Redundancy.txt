@@ -1,0 +1,2701 @@
+================================================================================
+PHASE 16: MULTI-BROKER REDUNDANCY (WEEKS 42-44)
+PRODUCTION-GRADE IMPLEMENTATION PLAN
+================================================================================
+
+> **Duration:** Weeks 42-44 (3 weeks) | **Output:** `src/brokers/angel.py`, `src/brokers/dhan.py`, `src/brokers/router.py`, `src/brokers/health_monitor.py`, `src/brokers/failover_manager.py`, `src/brokers/reconciler.py`, extended `config/settings.py`, extended `src/metrics/collector.py`, extended `src/resilience/`, 25+ test files — multi-broker system with automatic failover from primary Zerodha to fallback Angel One, Dhan as depth-data provider, broker health monitoring every 30 seconds, position reconciliation on failover, ZERO single-broker dependency
+> **Environment:** Windows 11 + Python 3.12.7 + .venv at `G:\OC\02June26\indian-trading-bot\.venv`
+> **Reference Books:** Kleppmann "Designing Data-Intensive Applications" Ch.5-8 (replication, partitioning, fault tolerance, distributed systems); Bass et al. "Software Architecture in Practice" Ch.4-6 (availability tactics, redundancy, failover patterns); Nygard "Release It!" Ch.5-7 (circuit breakers, bulkheads, timeout patterns, failover); Hohpe & Woolf "Enterprise Integration Patterns" Ch.4-6 (message routing, channel patterns, broker failover); Richards & Ford "Fundamentals of Software Architecture" Ch.11 (availability & fault tolerance architecture); Seth et al. "Algorithmic Trading and DMA" Ch.6-7 (smart order routing, execution quality, multi-venue access)
+> **Reference Standards:** SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013 (algo framework); ISO 20022 (financial messaging); FIX 5.0 SP2 (order routing protocol); MiFID II RTS 6 (pre-trade risk controls); ISO 27001 A.8.20 (networks security); NIST SP 800-61 Rev.2 (incident handling); NIST DE.CM-6 (external service monitoring); SOC 2 CC.A1 (availability)
+> **Reference Docs:** `SEBI_Algo_Trading_Regulation_Research.md` + `COMPLIANCE_SECURITY_MAPPING.md` + `tooling-reference.md`
+> **Extends:** Phase 0-15 scaffolding — does NOT overwrite existing files
+> **CRITICAL:** This is a PLAN ONLY — no implementation, no code generation, no other activity
+
+================================================================================
+CRITICAL CORRECTIONS TO ORIGINAL MULTI-BROKER STATEMENTS
+================================================================================
+
+| # | Original Statement | Corrected Fact | Source |
+|---|--------------------|----------------|--------|
+| 1 | "Angel One SmartAPI — free" | Angel One SmartAPI is free for account holders BUT: (a) historical data limited to 1 year vs Zerodha's unlimited, (b) no WebSocket in free tier for MCX (requires separate subscription), (c) rate limit = 3 req/sec for orders (same as Zerodha), (d) TOTP-based daily login required (same as Zerodha), (e) no sandbox/test environment | Angel One SmartAPI documentation; SmartAPI GitHub |
+| 2 | "Dhan API — 200-level depth" | Dhan API provides 200-level market depth (Level 3 / order book) BUT: (a) Dhan does NOT support MCX commodity segment as of 2025, (b) Dhan depth data is REST-polling only (no WebSocket depth stream), (c) Dhan order placement has higher latency (~150ms avg) vs Zerodha (~50ms avg), (d) Dhan charges Rs 20 per executed order (same as Zerodha for delivery), (e) Dhan API requires separate OAuth flow independent of Zerodha/Angel One | Dhan API documentation; Dhan developer portal |
+| 3 | "Smart order routing: Primary Zerodha, Fallback Angel One" | Smart Order Routing (SOR) in Indian retail context is NOT the same as institutional SOR (Seth Ch.6). Retail SOR = priority-based broker selection with automatic failover. TRUE SOR (splitting orders across venues for best execution) is NOT possible in Indian retail because: (a) same instrument on NSE has single order book, (b) each broker connects to same exchange, (c) price discovery happens at exchange level, not broker level. Our SOR = broker failover + execution quality tracking, NOT cross-venue price optimization | Seth Ch.6 (Indian market microstructure); SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013 |
+| 4 | "Auto-switch on failure" | Automatic failover must be GRADUATED, not instant: (a) circuit breaker opens on primary -> HALT new orders (do NOT auto-reroute pending orders), (b) health monitor confirms primary is truly down (not transient), (c) position reconciliation with primary -> confirm all open positions, (d) switch to fallback broker -> re-authenticate + re-establish session, (e) re-submit only NEW orders on fallback (do NOT re-submit old orders without human ACK for live trades). For paper trading only: fully automatic failover is acceptable | Nygard Ch.5 (failover patterns); Kleppmann Ch.8 (distributed systems fault tolerance) |
+| 5 | "Broker health monitor: ping every 30 seconds" | Health check must be MULTI-DIMENSIONAL, not just ping: (a) HTTP health endpoint (liveness), (b) order placement API response time (responsiveness), (c) WebSocket connection status (real-time data), (d) margin availability (operational), (e) session validity (authentication). 30-second interval is MINIMUM — during active trading, check every 10 seconds. During non-trading hours, check every 60 seconds to conserve API rate limits | Kleppmann Ch.8 (monitoring); NIST DE.CM-6 |
+| 6 | "Implement DhanBroker for MCX support" | Dhan does NOT support MCX commodity segment as of 2025. DhanBroker is implemented for: (a) NSE F&O (same as Zerodha + Angel), (b) 200-level depth data (REST polling), (c) fallback order routing for NSE only. MCX commodity trading remains on Zerodha (primary) and Angel One (fallback) ONLY. Dhan CANNOT be used for MCX failover | Dhan API documentation; MCX member list |
+| 7 | "Angel One for MCX support" | Angel One DOES support MCX commodity segment. However: (a) Angel One MCX WebSocket data requires paid subscription, (b) Angel One MCX order placement is available in SmartAPI free tier, (c) Angel One is the ONLY viable MCX fallback broker (Dhan excluded per Correction #6). For MCX failover: Primary = Zerodha, Fallback = Angel One only (no Dhan) | Angel One SmartAPI documentation |
+| 8 | "Auto-switch" implies zero downtime | Failover is NOT zero-downtime: (a) detection delay (10-30 seconds), (b) reconciliation delay (5-15 seconds for position sync), (c) re-authentication on fallback broker (3-10 seconds including TOTP), (d) order book rebuild (2-5 seconds). Total failover time: 20-60 seconds. During this window, NO new orders can be placed. Existing open positions remain open (they are on the EXCHANGE, not the broker). Open orders that were submitted but not yet filled need manual reconciliation | Nygard Ch.7 (timeout patterns); Kleppmann Ch.8 |
+| 9 | "Three brokers all equal" | Brokers are NOT equal — they have a STRICT hierarchy: (a) Zerodha = PRIMARY (lowest latency, most reliable, full NSE+MCX support), (b) Angel One = FALLBACK for NSE+MCX (free, moderate latency, MCX order support but no free MCX WebSocket), (c) Dhan = DEPTH-ONLY + NSE FALLBACK of last resort (200-level depth, higher latency, NO MCX). Priority order is FIXED, not dynamic | Bass Ch.4 (availability tactics); Richards & Ford Ch.11 |
+| 10 | "Position reconciliation after failover" | Post-failover reconciliation is the MOST CRITICAL safety step: (a) positions live on EXCHANGE, not broker — switching broker doesn't lose positions, (b) but each broker reports positions independently — numbers MUST match, (c) if position count differs between primary and fallback reports -> CRITICAL alert + PAUSE + human intervention, (d) open orders on primary at time of failover must be checked: filled? pending? cancelled? — DO NOT assume state, (e) margin reported by fallback broker may differ (each broker has independent margin calculation) | MiFID II Art.25 (record keeping); Kaufman Ch.12 (reconciliation); SEBI CIR/MRD/DP/09/2012 |
+| 11 | "Independent session per broker" | Each broker has INDEPENDENT authentication lifecycle: (a) Zerodha: access_token expires daily at 6:00 AM IST, (b) Angel One: JWT token expires daily at 6:00 AM IST (similar), (c) Dhan: access_token with configurable expiry (default 24h), (d) Re-authentication for ALL brokers must happen BEFORE market open (6:01 AM IST latest), (e) If any broker re-auth fails, it is marked UNHEALTHY but does NOT block other brokers, (f) Daily pre-open must verify at least 2 brokers are authenticated (primary + one fallback) | Zerodha Kite API docs; Angel One SmartAPI docs; Dhan API docs |
+| 12 | "Each broker independent algo tagging" | Per SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013: each broker is responsible for exchange algo ID tagging independently. Our internal tag (format_algo_tag) is for attribution only. Each broker adapter MUST: (a) tag orders with our internal tag (if broker supports it), (b) NOT interfere with broker's exchange algo ID tagging, (c) use broker-specific tag field names (Zerodha: `tag`, Angel One: `remarks`, Dhan: `tag`) | SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013; Ph10 ComplianceSettings |
+| 13 | "Failback when primary recovers" | Failback strategy = STICKY fallback with manual primary switch: (a) After failover to Angel One, STAY on Angel One for remainder of trading session, (b) Do NOT auto-switch back to Zerodha mid-session (risk of double-submission, state confusion), (c) At next PRE_OPEN (next trading day), attempt Zerodha first, (d) If Zerodha is healthy at PRE_OPEN, switch back to primary, (e) If Zerodha still unhealthy, continue on Angel One, (f) Human can force failback via Telegram /broker switch zerodha (requires confirmation) | Nygard Ch.5 (circuit breaker patterns); Kleppmann Ch.8 (failover stability) |
+
+================================================================================
+BOOK / STANDARD EXTRACTIONS APPLIED TO PHASE 16
+================================================================================
+
+### Kleppmann "Designing Data-Intensive Applications"
+
+| # | Chapter | Extraction | Phase 16 Application |
+|---|---------|-----------|---------------------|
+| 1 | Ch.5 | "Replication: if one node fails, another can take over — but the switchover must be handled carefully" | Broker failover is node-level replication: Zerodha (primary) -> Angel One (replica). Switchover requires position reconciliation, NOT just API redirect |
+| 2 | Ch.5 | "Failover: automatic vs manual. Automatic failover is convenient but dangerous — split-brain risk" | STICKY failover + manual failback (Correction #13): avoid split-brain where both brokers think they're primary |
+| 3 | Ch.5 | "Monotonic reads: after failover, user should not see older data than before" | Position reconciliation after failover must show CURRENT state, not stale cache. Always fetch fresh positions from new broker |
+| 4 | Ch.7 | "Transactions: exactly-once semantics require idempotent operations" | OrderIdempotencyGuard from Ph14 ensures orders are not double-submitted during failover. Each order gets a unique dedup key |
+| 5 | Ch.8 | "A system that tolerates faults must first detect them — timeouts and circuit breakers are essential" | Health monitor detects faults in 10-30 seconds. CircuitBreaker wraps each broker independently. Per-broker circuit breakers (NOT shared) |
+| 6 | Ch.8 | "Backpressure: if a downstream service is slow, propagate the slowness upstream rather than letting requests pile up" | If fallback broker is slow (Dhan ~150ms), don't pile up orders. Apply rate limiting per broker. Reject new orders if broker queue > threshold |
+| 7 | Ch.8 | "Load shedding: during overload, deliberately drop some requests to keep the system responsive" | During failover transition (20-60 seconds), reject new order submissions. Return "FAILOVER_IN_PROGRESS" status. Do NOT queue orders for later |
+
+### Nygard "Release It!"
+
+| # | Chapter | Extraction | Phase 16 Application |
+|---|---------|-----------|---------------------|
+| 1 | Ch.5 | "Circuit Breaker: when a downstream service fails, stop calling it. Give it time to recover" | Per-broker CircuitBreaker (already exists in src/resilience/circuit_breaker.py). Each broker gets its OWN circuit breaker instance with independent state |
+| 2 | Ch.5 | "Bulkhead: isolate different parts of the system so a failure in one doesn't sink the whole ship" | Broker bulkheads: Angel One failure does NOT affect Zerodha. Each broker has independent session, rate limiter, circuit breaker, WebSocket connection |
+| 3 | Ch.6 | "Timeouts: set aggressive timeouts on all external calls. Never wait indefinitely" | All broker API calls have configurable timeouts: place_order=5s, get_positions=3s, get_margins=3s, authenticate=10s. Use httpx.Timeout for HTTP calls |
+| 4 | Ch.6 | "Handshake: when reconnecting, verify the service is actually ready before sending real requests" | Broker health check handshake: (a) authenticate, (b) get_margins (proves session valid), (c) get_order_book (proves API functional). ALL 3 must pass before marking broker HEALTHY |
+| 5 | Ch.7 | "Fail fast: if the system can't serve the request properly, reject it immediately rather than degrading" | During failover: immediately reject new orders with clear error message. Don't try to queue and retry on fallback mid-flight |
+| 6 | Ch.7 | "Test your failures: deliberately break things to verify your resilience patterns work" | Chaos testing: simulate broker outage (mock broker returning 500s), verify circuit breaker opens, health monitor detects failure, failover triggers within 60 seconds, reconciliation completes |
+
+### Bass et al. "Software Architecture in Practice"
+
+| # | Chapter | Extraction | Phase 16 Application |
+|---|---------|-----------|---------------------|
+| 1 | Ch.4 | "Availability tactics: fault detection, fault recovery, fault prevention" | Fault detection = health monitor; fault recovery = failover; fault prevention = daily pre-open broker validation |
+| 2 | Ch.5 | "Redundancy: active-passive vs active-active. For stateful services, active-passive is simpler and safer" | Active-passive broker pattern: Zerodha = active, Angel One = passive (standby). Dhan = passive depth provider. NOT active-active (would cause order duplication) |
+| 3 | Ch.5 | "State resynchronization: when switching to a standby, the standby must catch up to the current state" | Position reconciliation on failover: fetch positions from new broker, compare with local state, resolve mismatches. This IS state resynchronization |
+| 4 | Ch.6 | "Ping/Echo: a fault detection tactic where one component sends a ping and expects an echo" | Health monitor sends multi-dimensional ping every 10-30 seconds. Echo = successful API response + valid session + positive margin |
+
+### Seth et al. "Algorithmic Trading and DMA"
+
+| # | Chapter | Extraction | Phase 16 Application |
+|---|---------|-----------|---------------------|
+| 1 | Ch.6 | "Smart Order Routing: in India, all brokers connect to the same exchange order book — there is no price improvement from routing" | Correction #3: Our SOR is NOT cross-venue price optimization. It is broker availability routing. Same instrument, same exchange, same price — different broker API endpoint |
+| 2 | Ch.6 | "Execution quality measurement is essential regardless of venue" | Per-broker execution quality tracking: latency, fill rate, rejection rate, slippage. Compare Zerodha vs Angel One vs Dhan over time. Report in SixWeekLiveReport |
+| 3 | Ch.7 | "Split orders only when venue liquidity demands it — for retail lots, single venue is sufficient" | Phase 16 does NOT split orders across brokers. An order goes to ONE broker entirely. Split routing is institutional-only and adds complexity without benefit at our lot sizes |
+
+### Richards & Ford "Fundamentals of Software Architecture"
+
+| # | Chapter | Extraction | Phase 16 Application |
+|---|---------|-----------|---------------------|
+| 1 | Ch.11 | "Architectural fitness functions: measure what matters — for availability, measure MTTF and MTTR" | MTTF = Mean Time To Failure (broker uptime between failures). MTTR = Mean Time To Recovery (failover time). Track both per broker. Target: MTTF > 99.5%, MTTR < 60 seconds |
+| 2 | Ch.11 | "The captain goes down with the ship: if failover fails, fail visibly rather than silently" | If ALL brokers are down, enter KILL mode (not silent degradation). Alert human via Telegram CRITICAL. Log exact state of all brokers. Do NOT pretend system is operational |
+
+### Hohpe & Woolf "Enterprise Integration Patterns"
+
+| # | Chapter | Extraction | Phase 16 Application |
+|---|---------|-----------|---------------------|
+| 1 | Ch.4 | "Message Router: routes messages to different destinations based on conditions" | BrokerRouter = Content-Based Router: routes order to primary broker by default, to fallback when primary circuit breaker is OPEN |
+| 2 | Ch.5 | "Invalid Message Channel: messages that cannot be processed go to a dead letter queue" | Orders that fail on ALL brokers go to "dead order" channel: logged, alerted, but NOT retried automatically. Human reviews and manually resubmits |
+| 3 | Ch.6 | "Competing Consumers pattern: multiple consumers process messages from the same channel" | NOT used — we use active-passive, NOT competing consumers. One broker processes at a time. Competing consumers would cause double-execution risk |
+
+================================================================================
+EXISTING SCAFFOLDING ANALYSIS (DO NOT OVERWRITE — EXTEND ONLY)
+================================================================================
+
+config/settings.py:
+- ComplianceSettings: MAX_ORDERS_PER_SECOND, SEBI_OPS_REGISTRATION_THRESHOLD, ALLOWED_SEGMENTS, MCX times
+- RiskSettings: MAX_ORDER_VALUE_PER_TRADE, MAX_TOTAL_EXPOSURE, MARGIN_UTILIZATION_KILL
+- KillSwitchSettings: THROTTLE_RATE_PCT, REQUIRE_MANUAL_RE_ENABLE
+- AuditSettings: RETENTION_YEARS, CHECKSUM_ALGORITHM, NTP_SERVER
+- BrokerSettings: ZERODHA-specific rate limits, session config, market protection, tag length
+-> EXTEND with: MultiBrokerSettings, AngelOneSettings, DhanSettings, FailoverSettings
+
+config/secrets.env.example:
+- ZERODHA_API_KEY, ZERODHA_API_SECRET, ZERODHA_ACCESS_TOKEN, ZERODHA_TOTP_SECRET
+- ANGEL_ONE_API_KEY, ANGEL_ONE_API_SECRET, ANGEL_ONE_CLIENT_CODE, ANGEL_ONE_PASSWORD, ANGEL_ONE_TOTP_SECRET
+- DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN
+-> EXTEND with: DHAN_API_SECRET, DHAN_TOTP_SECRET, FAILOVER_* settings
+
+src/brokers/base.py:
+- BrokerInterface (ABC): authenticate, place_order, cancel_order, cancel_all_orders, get_positions, get_margins, get_order_book, get_instruments
+-> EXTEND with: health_check(), get_depth(), get_session_status(), get_broker_name(), get_supported_segments()
+
+src/brokers/__init__.py:
+- Empty (0 bytes)
+-> EXTEND with: exports for BrokerInterface, AngelBroker, DhanBroker, BrokerRouter, BrokerHealthMonitor, BrokerFailoverManager
+
+src/resilience/circuit_breaker.py:
+- CircuitBreaker: failure_threshold, recovery_timeout_seconds, half_open_max_calls, allow_request, record_success, record_failure
+-> USE as-is: each broker gets its own CircuitBreaker instance (no changes to source)
+
+src/resilience/retry.py:
+- retry_with_backoff(): max_retries, base_delay_seconds, max_delay_seconds, jitter, retryable_exceptions
+-> USE as-is: each broker method gets decorated with retry_with_backoff (no changes to source)
+
+src/metrics/collector.py:
+- ORDERS_PLACED_TOTAL, ORDERS_FILLED_TOTAL, ORDERS_REJECTED_TOTAL, API_LATENCY, WS_RECONNECTS_TOTAL, etc.
+-> EXTEND with: BROKER_HEALTH_STATUS, BROKER_FAILOVER_TOTAL, BROKER_API_ERRORS_TOTAL, BROKER_LATENCY_SECONDS, ACTIVE_BROKER_GAUGE
+
+src/risk/compliance.py:
+- Segments enum (NSE, MCX), TradingSession, get_trading_session(), is_order_allowed(), format_algo_tag()
+-> EXTEND with: validate_broker_segment_support() (check if broker supports the segment being traded)
+
+src/risk/kill_switch.py:
+- KillSwitch (4 levels: INACTIVE, THROTTLE, PAUSE, KILL)
+-> EXTEND with: auto-activate PAUSE when all brokers are DOWN (all-broker-failure kill switch trigger)
+
+src/risk/manager.py:
+- RiskManager: 10 pre-trade checks, TokenBucketRateLimiter
+-> EXTEND with: broker-specific risk checks (verify broker supports segment before allowing order)
+
+src/risk/audit.py:
+- AuditLogger, AuditEvent, NTPClock
+-> EXTEND with: broker failover event types (BROKER_FAILOVER, BROKER_HEALTH_CHANGE, BROKER_RECONCILIATION)
+
+src/alerts/dispatcher.py:
+- AlertDispatcher (Telegram + Email), AlertLevel (INFO/WARNING/CRITICAL)
+-> USE as-is for broker health alerts, failover alerts, reconciliation mismatch alerts
+
+tests/conftest.py:
+- Fixtures: compliance_settings, risk_settings, kill_switch_settings, audit_settings, kill_switch, audit_logger, risk_manager, sample_order
+-> EXTEND with: angel_settings, dhan_settings, multi_broker_settings, failover_settings, mock_angel_broker, mock_dhan_broker, broker_router, health_monitor, failover_manager
+
+pyproject.toml:
+- dependencies: kiteconnect>=5.0, httpx>=0.25, pydantic>=2.5, structlog>=23.2, etc.
+- dev deps: pytest, pytest-asyncio, pytest-cov, mypy, ruff, bandit, etc.
+- markers: slow, integration, paper_trade, property, bench, load, replay, resilience, alerts, metrics
+-> EXTEND with: "broker_failover" marker, new runtime deps (smartapi-python, dhanhq), mypy overrides for new broker SDKs
+
+================================================================================
+NEW DEPENDENCIES
+================================================================================
+
+```
+# NEW RUNTIME dependencies (ADD to [project] dependencies in pyproject.toml):
+
+"smartapi-python>=1.0"     # Angel One SmartAPI Python SDK (official)
+"dhanhq>=1.0"              # Dhan API Python SDK (official)
+
+# EXISTING dependencies consumed by Phase 16 (NO changes needed):
+# "kiteconnect>=5.0"       — Zerodha broker SDK (already present)
+# "httpx>=0.25"            — HTTP client for broker API calls (already present)
+# "pydantic>=2.5"          — settings/models (already present)
+# "structlog>=23.2"        — logging (already present)
+# "prometheus-client>=0.20" — metrics (already present)
+# "redis>=5.0"             — idempotency + health state cache (already present)
+
+# NEW DEV dependencies (ADD to [project.optional-dependencies.dev]):
+# None — all testing tools already present in pyproject.toml
+# pytest, pytest-asyncio, pytest-cov, pytest-mock, pytest-xdist, pytest-timeout,
+# pytest-randomly, pytest-benchmark, hypothesis, coverage, mypy, ruff, bandit,
+# pip-audit, cyclonedx-bom, locust, pre-commit, detect-secrets, safety, vulture
+# ALL already present
+
+# NEW mypy overrides (ADD to [[tool.mypy.overrides]] module list):
+# "smartapi.*"
+# "dhanhq.*"
+# "SmartApi.*"              # SmartAPI Python SDK uses uppercase module name
+```
+
+VERIFICATION: Before starting implementation, verify dependencies install cleanly:
+
+```
+cd G:\OC\02June26\indian-trading-bot
+.\.venv\Scripts\Activate.ps1
+pip install smartapi-python dhanhq
+python -c "from SmartApi import SmartConnect; print('SmartAPI OK')"
+python -c "from dhanhq import dhanhq; print('DhanHQ OK')"
+pip list | Select-String -Pattern "smartapi|dhanhq|kiteconnect"
+```
+
+================================================================================
+STEP 1: EXTEND BrokerInterface WITH HEALTH + DEPTH + SEGMENT METHODS
+================================================================================
+
+Instruction 1.1: Add abstract methods to src/brokers/base.py
+---
+**Action:** EXTEND `src/brokers/base.py` — add 5 new abstract methods to `BrokerInterface`. Do NOT remove or modify existing 7 abstract methods. All existing concrete implementations (KiteBroker when implemented) must implement these new methods.
+
+```python
+# ADD these 5 abstract methods to BrokerInterface class:
+
+@abstractmethod
+async def health_check(self) -> dict:
+    """Multi-dimensional health check for broker availability.
+
+    Returns dict with keys:
+    - is_healthy: bool (True only if ALL checks pass)
+    - api_reachable: bool (HTTP endpoint responds)
+    - session_valid: bool (access_token/JWT is valid and not expired)
+    - margin_available: bool (get_margins() returns positive available margin)
+    - order_api_responsive: bool (order placement endpoint responds within timeout)
+    - ws_connected: bool (WebSocket is connected, if applicable; False if no WS)
+    - supported_segments: list[str] (e.g., ["NSE", "MCX"] for Zerodha/Angel, ["NSE"] for Dhan)
+    - response_latency_ms: float (time for health check round-trip in milliseconds)
+    - last_checked_timestamp: float (monotonic timestamp of last health check)
+    - error_details: str (empty string if healthy; error description if unhealthy)
+
+    Per Kleppmann Ch.8: health check must be multi-dimensional —
+    a simple ping is insufficient to determine operational readiness.
+    Per Nygard Ch.6: handshake pattern — verify service is actually
+    ready to serve requests, not just that it's online.
+    """
+
+@abstractmethod
+async def get_depth(self, symbol: str, segment: str) -> dict:
+    """Get market depth data for a symbol.
+
+    Returns dict with keys:
+    - depth_type: str ("level5" for 5-level, "level200" for 200-level)
+    - bids: list[dict] (each dict: price, quantity, orders)
+    - asks: list[dict] (each dict: price, quantity, orders)
+    - timestamp: float
+
+    Note: Only Dhan provides 200-level depth. Zerodha and Angel One
+    provide 5-level depth (standard). Callers must handle both cases.
+    """
+
+@abstractmethod
+async def get_session_status(self) -> dict:
+    """Get current session/authentication status.
+
+    Returns dict with keys:
+    - is_authenticated: bool
+    - token_type: str ("access_token" for Zerodha, "JWT" for Angel One, "access_token" for Dhan)
+    - token_expiry_time: float | None (monotonic timestamp when token expires; None if unknown)
+    - broker_name: str (e.g., "zerodha", "angel_one", "dhan")
+    - user_id: str (broker-assigned user/client ID)
+    """
+
+@abstractmethod
+def get_broker_name(self) -> str:
+    """Return unique broker identifier string.
+
+    Returns: "zerodha" | "angel_one" | "dhan"
+    """
+
+@abstractmethod
+def get_supported_segments(self) -> list[str]:
+    """Return list of segments this broker supports.
+
+    Zerodha: ["NSE", "MCX"]
+    Angel One: ["NSE", "MCX"]
+    Dhan: ["NSE"] (NO MCX support per Correction #6)
+    """
+```
+
+### 1.2 Verification Gate:
+- `python -c "from src.brokers.base import BrokerInterface; import inspect; methods = [m for m in dir(BrokerInterface) if not m.startswith('_')]; assert 'health_check' in methods; assert 'get_depth' in methods; assert 'get_session_status' in methods; assert 'get_broker_name' in methods; assert 'get_supported_segments' in methods; print('BrokerInterface extended OK')"`
+- `ruff check src/brokers/base.py` -> 0 errors
+- `mypy src/brokers/base.py` -> 0 errors
+
+================================================================================
+STEP 2: ADD MULTI-BROKER SETTINGS TO config/settings.py
+================================================================================
+
+Instruction 2.1: Add MultiBrokerSettings, AngelOneSettings, DhanSettings, FailoverSettings
+---
+**Action:** EXTEND `config/settings.py` — add 4 new Pydantic BaseSettings classes AFTER existing `BrokerSettings` class (line 198). Do NOT modify any existing class.
+
+```python
+class MultiBrokerSettings(BaseSettings):
+    """Multi-broker configuration for redundancy and failover.
+
+    Per Kleppmann Ch.5: replication requires configuration of
+    primary/replica roles and failover behavior.
+    Per Bass Ch.4: availability tactics require explicit configuration.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="MULTIBROKER_", env_file=".env", extra="ignore")
+
+    PRIMARY_BROKER: str = Field(
+        default="zerodha",
+        pattern="^(zerodha|angel_one|dhan)$",
+        description="Primary broker for order routing (Correction #9: fixed hierarchy)"
+    )
+
+    FALLBACK_BROKER_NSE: str = Field(
+        default="angel_one",
+        pattern="^(angel_one|dhan)$",
+        description="Fallback broker for NSE segment when primary fails"
+    )
+
+    FALLBACK_BROKER_MCX: str = Field(
+        default="angel_one",
+        pattern="^(angel_one)$",
+        description="Fallback broker for MCX segment (Dhan excluded per Correction #6)"
+    )
+
+    DEPTH_DATA_BROKER: str = Field(
+        default="dhan",
+        pattern="^(dhan|zerodha|angel_one)$",
+        description="Broker used for 200-level depth data (Correction #2: Dhan provides L3)"
+    )
+
+    MIN_BROKERS_FOR_TRADING: int = Field(
+        default=2,
+        ge=1,
+        le=3,
+        description="Minimum healthy brokers required before allowing orders"
+    )
+
+    REQUIRE_PRIMARY_FOR_TRADING: bool = Field(
+        default=True,
+        description="If True, trading is blocked when primary broker is down (even if fallback is healthy)"
+    )
+
+    SIMULTANEOUS_BROKER_SESSIONS: bool = Field(
+        default=True,
+        description="Maintain authenticated sessions with all brokers simultaneously (not just active)"
+    )
+
+    @model_validator(mode="after")
+    def validate_multi_broker_settings(self) -> "MultiBrokerSettings":
+        if self.FALLBACK_BROKER_MCX == "dhan":
+            raise ValueError("Dhan does NOT support MCX segment (Correction #6)")
+        if self.PRIMARY_BROKER == self.FALLBACK_BROKER_NSE:
+            raise ValueError("Primary and NSE fallback must be different brokers")
+        return self
+
+
+class AngelOneSettings(BaseSettings):
+    """Angel One SmartAPI configuration.
+
+    Per Angel One SmartAPI documentation:
+    - Free for account holders
+    - Rate limit: 3 req/sec for orders
+    - TOTP-based daily login required
+    - No sandbox/test environment
+    - Supports NSE + MCX segments
+    - WebSocket available (paid for MCX)
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ANGEL_ONE_", env_file=".env", extra="ignore")
+
+    API_KEY: str = Field(default="", description="SmartAPI API key")
+    API_SECRET: str = Field(default="", description="SmartAPI client secret")
+    CLIENT_CODE: str = Field(default="", description="Angel One client code (user ID)")
+    PASSWORD: str = Field(default="", description="Angel One login password (PIN)")
+    TOTP_SECRET: str = Field(default="", description="TOTP secret for 2FA automation")
+
+    SESSION_EXPIRY_IST: time = Field(
+        default=time(6, 0),
+        description="JWT token expires daily at 6 AM IST (same as Zerodha)"
+    )
+
+    API_RATE_ORDERS: int = Field(
+        default=3,
+        gt=0,
+        le=10,
+        description="3 req/sec for order API (per SmartAPI docs)"
+    )
+
+    API_RATE_QUOTES: int = Field(
+        default=1,
+        gt=0,
+        description="1 req/sec for quotes API"
+    )
+
+    API_RATE_HISTORICAL: int = Field(
+        default=3,
+        gt=0,
+        description="3 req/sec for historical data API"
+    )
+
+    MCX_WEBSOCKET_PAID: bool = Field(
+        default=True,
+        description="MCX WebSocket requires paid subscription (Correction #7)"
+    )
+
+    HISTORICAL_DATA_MAX_DAYS: int = Field(
+        default=365,
+        gt=0,
+        description="Historical data limited to 1 year (Correction #1)"
+    )
+
+    NO_SANDBOX: bool = Field(
+        default=True,
+        description="No test environment available (same as Zerodha)"
+    )
+
+    TAG_FIELD_NAME: str = Field(
+        default="remarks",
+        description="Angel One order tag field name (Correction #12: 'remarks' vs Zerodha 'tag')"
+    )
+
+    TAG_MAX_LENGTH: int = Field(
+        default=50,
+        gt=0,
+        description="Max tag length per SmartAPI (50 chars vs Zerodha 20)"
+    )
+
+    MONTHLY_FEE: int = Field(
+        default=0,
+        description="Rs 0/month — free for account holders (Correction #1)"
+    )
+
+
+class DhanSettings(BaseSettings):
+    """Dhan API configuration.
+
+    Per Dhan API documentation:
+    - 200-level market depth (Level 3 order book)
+    - REST-polling only for depth (no WebSocket depth stream)
+    - NO MCX commodity segment support (Correction #6)
+    - Higher order placement latency (~150ms avg vs Zerodha ~50ms)
+    - Rs 20 per executed order
+    - Separate OAuth flow
+    """
+
+    model_config = SettingsConfigDict(env_prefix="DHAN_", env_file=".env", extra="ignore")
+
+    CLIENT_ID: str = Field(default="", description="Dhan client ID")
+    ACCESS_TOKEN: str = Field(default="", description="Dhan access token")
+    API_SECRET: str = Field(default="", description="Dhan API secret for OAuth")
+
+    SESSION_EXPIRY_IST: time = Field(
+        default=time(6, 0),
+        description="Token expiry at 6 AM IST (configurable)"
+    )
+
+    API_RATE_ORDERS: int = Field(
+        default=3,
+        gt=0,
+        le=10,
+        description="3 req/sec for order API"
+    )
+
+    API_RATE_DEPTH: int = Field(
+        default=5,
+        gt=0,
+        description="5 req/sec for depth API (REST polling)"
+    )
+
+    DEPTH_LEVELS: int = Field(
+        default=200,
+        gt=0,
+        description="200-level depth data (Correction #2)"
+    )
+
+    DEPTH_POLLING_INTERVAL_SECONDS: float = Field(
+        default=1.0,
+        ge=0.5,
+        le=10.0,
+        description="Polling interval for depth data (Correction #2: REST only, no WS)"
+    )
+
+    NO_MCX_SUPPORT: bool = Field(
+        default=True,
+        description="Dhan does NOT support MCX segment (Correction #6)"
+    )
+
+    ORDER_LATENCY_MS: int = Field(
+        default=150,
+        gt=0,
+        description="Average order placement latency in ms (Correction #2)"
+    )
+
+    TAG_FIELD_NAME: str = Field(
+        default="tag",
+        description="Dhan order tag field name (Correction #12)"
+    )
+
+    TAG_MAX_LENGTH: int = Field(
+        default=50,
+        gt=0,
+        description="Max tag length per Dhan API"
+    )
+
+    MONTHLY_FEE: int = Field(
+        default=0,
+        description="Rs 0/month for API access (brokerage per order)"
+    )
+
+    BROKERAGE_PER_ORDER: Decimal = Field(
+        default=Decimal("20"),
+        description="Rs 20 per executed order (same as Zerodha)"
+    )
+
+
+class FailoverSettings(BaseSettings):
+    """Broker failover configuration.
+
+    Per Kleppmann Ch.5: failover timing and strategy must be explicit.
+    Per Nygard Ch.5: circuit breaker + failover must be carefully tuned.
+    Per Correction #4: graduated failover, not instant.
+    Per Correction #8: 20-60 second failover window.
+    Per Correction #13: STICKY fallback with manual failback.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="FAILOVER_", env_file=".env", extra="ignore")
+
+    HEALTH_CHECK_INTERVAL_TRADING_SECONDS: float = Field(
+        default=10.0,
+        ge=5.0,
+        le=60.0,
+        description="Health check every 10s during active trading (Correction #5)"
+    )
+
+    HEALTH_CHECK_INTERVAL_NON_TRADING_SECONDS: float = Field(
+        default=60.0,
+        ge=30.0,
+        le=300.0,
+        description="Health check every 60s during non-trading hours (Correction #5)"
+    )
+
+    HEALTH_CHECK_TIMEOUT_SECONDS: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=15.0,
+        description="Timeout for each health check API call"
+    )
+
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Consecutive failures before circuit breaker opens (from existing CircuitBreaker)"
+    )
+
+    CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS: float = Field(
+        default=30.0,
+        ge=10.0,
+        le=120.0,
+        description="Seconds before circuit breaker transitions to HALF_OPEN"
+    )
+
+    FAILOVER_CONFIRMATION_COUNT: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="Number of consecutive failed health checks before triggering failover (Correction #4)"
+    )
+
+    RECONCILIATION_TIMEOUT_SECONDS: float = Field(
+        default=15.0,
+        ge=5.0,
+        le=30.0,
+        description="Timeout for position reconciliation after failover"
+    )
+
+    FAILOVER_TOTAL_TIMEOUT_SECONDS: float = Field(
+        default=60.0,
+        ge=30.0,
+        le=120.0,
+        description="Maximum time for complete failover process (Correction #8: 20-60s expected)"
+    )
+
+    STICKY_FAILOVER: bool = Field(
+        default=True,
+        description="Stay on fallback broker for remainder of trading session (Correction #13)"
+    )
+
+    AUTO_FAILBACK_ENABLED: bool = Field(
+        default=False,
+        description="Do NOT auto-switch back to primary mid-session (Correction #13)"
+    )
+
+    PRE_OPEN_FAILBACK: bool = Field(
+        default=True,
+        description="Attempt primary broker first at next PRE_OPEN (Correction #13)"
+    )
+
+    HUMAN_FAILBACK_COMMAND: bool = Field(
+        default=True,
+        description="Allow human to force failback via Telegram /broker switch (Correction #13)"
+    )
+
+    ORDER_SUBMISSION_BLOCKED_DURING_FAILOVER: bool = Field(
+        default=True,
+        description="Block new orders during failover transition (Correction #4, Kleppmann Ch.8)"
+    )
+
+    MAX_FAILOVER_EVENTS_PER_DAY: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Max failover events per day. Exceed = PAUSE + human review"
+    )
+
+    ALL_BROKERS_DOWN_KILL_SWITCH: bool = Field(
+        default=True,
+        description="Activate KILL switch when ALL brokers are down (Richards & Ford Ch.11)"
+    )
+
+    @model_validator(mode="after")
+    def validate_failover_settings(self) -> "FailoverSettings":
+        if self.FAILOVER_TOTAL_TIMEOUT_SECONDS < 30:
+            raise ValueError("FAILOVER_TOTAL_TIMEOUT_SECONDS must be >= 30s")
+        if self.AUTO_FAILBACK_ENABLED and self.STICKY_FAILOVER:
+            raise ValueError("Cannot enable both AUTO_FAILBACK_ENABLED and STICKY_FAILOVER")
+        return self
+```
+
+### 2.2 Update secrets.env.example
+---
+**Action:** EXTEND `config/secrets.env.example` — add Dhan-specific secret fields after existing Angel One and Dhan entries.
+
+```
+# ADD after existing DHAN_ACCESS_TOKEN line:
+
+DHAN_API_SECRET=                # Dhan OAuth API secret
+DHAN_TOTP_SECRET=               # Optional: for automated daily re-auth
+
+# Multi-Broker Failover Configuration
+MULTIBROKER_PRIMARY_BROKER=zerodha
+MULTIBROKER_FALLBACK_BROKER_NSE=angel_one
+MULTIBROKER_FALLBACK_BROKER_MCX=angel_one
+MULTIBROKER_DEPTH_DATA_BROKER=dhan
+MULTIBROKER_MIN_BROKERS_FOR_TRADING=2
+
+# Failover Timing
+FAILOVER_HEALTH_CHECK_INTERVAL_TRADING_SECONDS=10
+FAILOVER_HEALTH_CHECK_INTERVAL_NON_TRADING_SECONDS=60
+FAILOVER_CIRCUIT_BREAKER_FAILURE_THRESHOLD=5
+FAILOVER_FAILOVER_CONFIRMATION_COUNT=3
+FAILOVER_STICKY_FAILOVER=true
+FAILOVER_AUTO_FAILBACK_ENABLED=false
+FAILOVER_ALL_BROKERS_DOWN_KILL_SWITCH=true
+```
+
+### 2.3 Update .gitleaks.toml
+---
+**Action:** EXTEND `.gitleaks.toml` — add custom rules for Angel One and Dhan API keys/secrets.
+
+```toml
+# ADD after existing telegram-bot-token rule:
+
+# Custom rule for Angel One SmartAPI keys
+[[rules]]
+id = "angel-one-api-key"
+description = "Angel One SmartAPI Key"
+regex = '''ANGEL_ONE_API_KEY\s*[=:]\s*['"][a-zA-Z0-9]{20,}['"]'''
+keywords = ["angel_one", "smartapi", "api_key"]
+tags = ["key", "broker-api"]
+
+[[rules]]
+id = "angel-one-client-code"
+description = "Angel One Client Code + Password"
+regex = '''ANGEL_ONE_(CLIENT_CODE|PASSWORD)\s*[=:]\s*['"][a-zA-Z0-9]{10,}['"]'''
+keywords = ["angel_one", "client_code", "password"]
+tags = ["secret", "broker-api"]
+
+# Custom rule for Dhan API keys
+[[rules]]
+id = "dhan-access-token"
+description = "Dhan Access Token"
+regex = '''DHAN_ACCESS_TOKEN\s*[=:]\s*['"][a-zA-Z0-9]{20,}['"]'''
+keywords = ["dhan", "access_token"]
+tags = ["token", "broker-api"]
+
+[[rules]]
+id = "dhan-api-secret"
+description = "Dhan API Secret"
+regex = '''DHAN_API_SECRET\s*[=:]\s*['"][a-zA-Z0-9]{20,}['"]'''
+keywords = ["dhan", "api_secret"]
+tags = ["secret", "broker-api"]
+```
+
+### 2.4 Verification Gate:
+- `python -c "from config.settings import MultiBrokerSettings, AngelOneSettings, DhanSettings, FailoverSettings; mb = MultiBrokerSettings(); assert mb.PRIMARY_BROKER == 'zerodha'; assert mb.FALLBACK_BROKER_MCX == 'angel_one'; ao = AngelOneSettings(); assert ao.TAG_FIELD_NAME == 'remarks'; d = DhanSettings(); assert d.DEPTH_LEVELS == 200; assert d.NO_MCX_SUPPORT == True; fs = FailoverSettings(); assert fs.STICKY_FAILOVER == True; assert fs.AUTO_FAILBACK_ENABLED == False; print('All 4 settings classes OK')"`
+- `python -c "from config.settings import MultiBrokerSettings; MultiBrokerSettings(FALLBACK_BROKER_MCX='dhan')" 2>&1 | Select-String "Dhan does NOT support MCX"` -> must raise ValueError
+- `python -c "from config.settings import FailoverSettings; FailoverSettings(AUTO_FAILBACK_ENABLED=True, STICKY_FAILOVER=True)" 2>&1 | Select-String "Cannot enable both"` -> must raise ValueError
+- `ruff check config/settings.py` -> 0 errors
+- `mypy config/settings.py` -> 0 errors
+
+================================================================================
+STEP 3: IMPLEMENT AngelBroker (src/brokers/angel.py — NEW FILE)
+================================================================================
+
+Instruction 3.1: Create Angel One SmartAPI broker adapter
+---
+**Action:** CREATE new file `src/brokers/angel.py`
+**Depends on:** Step 1 (extended BrokerInterface), Step 2 (AngelOneSettings)
+**SDK:** `smartapi-python>=1.0` (official Angel One SmartAPI Python SDK)
+**Reference:** Angel One SmartAPI documentation; Correction #1, #7, #12
+
+```python
+class AngelBroker(BrokerInterface):
+    """Angel One SmartAPI broker adapter.
+
+    Per Correction #1: Free for account holders, historical data limited to 1 year.
+    Per Correction #7: Supports MCX segment (order placement available, WS paid).
+    Per Correction #12: Order tag field is 'remarks' (50 char max).
+    Per Correction #11: TOTP-based daily re-auth at 6:01 AM IST.
+
+    Implements all 12 BrokerInterface methods (7 original + 5 new from Step 1).
+    Every API call is wrapped with CircuitBreaker and retry_with_backoff.
+
+    Args:
+        settings: AngelOneSettings with API keys and configuration.
+        compliance_settings: ComplianceSettings for rate limits and session times.
+        circuit_breaker: CircuitBreaker instance for this broker (independent).
+        audit_logger: AuditLogger for audit trail.
+        alert_dispatcher: AlertDispatcher for health/failover alerts.
+    """
+
+    def __init__(
+        self,
+        settings: AngelOneSettings,
+        compliance_settings: ComplianceSettings,
+        circuit_breaker: CircuitBreaker,
+        audit_logger: AuditLogger,
+        alert_dispatcher: AlertDispatcher,
+    ) -> None:
+        self._settings = settings
+        self._compliance = compliance_settings
+        self._circuit_breaker = circuit_breaker
+        self._audit = audit_logger
+        self._alerts = alert_dispatcher
+        self._smart_connect: SmartConnect | None = None
+        self._authenticated: bool = False
+        self._last_auth_time: float = 0.0
+
+    # --- BrokerInterface implementation ---
+
+    async def authenticate(self) -> str:
+        """Authenticate with Angel One SmartAPI.
+
+        Steps:
+        1. Create SmartConnect instance with API_KEY
+        2. Generate session with CLIENT_CODE, PASSWORD, TOTP
+        3. Store JWT token for subsequent API calls
+        4. If TOTP generation fails (no TOTP_SECRET), raise and require manual login
+        5. Log authentication event to audit trail
+        6. Schedule re-auth at 6:01 AM IST (next day)
+
+        Error handling:
+        - Invalid credentials: raise AuthenticationError
+        - TOTP failure: raise MFARequiredError (requires manual intervention)
+        - Network error: raise, let retry_with_backoff handle
+        """
+
+    @retry_with_backoff(max_retries=3, base_delay_seconds=1.0, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def place_order(self, params: dict) -> dict:
+        """Place order via Angel One SmartAPI.
+
+        Maps our internal order params to SmartAPI order params:
+        - symbol -> tradingsymbol
+        - direction -> transactiontype (BUY/SELL)
+        - order_type -> ordertype (MARKET/LIMIT/SL/SL-M)
+        - product_type -> product (MIS/NRML/CNC)
+        - segment -> exchange (NSE/MCX)
+        - tag -> remarks (Correction #12: Angel uses 'remarks' not 'tag')
+
+        Pre-submission checks:
+        1. CircuitBreaker.allow_request() — if OPEN, fail fast
+        2. Rate limit check (3 req/sec for orders)
+        3. Segment validation (if MCX, warn about WS limitations)
+        4. Tag field mapping (remarks, max 50 chars)
+
+        Post-submission:
+        1. CircuitBreaker.record_success() on 200 response
+        2. CircuitBreaker.record_failure() on 4xx/5xx
+        3. Log to audit trail
+        4. Increment BROKER_API_ERRORS_TOTAL on failure
+        """
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def cancel_order(self, order_id: str) -> dict:
+        """Cancel order via SmartAPI."""
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def cancel_all_orders(self) -> list[dict]:
+        """Cancel all open orders via SmartAPI.
+
+        Per MiFID II Art.17: kill switch requires cancel_all capability.
+        Fetches all open orders, cancels each sequentially.
+        """
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def get_positions(self) -> list[dict]:
+        """Get positions from Angel One.
+
+        Maps Angel position response to standard format:
+        - netqty -> quantity
+        - tradingsymbol -> symbol
+        - exchange -> segment
+        - pnl -> unrealized_pnl
+        """
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def get_margins(self) -> dict:
+        """Get margin availability from Angel One.
+
+        Maps Angel margin response to standard format:
+        - availablecash -> available_margin
+        - utilizedmargins -> used_margin
+        """
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def get_order_book(self) -> list[dict]:
+        """Get current day order book from Angel One."""
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def get_instruments(self, segment: str) -> list[dict]:
+        """Get instruments for segment from Angel One."""
+
+    async def health_check(self) -> dict:
+        """Multi-dimensional health check for Angel One.
+
+        Checks (in order):
+        1. API reachable: SmartConnect.profile() call
+        2. Session valid: check JWT not expired (6 AM IST refresh)
+        3. Margin available: get_margins() returns positive cash
+        4. Order API responsive: measure latency of order book fetch
+        5. WS connected: False for MCX (paid), True for NSE if subscribed
+        6. Supported segments: ["NSE", "MCX"]
+        """
+
+    async def get_depth(self, symbol: str, segment: str) -> dict:
+        """Get 5-level depth from Angel One (standard depth, not 200-level)."""
+
+    async def get_session_status(self) -> dict:
+        """Get Angel One session status."""
+
+    def get_broker_name(self) -> str:
+        return "angel_one"
+
+    def get_supported_segments(self) -> list[str]:
+        return ["NSE", "MCX"]
+
+    # --- Angel-specific methods ---
+
+    async def _generate_totp(self) -> str:
+        """Generate TOTP code from secret for automated login.
+
+        Uses pyotp library (MUST be added as dependency if not present).
+        Per Zerodha/Angel One ToS: automated TOTP is at user's own risk.
+        """
+
+    async def _map_order_params(self, params: dict) -> dict:
+        """Map internal order params to SmartAPI-specific format.
+
+        Key differences from Zerodha:
+        - tag -> remarks (Correction #12)
+        - segment mapping: "NSE" -> "NSE", "MCX" -> "MCX"
+        - product_type mapping: same as Zerodha (MIS/NRML)
+        """
+
+    async def _re_auth_if_needed(self) -> None:
+        """Check if session needs re-authentication and perform if needed.
+
+        Angel One JWT expires daily at 6 AM IST.
+        If current time > 6 AM IST and last auth was yesterday, re-auth.
+        If re-auth fails 3 times, mark broker UNHEALTHY and alert.
+        """
+```
+
+### 3.2 Verification Gate:
+- `python -c "from src.brokers.angel import AngelBroker; ab = AngelBroker.__new__(AngelBroker); assert ab.get_broker_name() == 'angel_one'; assert ab.get_supported_segments() == ['NSE', 'MCX']; print('AngelBroker interface OK')"`
+- `ruff check src/brokers/angel.py` -> 0 errors
+- `mypy src/brokers/angel.py` -> 0 errors
+- `bandit -c pyproject.toml -r src/brokers/angel.py` -> 0 high/medium findings
+- Test: AngelBroker.authenticate() with invalid credentials -> AuthenticationError
+- Test: AngelBroker.place_order() with circuit breaker OPEN -> returns error, no API call
+- Test: AngelBroker._map_order_params() maps tag -> remarks correctly
+- Test: AngelBroker.health_check() returns all 10 required keys
+- Test: AngelBroker.get_supported_segments() includes "MCX"
+
+================================================================================
+STEP 4: IMPLEMENT DhanBroker (src/brokers/dhan.py — NEW FILE)
+================================================================================
+
+Instruction 4.1: Create Dhan API broker adapter
+---
+**Action:** CREATE new file `src/brokers/dhan.py`
+**Depends on:** Step 1 (extended BrokerInterface), Step 2 (DhanSettings)
+**SDK:** `dhanhq>=1.0` (official Dhan HQ Python SDK)
+**Reference:** Dhan API documentation; Correction #2, #6
+
+```python
+class DhanBroker(BrokerInterface):
+    """Dhan API broker adapter — depth data provider + NSE fallback.
+
+    Per Correction #2: Provides 200-level market depth (Level 3 order book).
+    Per Correction #6: Does NOT support MCX segment.
+    Per Correction #2: REST-polling only for depth (no WebSocket depth stream).
+    Per Correction #2: Higher order latency (~150ms avg vs Zerodha ~50ms).
+    Per Correction #9: Dhan is NSE fallback of LAST RESORT (after Angel One).
+
+    Dhan serves TWO purposes:
+    1. PRIMARY: 200-level depth data for execution quality analysis
+    2. FALLBACK: NSE order routing when both Zerodha and Angel One are down
+
+    Implements all 12 BrokerInterface methods (7 original + 5 new from Step 1).
+    Every API call is wrapped with independent CircuitBreaker and retry_with_backoff.
+
+    Args:
+        settings: DhanSettings with client ID and access token.
+        compliance_settings: ComplianceSettings for rate limits and session times.
+        circuit_breaker: CircuitBreaker instance for this broker (independent).
+        audit_logger: AuditLogger for audit trail.
+        alert_dispatcher: AlertDispatcher for health/failover alerts.
+    """
+
+    def __init__(
+        self,
+        settings: DhanSettings,
+        compliance_settings: ComplianceSettings,
+        circuit_breaker: CircuitBreaker,
+        audit_logger: AuditLogger,
+        alert_dispatcher: AlertDispatcher,
+    ) -> None:
+        self._settings = settings
+        self._compliance = compliance_settings
+        self._circuit_breaker = circuit_breaker
+        self._audit = audit_logger
+        self._alerts = alert_dispatcher
+        self._dhan_client: DhanHQ | None = None
+        self._authenticated: bool = False
+        self._last_auth_time: float = 0.0
+
+    # --- BrokerInterface implementation ---
+
+    async def authenticate(self) -> str:
+        """Authenticate with Dhan API.
+
+        Steps:
+        1. Create DhanHQ instance with CLIENT_ID and ACCESS_TOKEN
+        2. Validate session by fetching profile
+        3. If session invalid, attempt OAuth token refresh
+        4. Store authenticated client for subsequent API calls
+        5. Log authentication event to audit trail
+        6. Schedule re-auth at 6:01 AM IST
+        """
+
+    @retry_with_backoff(max_retries=3, base_delay_seconds=1.5, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def place_order(self, params: dict) -> dict:
+        """Place order via Dhan API.
+
+        NOTE: Higher latency (~150ms avg). Used as last resort fallback.
+        Maps internal order params to Dhan API format.
+
+        Pre-submission checks:
+        1. CircuitBreaker.allow_request()
+        2. Rate limit check (3 req/sec for orders)
+        3. Segment validation: REJECT if segment == "MCX" (Correction #6)
+        4. Latency warning: log if placement takes > 300ms
+
+        Post-submission:
+        1. CircuitBreaker.record_success/failure
+        2. Log latency to BROKER_LATENCY_SECONDS metric
+        3. Audit trail entry
+        """
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def cancel_order(self, order_id: str) -> dict:
+        """Cancel order via Dhan API."""
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def cancel_all_orders(self) -> list[dict]:
+        """Cancel all open orders via Dhan API.
+
+        Per MiFID II Art.17: kill switch requires cancel_all capability.
+        """
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def get_positions(self) -> list[dict]:
+        """Get positions from Dhan.
+
+        Maps Dhan position response to standard format.
+        """
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def get_margins(self) -> dict:
+        """Get margin availability from Dhan."""
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def get_order_book(self) -> list[dict]:
+        """Get current day order book from Dhan."""
+
+    @retry_with_backoff(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
+    async def get_instruments(self, segment: str) -> list[dict]:
+        """Get instruments for segment from Dhan.
+
+        RAISES ValueError if segment == "MCX" (Correction #6).
+        """
+
+    async def health_check(self) -> dict:
+        """Multi-dimensional health check for Dhan.
+
+        Checks:
+        1. API reachable: Dhan profile fetch
+        2. Session valid: token not expired
+        3. Margin available: positive available margin
+        4. Order API responsive: measure latency
+        5. WS connected: False (Dhan has no WS depth stream per Correction #2)
+        6. Supported segments: ["NSE"] only (Correction #6)
+        """
+
+    async def get_depth(self, symbol: str, segment: str) -> dict:
+        """Get 200-level market depth from Dhan (PRIMARY USE CASE).
+
+        Per Correction #2: REST-polling only, no WebSocket stream.
+        Returns dict with depth_type="level200", bids/asks lists of 200 entries.
+        Rate limited to 5 req/sec for depth API.
+
+        This is the KEY differentiator for Dhan — 200-level depth
+        provides full order book visibility for execution quality analysis.
+        """
+
+    async def get_session_status(self) -> dict:
+        """Get Dhan session status."""
+
+    def get_broker_name(self) -> str:
+        return "dhan"
+
+    def get_supported_segments(self) -> list[str]:
+        return ["NSE"]  # Correction #6: NO MCX
+
+    # --- Dhan-specific methods ---
+
+    async def get_full_depth(self, instrument_token: int) -> dict:
+        """Fetch 200-level depth for an instrument token.
+
+        Polling-based: called at DHAN_DEPTH_POLLING_INTERVAL_SECONDS interval.
+        Returns raw depth data from Dhan API.
+        """
+
+    async def _validate_segment(self, segment: str) -> None:
+        """Validate segment is supported by Dhan.
+
+        Raises ValueError if segment == "MCX" (Correction #6).
+        """
+
+    async def _map_order_params(self, params: dict) -> dict:
+        """Map internal order params to Dhan API-specific format.
+
+        Key differences from Zerodha:
+        - Different field names for order type, product type
+        - segment validation (no MCX)
+        - tag field: 'tag' (same as Zerodha, max 50 chars)
+        """
+```
+
+### 4.2 Verification Gate:
+- `python -c "from src.brokers.dhan import DhanBroker; db = DhanBroker.__new__(DhanBroker); assert db.get_broker_name() == 'dhan'; assert db.get_supported_segments() == ['NSE']; print('DhanBroker interface OK')"`
+- `ruff check src/brokers/dhan.py` -> 0 errors
+- `mypy src/brokers/dhan.py` -> 0 errors
+- `bandit -c pyproject.toml -r src/brokers/dhan.py` -> 0 high/medium findings
+- Test: DhanBroker.get_supported_segments() does NOT include "MCX"
+- Test: DhanBroker.place_order() with segment="MCX" -> raises ValueError
+- Test: DhanBroker.get_depth() returns depth_type="level200"
+- Test: DhanBroker.health_check() returns ws_connected=False
+- Test: DhanBroker._map_order_params() maps fields correctly
+
+================================================================================
+STEP 5: IMPLEMENT BrokerRouter (src/brokers/router.py — NEW FILE)
+================================================================================
+
+Instruction 5.1: Create smart order routing broker selector
+---
+**Action:** CREATE new file `src/brokers/router.py`
+**Depends on:** Step 1 (extended BrokerInterface), Step 2 (MultiBrokerSettings), Step 3 (AngelBroker), Step 4 (DhanBroker)
+**Pattern:** Hohpe & Woolf Ch.4 — Content-Based Router
+**Reference:** Correction #3 (SOR = broker availability routing, NOT cross-venue), Correction #9 (fixed hierarchy)
+
+```python
+class BrokerRouter:
+    """Smart order router with priority-based broker selection.
+
+    Per Correction #3: NOT institutional SOR (no cross-venue price optimization).
+    Per Correction #9: FIXED broker hierarchy — Zerodha > Angel One > Dhan (NSE only).
+
+    Routing logic:
+    - NSE orders: Zerodha (primary) -> Angel One (fallback) -> Dhan (last resort)
+    - MCX orders: Zerodha (primary) -> Angel One (fallback) -> BLOCKED if both down
+    - Depth data: Dhan (primary, 200-level) -> Zerodha (fallback, 5-level)
+
+    The router maintains awareness of:
+    - Each broker's circuit breaker state
+    - Each broker's health status (from BrokerHealthMonitor)
+    - Current active broker per segment
+    - Failover state (active, failing over, failed over)
+
+    Per Hohpe & Woolf Ch.4: Content-Based Router pattern —
+    routes messages (orders) to different destinations (brokers)
+    based on content (segment, order type, broker availability).
+
+    Per Kleppmann Ch.5: Active-passive replication pattern —
+    only one broker is active for order routing at a time.
+
+    Args:
+        brokers: Dict mapping broker_name to BrokerInterface instances.
+        settings: MultiBrokerSettings with broker hierarchy.
+        failover_settings: FailoverSettings with failover configuration.
+        audit_logger: AuditLogger for routing decisions.
+        alert_dispatcher: AlertDispatcher for routing alerts.
+    """
+
+    def __init__(
+        self,
+        brokers: dict[str, BrokerInterface],
+        settings: MultiBrokerSettings,
+        failover_settings: FailoverSettings,
+        audit_logger: AuditLogger,
+        alert_dispatcher: AlertDispatcher,
+    ) -> None:
+        self._brokers = brokers
+        self._settings = settings
+        self._failover_settings = failover_settings
+        self._audit = audit_logger
+        self._alerts = alert_dispatcher
+        self._active_broker_nse: str = settings.PRIMARY_BROKER
+        self._active_broker_mcx: str = settings.PRIMARY_BROKER
+        self._failover_in_progress: bool = False
+        self._failover_count_today: int = 0
+
+    def get_active_broker(self, segment: str) -> BrokerInterface:
+        """Get the currently active broker for a segment.
+
+        Args:
+            segment: "NSE" or "MCX"
+
+        Returns:
+            BrokerInterface instance for the active broker.
+
+        Raises:
+            RuntimeError: If no broker is available for the segment.
+
+        Routing priority:
+        - NSE: active_broker_nse (default: zerodha, may be angel_one or dhan after failover)
+        - MCX: active_broker_mcx (default: zerodha, may be angel_one after failover, NEVER dhan)
+        """
+
+    def get_depth_broker(self) -> BrokerInterface:
+        """Get the broker for depth data queries.
+
+        Always returns the depth-configured broker (default: dhan).
+        If depth broker is down, falls back to primary broker (5-level depth).
+        """
+
+    async def route_order(self, params: dict) -> dict:
+        """Route an order to the appropriate broker.
+
+        Steps:
+        1. Determine segment from params["segment"]
+        2. Get active broker for that segment
+        3. Verify broker circuit breaker is CLOSED
+        4. Verify broker supports the segment
+        5. If active broker unavailable: attempt failover
+        6. If failover succeeds: route to new active broker
+        7. If failover fails (no broker available): return error + alert CRITICAL
+        8. Log routing decision to audit trail
+
+        Returns:
+            dict with keys: broker_name, order_response, routed_at
+
+        Raises:
+            RuntimeError: If no broker is available for the segment.
+        """
+
+    async def attempt_failover(self, segment: str, failed_broker: str) -> bool:
+        """Attempt failover to next available broker for a segment.
+
+        Per Correction #4: GRADUATED failover — not instant.
+        Per Correction #8: 20-60 second failover window.
+        Per Correction #13: STICKY failover — stay on fallback for session.
+
+        Steps:
+        1. Set _failover_in_progress = True
+        2. Block new order submissions (ORDER_SUBMISSION_BLOCKED_DURING_FAILOVER)
+        3. Identify next broker in priority chain for segment
+        4. Check next broker's health (must be HEALTHY)
+        5. Perform position reconciliation with new broker (BrokerReconciler)
+        6. Update active_broker for segment
+        7. Set _failover_in_progress = False
+        8. Increment _failover_count_today
+        9. If _failover_count_today > MAX_FAILOVER_EVENTS_PER_DAY: PAUSE + alert
+        10. Log failover event to audit trail
+
+        For NSE: zerodha -> angel_one -> dhan
+        For MCX: zerodha -> angel_one -> NO_MORE_OPTIONS
+
+        Args:
+            segment: "NSE" or "MCX"
+            failed_broker: Name of the broker that failed.
+
+        Returns:
+            True if failover succeeded, False if no broker available.
+        """
+
+    async def attempt_failback(self, segment: str) -> bool:
+        """Attempt failback to primary broker at PRE_OPEN.
+
+        Per Correction #13: Only attempted during PRE_OPEN (next trading day).
+        NOT attempted mid-session.
+
+        Steps:
+        1. Check primary broker health
+        2. If healthy: reconcile positions
+        3. If reconciliation passes: switch active_broker to primary
+        4. If reconciliation fails: stay on current broker, alert WARNING
+
+        Args:
+            segment: "NSE" or "MCX"
+
+        Returns:
+            True if failback succeeded, False otherwise.
+        """
+
+    def force_broker_switch(self, target_broker: str, segment: str, source: str) -> bool:
+        """Human-initiated broker switch via Telegram /broker switch command.
+
+        Per Correction #13: HUMAN_FAILBACK_COMMAND = True.
+        Requires confirmation dialog (type broker name to confirm).
+
+        Args:
+            target_broker: Broker to switch to.
+            segment: Segment to switch.
+            source: "telegram" or "rest_api"
+
+        Returns:
+            True if switch succeeded, False if broker is unhealthy.
+        """
+
+    def get_routing_status(self) -> dict:
+        """Get current routing status for all segments.
+
+        Returns dict with keys:
+        - nse_active_broker: str
+        - mcx_active_broker: str
+        - depth_broker: str
+        - failover_in_progress: bool
+        - failover_count_today: int
+        - broker_health_summary: dict[str, dict]
+        """
+```
+
+### 5.2 Verification Gate:
+- `python -c "from src.brokers.router import BrokerRouter; print('BrokerRouter import OK')"`
+- `ruff check src/brokers/router.py` -> 0 errors
+- `mypy src/brokers/router.py` -> 0 errors
+- Test: BrokerRouter.get_active_broker("NSE") returns primary broker initially
+- Test: BrokerRouter.get_active_broker("MCX") returns primary broker initially
+- Test: BrokerRouter.route_order() with segment="MCX" and primary down -> falls back to angel_one
+- Test: BrokerRouter.route_order() with segment="MCX" and both zerodha+angel down -> RuntimeError
+- Test: BrokerRouter.route_order() with segment="NSE" and all down -> RuntimeError + CRITICAL alert
+- Test: BrokerRouter.attempt_failover("MCX", "zerodha") -> switches to angel_one
+- Test: BrokerRouter.attempt_failover("MCX", "angel_one") -> RuntimeError (no more options)
+- Test: BrokerRouter.attempt_failover("NSE", "dhan") -> RuntimeError (no more options)
+- Test: BrokerRouter.attempt_failback() during PRE_OPEN -> switches back to primary if healthy
+- Test: BrokerRouter.force_broker_switch() -> requires confirmation
+- Test: BrokerRouter.get_routing_status() returns all 6 keys
+- Hypothesis: routing_status always has at least one broker per segment (when healthy)
+
+================================================================================
+STEP 6: IMPLEMENT BrokerHealthMonitor (src/brokers/health_monitor.py — NEW FILE)
+================================================================================
+
+Instruction 6.1: Create multi-dimensional broker health monitoring system
+---
+**Action:** CREATE new file `src/brokers/health_monitor.py`
+**Depends on:** Step 1 (health_check method), Step 2 (FailoverSettings), Step 5 (BrokerRouter)
+**Reference:** Correction #5 (multi-dimensional health check), Kleppmann Ch.8 (monitoring), NIST DE.CM-6
+
+```python
+class BrokerHealthStatus:
+    """Immutable health status record for a single broker.
+
+    Per Kleppmann Ch.8: monitoring must track more than just up/down.
+    Per Nygard Ch.6: handshake pattern requires multi-dimensional checks.
+    """
+
+    def __init__(
+        self,
+        broker_name: str,
+        is_healthy: bool,
+        api_reachable: bool,
+        session_valid: bool,
+        margin_available: bool,
+        order_api_responsive: bool,
+        ws_connected: bool,
+        supported_segments: list[str],
+        response_latency_ms: float,
+        last_checked_timestamp: float,
+        consecutive_failures: int,
+        error_details: str,
+    ) -> None: ...
+
+    def to_dict(self) -> dict: ...
+
+
+class BrokerHealthMonitor:
+    """Multi-dimensional broker health monitoring with adaptive intervals.
+
+    Per Correction #5: Health check is MULTI-DIMENSIONAL:
+    1. HTTP health endpoint (liveness)
+    2. Order placement API response time (responsiveness)
+    3. WebSocket connection status (real-time data)
+    4. Margin availability (operational)
+    5. Session validity (authentication)
+
+    Per Correction #5: Adaptive intervals:
+    - During active trading: every 10 seconds
+    - During non-trading hours: every 60 seconds
+    - During failover transition: every 5 seconds (accelerated)
+
+    Per NIST DE.CM-6: External service monitoring.
+    Per Bass Ch.4: Fault detection availability tactic.
+
+    Args:
+        brokers: Dict mapping broker_name to BrokerInterface instances.
+        failover_settings: FailoverSettings with intervals and thresholds.
+        compliance_settings: ComplianceSettings for session time awareness.
+        audit_logger: AuditLogger for health state changes.
+        alert_dispatcher: AlertDispatcher for health alerts.
+    """
+
+    def __init__(
+        self,
+        brokers: dict[str, BrokerInterface],
+        failover_settings: FailoverSettings,
+        compliance_settings: ComplianceSettings,
+        audit_logger: AuditLogger,
+        alert_dispatcher: AlertDispatcher,
+    ) -> None:
+        self._brokers = brokers
+        self._settings = failover_settings
+        self._compliance = compliance_settings
+        self._audit = audit_logger
+        self._alerts = alert_dispatcher
+        self._health_status: dict[str, BrokerHealthStatus] = {}
+        self._consecutive_failures: dict[str, int] = {}
+        self._monitoring_task: asyncio.Task | None = None
+        self._is_running: bool = False
+
+    async def start(self) -> None:
+        """Start the health monitoring loop.
+
+        Creates an asyncio task that runs health checks at adaptive intervals.
+        Per Correction #5: interval changes based on trading session.
+        """
+
+    async def stop(self) -> None:
+        """Stop the health monitoring loop."""
+
+    async def _monitoring_loop(self) -> None:
+        """Main monitoring loop — runs health checks at adaptive intervals.
+
+        Loop:
+        1. Determine current trading session (from ComplianceSettings)
+        2. Select appropriate interval (10s trading, 60s non-trading, 5s failover)
+        3. For each broker: run health_check()
+        4. Update BrokerHealthStatus for each broker
+        5. Check for state transitions (HEALTHY -> UNHEALTHY or vice versa)
+        6. On state transition: log audit event, send alert, update Prometheus metrics
+        7. If consecutive_failures >= FAILOVER_CONFIRMATION_COUNT: notify BrokerRouter
+        8. Sleep for interval
+        """
+
+    async def check_broker_health(self, broker_name: str) -> BrokerHealthStatus:
+        """Run health check for a single broker.
+
+        Steps:
+        1. Call broker.health_check() with timeout
+        2. Parse health_check response (10 keys from Step 1)
+        3. Update consecutive failure count
+        4. If failures >= threshold: mark UNHEALTHY, alert WARNING
+        5. If previously UNHEALTHY and now HEALTHY: mark HEALTHY, alert INFO
+        6. Update Prometheus BROKER_HEALTH_STATUS gauge
+        7. Return BrokerHealthStatus
+        """
+
+    def get_health_status(self, broker_name: str) -> BrokerHealthStatus | None:
+        """Get cached health status for a broker (no API call)."""
+
+    def get_all_health_statuses(self) -> dict[str, BrokerHealthStatus]:
+        """Get cached health statuses for all brokers."""
+
+    def get_healthy_brokers(self) -> list[str]:
+        """Get list of currently healthy broker names."""
+
+    def get_brokers_for_segment(self, segment: str) -> list[str]:
+        """Get healthy brokers that support the given segment.
+
+        Args:
+            segment: "NSE" or "MCX"
+
+        Returns:
+            List of broker names that are healthy AND support the segment.
+            E.g., for "MCX": ["zerodha", "angel_one"] (never "dhan")
+        """
+
+    def is_broker_available(self, broker_name: str) -> bool:
+        """Quick check if a specific broker is healthy."""
+
+    def get_current_interval(self) -> float:
+        """Get current health check interval based on trading session.
+
+        - TRADING: 10 seconds
+        - NON-TRADING: 60 seconds
+        - FAILOVER_IN_PROGRESS: 5 seconds
+        """
+
+    async def force_health_check(self, broker_name: str) -> BrokerHealthStatus:
+        """Force an immediate health check outside the normal interval.
+
+        Used by BrokerRouter during failover to verify fallback broker
+        before switching.
+        """
+```
+
+### 6.2 Verification Gate:
+- `python -c "from src.brokers.health_monitor import BrokerHealthMonitor, BrokerHealthStatus; print('BrokerHealthMonitor import OK')"`
+- `ruff check src/brokers/health_monitor.py` -> 0 errors
+- `mypy src/brokers/health_monitor.py` -> 0 errors
+- Test: BrokerHealthMonitor.get_healthy_brokers() returns only healthy brokers
+- Test: BrokerHealthMonitor.get_brokers_for_segment("MCX") excludes "dhan"
+- Test: BrokerHealthMonitor.get_brokers_for_segment("NSE") includes all 3
+- Test: BrokerHealthMonitor.check_broker_health() detects API unreachable
+- Test: BrokerHealthMonitor.check_broker_health() detects session expired
+- Test: BrokerHealthMonitor.check_broker_health() detects zero margin
+- Test: consecutive_failures increment correctly on repeated failures
+- Test: HEALTHY -> UNHEALTHY transition triggers audit event + alert
+- Test: UNHEALTHY -> HEALTHY transition triggers audit event + alert
+- Test: BrokerHealthStatus.to_dict() returns all 12 fields
+- Test: get_current_interval() returns 10.0 during trading, 60.0 during non-trading
+- Hypothesis: BrokerHealthStatus.consecutive_failures is monotonically non-decreasing during failures
+
+================================================================================
+STEP 7: IMPLEMENT BrokerFailoverManager (src/brokers/failover_manager.py — NEW FILE)
+================================================================================
+
+Instruction 7.1: Create broker failover orchestrator
+---
+**Action:** CREATE new file `src/brokers/failover_manager.py`
+**Depends on:** Step 5 (BrokerRouter), Step 6 (BrokerHealthMonitor), Step 2 (FailoverSettings)
+**Reference:** Correction #4 (graduated failover), Correction #8 (20-60s window), Correction #13 (sticky failover)
+
+```python
+class FailoverState(Enum):
+    """Failover state machine states.
+
+    Per Kleppmann Ch.5: explicit state machine for failover process.
+    Per Nygard Ch.5: circuit breaker + failover must have clear states.
+    """
+
+    NORMAL = "NORMAL"                     # Primary broker active and healthy
+    PRIMARY_DEGRADED = "PRIMARY_DEGRADED" # Primary failing, monitoring closely
+    FAILOVER_IN_PROGRESS = "FAILOVER_IN_PROGRESS"  # Switching to fallback
+    FAILEDOVER = "FAILEDOVER"             # Running on fallback broker
+    ALL_BROKERS_DOWN = "ALL_BROKERS_DOWN" # No broker available — KILL mode
+    FAILEDBACK = "FAILEDBACK"             # Successfully switched back to primary
+
+
+class FailoverEvent:
+    """Record of a failover state transition for audit trail.
+
+    Attributes:
+        timestamp: When the transition occurred.
+        previous_state: Previous FailoverState.
+        new_state: New FailoverState.
+        trigger_broker: Broker that triggered the transition.
+        target_broker: Broker being switched to (if applicable).
+        reason: Human-readable reason.
+        duration_seconds: Time taken for the transition.
+    """
+
+    def __init__(
+        self,
+        timestamp: float,
+        previous_state: FailoverState,
+        new_state: FailoverState,
+        trigger_broker: str,
+        target_broker: str | None,
+        reason: str,
+        duration_seconds: float,
+    ) -> None: ...
+
+
+class BrokerFailoverManager:
+    """Orchestrates broker failover with graduated, safe transitions.
+
+    Per Correction #4: GRADUATED failover (not instant):
+    1. Detect primary degradation (circuit breaker OPEN or health check failures)
+    2. Confirm primary is truly down (FAILOVER_CONFIRMATION_COUNT consecutive failures)
+    3. Halt new orders (ORDER_SUBMISSION_BLOCKED_DURING_FAILOVER)
+    4. Reconcile positions with primary (capture final state)
+    5. Authenticate on fallback broker (if not already authenticated)
+    6. Reconcile positions with fallback broker (verify state matches)
+    7. Switch routing to fallback broker
+    8. Resume order submission
+
+    Per Correction #8: Total failover time 20-60 seconds.
+    Per Correction #13: STICKY failover — stay on fallback for session.
+    Per Richards & Ford Ch.11: If ALL brokers down, fail visibly (KILL switch).
+
+    State Machine:
+    NORMAL -> PRIMARY_DEGRADED -> FAILOVER_IN_PROGRESS -> FAILEDOVER -> FAILEDBACK -> NORMAL
+                                       |
+                                 ALL_BROKERS_DOWN -> KILL SWITCH
+
+    Args:
+        router: BrokerRouter for order routing.
+        health_monitor: BrokerHealthMonitor for health status.
+        reconciler: BrokerReconciler for position reconciliation (Step 8).
+        kill_switch: KillSwitch for all-brokers-down activation.
+        settings: FailoverSettings with timing and behavior config.
+        audit_logger: AuditLogger for failover events.
+        alert_dispatcher: AlertDispatcher for failover alerts.
+    """
+
+    def __init__(
+        self,
+        router: BrokerRouter,
+        health_monitor: BrokerHealthMonitor,
+        reconciler: BrokerReconciler,
+        kill_switch: KillSwitch,
+        settings: FailoverSettings,
+        audit_logger: AuditLogger,
+        alert_dispatcher: AlertDispatcher,
+    ) -> None:
+        self._router = router
+        self._health_monitor = health_monitor
+        self._reconciler = reconciler
+        self._kill_switch = kill_switch
+        self._settings = settings
+        self._audit = audit_logger
+        self._alerts = alert_dispatcher
+        self._state = FailoverState.NORMAL
+        self._event_log: list[FailoverEvent] = []
+        self._failover_count_today: int = 0
+
+    @property
+    def state(self) -> FailoverState:
+        """Current failover state."""
+
+    async def on_broker_health_change(self, broker_name: str, is_healthy: bool) -> None:
+        """Callback from BrokerHealthMonitor when broker health changes.
+
+        State transitions:
+        - NORMAL + primary unhealthy -> PRIMARY_DEGRADED
+        - PRIMARY_DEGRADED + primary healthy -> NORMAL
+        - PRIMARY_DEGRADED + confirmation count reached -> FAILOVER_IN_PROGRESS
+        - FAILOVER_IN_PROGRESS + failover complete -> FAILEDOVER
+        - FAILOVER_IN_PROGRESS + no fallback available -> ALL_BROKERS_DOWN
+        - FAILEDOVER + all brokers down -> ALL_BROKERS_DOWN
+        - FAILEDOVER + PRE_OPEN + primary healthy -> FAILEDBACK
+        """
+
+    async def execute_failover(self, segment: str, failed_broker: str) -> bool:
+        """Execute the full failover sequence for a segment.
+
+        Per Correction #4: GRADUATED steps:
+        1. Transition state: FAILOVER_IN_PROGRESS
+        2. Block new order submissions
+        3. Reconcile positions with failed broker (best-effort — may be down)
+        4. Identify fallback broker for segment
+        5. Verify fallback broker is HEALTHY (force health check)
+        6. Reconcile positions with fallback broker
+        7. If reconciliation passes: switch routing, resume orders
+        8. If reconciliation fails: PAUSE + alert CRITICAL
+        9. Log entire sequence to audit trail
+        10. Increment failover count
+
+        Timeout: FAILOVER_TOTAL_TIMEOUT_SECONDS (default 60s)
+        """
+
+    async def execute_all_brokers_down(self) -> None:
+        """Handle ALL brokers down scenario.
+
+        Per Richards & Ford Ch.11: Fail visibly.
+        Per FailoverSettings.ALL_BROKERS_DOWN_KILL_SWITCH = True:
+
+        1. Transition state: ALL_BROKERS_DOWN
+        2. Activate kill switch at KILL level
+        3. Send CRITICAL alert via Telegram + Email
+        4. Log all broker health statuses
+        5. Start accelerated health monitoring (5-second intervals)
+        6. When any broker recovers: transition to FAILEDOVER + deactivate kill switch
+        7. Require human /resume to continue trading
+        """
+
+    async def execute_failback(self, segment: str) -> bool:
+        """Execute failback to primary broker during PRE_OPEN.
+
+        Per Correction #13: Only during PRE_OPEN (not mid-session).
+        Per FailoverSettings.PRE_OPEN_FAILBACK = True.
+
+        Steps:
+        1. Check if currently in FAILEDOVER state
+        2. Force health check on primary broker
+        3. If primary is HEALTHY:
+           a. Reconcile positions on primary broker
+           b. If positions match: switch routing to primary
+           c. Transition state: FAILEDBACK
+        4. If primary is UNHEALTHY: stay on fallback, alert WARNING
+        5. Log failback decision to audit trail
+        """
+
+    async def human_forced_switch(self, target_broker: str, segment: str, source: str) -> bool:
+        """Handle human-forced broker switch via Telegram.
+
+        Per Correction #13: HUMAN_FAILBACK_COMMAND = True.
+        Requires confirmation: user must type broker name to confirm.
+        """
+
+    def get_failover_status(self) -> dict:
+        """Get current failover status.
+
+        Returns dict with keys:
+        - state: str (FailoverState value)
+        - active_brokers: dict[str, str] (segment -> broker_name)
+        - failover_count_today: int
+        - event_log: list[dict] (last 10 FailoverEvents)
+        - health_summary: dict[str, dict] (broker_name -> health status)
+        """
+```
+
+### 7.2 Verification Gate:
+- `python -c "from src.brokers.failover_manager import BrokerFailoverManager, FailoverState; print('BrokerFailoverManager import OK')"`
+- `ruff check src/brokers/failover_manager.py` -> 0 errors
+- `mypy src/brokers/failover_manager.py` -> 0 errors
+- Test: FailoverState has 6 states
+- Test: NORMAL -> PRIMARY_DEGRADED transition on primary unhealthy
+- Test: PRIMARY_DEGRADED -> NORMAL transition on primary recovery
+- Test: PRIMARY_DEGRADED -> FAILOVER_IN_PROGRESS after confirmation count
+- Test: FAILOVER_IN_PROGRESS -> FAILEDOVER after successful reconciliation
+- Test: FAILOVER_IN_PROGRESS -> ALL_BROKERS_DOWN when no fallback available
+- Test: ALL_BROKERS_DOWN activates KILL switch
+- Test: execute_failover() respects FAILOVER_TOTAL_TIMEOUT_SECONDS
+- Test: execute_failback() only allowed during PRE_OPEN
+- Test: human_forced_switch() requires confirmation
+- Test: get_failover_status() returns all 5 keys
+- Test: failover_count_today increments correctly
+- Test: failover_count_today > MAX_FAILOVER_EVENTS_PER_DAY triggers PAUSE
+- Hypothesis: FailoverState transitions are always valid (no invalid jumps)
+
+================================================================================
+STEP 8: IMPLEMENT BrokerReconciler (src/brokers/reconciler.py — NEW FILE)
+================================================================================
+
+Instruction 8.1: Create cross-broker position reconciliation system
+---
+**Action:** CREATE new file `src/brokers/reconciler.py`
+**Depends on:** Step 1 (BrokerInterface), Step 2 (FailoverSettings)
+**Reference:** Correction #10 (positions on EXCHANGE not broker), MiFID II Art.25, Kaufman Ch.12
+
+```python
+class ReconciliationResult:
+    """Result of a cross-broker position reconciliation.
+
+    Per Correction #10: positions live on EXCHANGE, not broker.
+    Each broker reports independently — numbers MUST match.
+    """
+
+    def __init__(
+        self,
+        broker_a: str,
+        broker_b: str,
+        positions_match: bool,
+        position_count_a: int,
+        position_count_b: int,
+        mismatched_positions: list[dict],
+        pnl_difference_inr: float,
+        margin_difference_inr: float,
+        reconciliation_timestamp: float,
+        error_details: str,
+    ) -> None: ...
+
+    @property
+    def is_reconciled(self) -> bool:
+        """True if positions match within acceptable tolerance."""
+        return self.positions_match and abs(self.pnl_difference_inr) < 500
+
+
+class BrokerReconciler:
+    """Cross-broker position reconciliation for failover safety.
+
+    Per Correction #10: The MOST CRITICAL safety step during failover.
+    Per MiFID II Art.25: record keeping — positions must be verifiable.
+    Per Kaufman Ch.12: daily reconciliation is non-negotiable.
+
+    Reconciliation checks:
+    1. Position count matches between brokers
+    2. Each position's symbol, quantity, and direction matches
+    3. P&L values match within tolerance (Rs 500 per Correction #10)
+    4. Margin values match within tolerance (5% difference allowed)
+    5. Open order states are consistent
+
+    If ANY mismatch:
+    - Log CRITICAL to audit trail
+    - Send CRITICAL alert via Telegram
+    - Activate PAUSE kill switch level
+    - Require human intervention before continuing
+
+    Args:
+        failover_settings: FailoverSettings with reconciliation timeout.
+        audit_logger: AuditLogger for reconciliation events.
+        alert_dispatcher: AlertDispatcher for mismatch alerts.
+        kill_switch: KillSwitch for PAUSE activation on mismatch.
+    """
+
+    def __init__(
+        self,
+        failover_settings: FailoverSettings,
+        audit_logger: AuditLogger,
+        alert_dispatcher: AlertDispatcher,
+        kill_switch: KillSwitch,
+    ) -> None:
+        self._settings = failover_settings
+        self._audit = audit_logger
+        self._alerts = alert_dispatcher
+        self._kill_switch = kill_switch
+
+    async def reconcile(
+        self,
+        broker_a: BrokerInterface,
+        broker_b: BrokerInterface,
+        segment: str,
+    ) -> ReconciliationResult:
+        """Reconcile positions between two brokers.
+
+        Steps:
+        1. Fetch positions from broker_a (with timeout)
+        2. Fetch positions from broker_b (with timeout)
+        3. Compare position counts
+        4. Compare each position (symbol, quantity, direction)
+        5. Compare P&L values (tolerance: Rs 500 per Correction #10)
+        6. Compare margin availability (tolerance: 5%)
+        7. If mismatch: log, alert, PAUSE
+        8. Return ReconciliationResult
+
+        Timeout: RECONCILIATION_TIMEOUT_SECONDS (default 15s)
+        """
+
+    async def reconcile_single_broker(
+        self,
+        broker: BrokerInterface,
+        local_positions: dict,
+        segment: str,
+    ) -> ReconciliationResult:
+        """Reconcile broker positions against local state.
+
+        Used during daily PRE_OPEN checklist (Ph14 PreOpenChecklist step 1)
+        and after crash recovery.
+        """
+
+    async def reconcile_open_orders(
+        self,
+        broker: BrokerInterface,
+    ) -> dict:
+        """Reconcile open orders on a broker during failover.
+
+        Per Correction #10: Check all open orders at time of failover.
+        - Filled orders: record fill, update positions
+        - Pending orders: cancel (safer than re-submitting on fallback)
+        - Cancelled orders: log state
+        - Unknown state: CRITICAL alert + human review
+
+        Returns:
+            Dict with keys: filled, pending, cancelled, unknown, total
+        """
+
+    def _compare_positions(
+        self,
+        positions_a: list[dict],
+        positions_b: list[dict],
+    ) -> tuple[bool, list[dict], float]:
+        """Compare two position lists for consistency.
+
+        Returns:
+            Tuple of (match, mismatches, pnl_difference).
+        """
+
+    def _handle_mismatch(self, result: ReconciliationResult) -> None:
+        """Handle reconciliation mismatch.
+
+        Steps:
+        1. Log CRITICAL with both brokers' position details
+        2. Send CRITICAL alert via Telegram + Email
+        3. Activate PAUSE kill switch level
+        4. Record event in audit trail
+        """
+```
+
+### 8.2 Verification Gate:
+- `python -c "from src.brokers.reconciler import BrokerReconciler, ReconciliationResult; print('BrokerReconciler import OK')"`
+- `ruff check src/brokers/reconciler.py` -> 0 errors
+- `mypy src/brokers/reconciler.py` -> 0 errors
+- Test: ReconciliationResult.is_reconciled = True when positions match + pnl diff < 500
+- Test: ReconciliationResult.is_reconciled = False when pnl diff > 500
+- Test: BrokerReconciler.reconcile() with matching positions -> positions_match=True
+- Test: BrokerReconciler.reconcile() with different position counts -> positions_match=False
+- Test: BrokerReconciler.reconcile() with P&L difference > 500 -> mismatch alert
+- Test: BrokerReconciler.reconcile() timeout -> ReconciliationResult with error
+- Test: _handle_mismatch() activates PAUSE kill switch
+- Test: _handle_mismatch() sends CRITICAL alert
+- Test: reconcile_open_orders() categorizes orders correctly (filled/pending/cancelled/unknown)
+- Test: reconcile_single_broker() compares local vs broker positions
+- Hypothesis: reconcile() always completes within RECONCILIATION_TIMEOUT_SECONDS
+
+================================================================================
+STEP 9: EXTEND PROMETHEUS METRICS (src/metrics/collector.py — EXTEND)
+================================================================================
+
+Instruction 9.1: Add multi-broker Prometheus metrics
+---
+**Action:** EXTEND `src/metrics/collector.py` — add 5 new Prometheus metrics AFTER existing `API_LATENCY` histogram. Do NOT modify any existing metric.
+
+```python
+# ADD these 5 new metrics after API_LATENCY (line 89):
+
+BROKER_HEALTH_STATUS = Gauge(
+    "trading_bot_broker_health_status",
+    "Broker health status: 0=UNHEALTHY, 1=HEALTHY, 2=DEGRADED",
+    ["broker"],
+    registry=REGISTRY,
+)
+
+BROKER_FAILOVER_TOTAL = Counter(
+    "trading_bot_broker_failover_total",
+    "Total broker failover events",
+    ["segment", "from_broker", "to_broker"],
+    registry=REGISTRY,
+)
+
+BROKER_API_ERRORS_TOTAL = Counter(
+    "trading_bot_broker_api_errors_total",
+    "Total broker API errors by type",
+    ["broker", "error_type"],
+    registry=REGISTRY,
+)
+
+BROKER_LATENCY_SECONDS = Histogram(
+    "trading_bot_broker_latency_seconds",
+    "Broker-specific API call latency in seconds",
+    ["broker", "endpoint"],
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5, 5.0),
+    registry=REGISTRY,
+)
+
+ACTIVE_BROKER_GAUGE = Gauge(
+    "trading_bot_active_broker",
+    "Currently active broker per segment: 1=active, 0=inactive",
+    ["segment", "broker"],
+    registry=REGISTRY,
+)
+
+
+# ADD helper functions:
+
+def set_broker_health(broker_name: str, status: str) -> None:
+    """Update broker health gauge."""
+    status_map = {"UNHEALTHY": 0, "HEALTHY": 1, "DEGRADED": 2}
+    BROKER_HEALTH_STATUS.labels(broker=broker_name).set(status_map.get(status, 0))
+
+
+def record_failover(segment: str, from_broker: str, to_broker: str) -> None:
+    """Record a failover event."""
+    BROKER_FAILOVER_TOTAL.labels(segment=segment, from_broker=from_broker, to_broker=to_broker).inc()
+
+
+def record_broker_error(broker_name: str, error_type: str) -> None:
+    """Record a broker API error."""
+    BROKER_API_ERRORS_TOTAL.labels(broker=broker_name, error_type=error_type).inc()
+
+
+def set_active_broker(segment: str, broker_name: str, all_brokers: list[str]) -> None:
+    """Update active broker gauge for a segment."""
+    for broker in all_brokers:
+        value = 1 if broker == broker_name else 0
+        ACTIVE_BROKER_GAUGE.labels(segment=segment, broker=broker).set(value)
+```
+
+### 9.2 Verification Gate:
+- `python -c "from src.metrics.collector import BROKER_HEALTH_STATUS, BROKER_FAILOVER_TOTAL, BROKER_API_ERRORS_TOTAL, BROKER_LATENCY_SECONDS, ACTIVE_BROKER_GAUGE; print('All 5 new metrics OK')"`
+- `ruff check src/metrics/collector.py` -> 0 errors
+- `mypy src/metrics/collector.py` -> 0 errors
+- Test: set_broker_health("zerodha", "HEALTHY") sets gauge to 1
+- Test: record_failover("NSE", "zerodha", "angel_one") increments counter
+- Test: record_broker_error("zerodha", "timeout") increments counter
+- Test: set_active_broker("NSE", "zerodha", ["zerodha", "angel_one", "dhan"]) sets correct values
+
+================================================================================
+STEP 10: EXTEND AUDIT EVENT TYPES (src/risk/audit.py — EXTEND)
+================================================================================
+
+Instruction 10.1: Add multi-broker audit event types
+---
+**Action:** EXTEND `src/risk/audit.py` — add new event type constants for broker failover events. Do NOT modify existing event types.
+
+```python
+# ADD to the event type constants section:
+
+BROKER_FAILOVER = "BROKER_FAILOVER"
+BROKER_HEALTH_CHANGE = "BROKER_HEALTH_CHANGE"
+BROKER_RECONCILIATION = "BROKER_RECONCILIATION"
+BROKER_SESSION_EXPIRED = "BROKER_SESSION_EXPIRED"
+BROKER_REAUTH = "BROKER_REAUTH"
+BROKER_SWITCH = "BROKER_SWITCH"
+BROKER_ALL_DOWN = "BROKER_ALL_DOWN"
+```
+
+### 10.2 Verification Gate:
+- `python -c "from src.risk.audit import BROKER_FAILOVER, BROKER_HEALTH_CHANGE, BROKER_RECONCILIATION; print('Broker audit event types OK')"`
+- `ruff check src/risk/audit.py` -> 0 errors
+- `mypy src/risk/audit.py` -> 0 errors
+
+================================================================================
+STEP 11: EXTEND KILL SWITCH WITH ALL-BROKER-DOWN TRIGGER (src/risk/kill_switch.py — EXTEND)
+================================================================================
+
+Instruction 11.1: Add all-brokers-down auto-trigger
+---
+**Action:** EXTEND `src/risk/kill_switch.py` — add method for all-brokers-down auto-activation. Do NOT modify existing methods.
+
+```python
+# ADD method to KillSwitch class:
+
+def activate_all_brokers_down(self) -> KillSwitchEvent:
+    """Activate KILL switch when ALL brokers are down.
+
+    Per Richards & Ford Ch.11: If failover fails, fail visibly.
+    Per FailoverSettings.ALL_BROKERS_DOWN_KILL_SWITCH = True.
+    Source = "auto_all_brokers_down".
+    Reason = "All configured brokers are UNHEALTHY — trading halted for safety."
+    """
+    return self.activate(
+        KillSwitchLevel.KILL,
+        source="auto_all_brokers_down",
+        reason="All configured brokers are UNHEALTHY — trading halted for safety",
+    )
+```
+
+### 11.2 Verification Gate:
+- `python -c "from src.risk.kill_switch import KillSwitch; ks = KillSwitch.__new__(KillSwitch); assert hasattr(ks, 'activate_all_brokers_down'); print('KillSwitch all-brokers-down method OK')"`
+- `ruff check src/risk/kill_switch.py` -> 0 errors
+- `mypy src/risk/kill_switch.py` -> 0 errors
+- Test: activate_all_brokers_down() activates KILL level
+- Test: activate_all_brokers_down() source = "auto_all_brokers_down"
+
+================================================================================
+STEP 12: UPDATE src/brokers/__init__.py WITH PUBLIC EXPORTS
+================================================================================
+
+Instruction 12.1: Update broker package exports
+---
+**Action:** REPLACE `src/brokers/__init__.py` content (currently empty) with public exports.
+
+```python
+from src.brokers.base import BrokerInterface
+from src.brokers.angel import AngelBroker
+from src.brokers.dhan import DhanBroker
+from src.brokers.router import BrokerRouter
+from src.brokers.health_monitor import BrokerHealthMonitor, BrokerHealthStatus
+from src.brokers.failover_manager import BrokerFailoverManager, FailoverState, FailoverEvent
+from src.brokers.reconciler import BrokerReconciler, ReconciliationResult
+
+__all__ = [
+    "BrokerInterface",
+    "AngelBroker",
+    "DhanBroker",
+    "BrokerRouter",
+    "BrokerHealthMonitor",
+    "BrokerHealthStatus",
+    "BrokerFailoverManager",
+    "FailoverState",
+    "FailoverEvent",
+    "BrokerReconciler",
+    "ReconciliationResult",
+]
+```
+
+### 12.2 Verification Gate:
+- `python -c "from src.brokers import BrokerInterface, AngelBroker, DhanBroker, BrokerRouter, BrokerHealthMonitor, BrokerFailoverManager, BrokerReconciler; print('All broker exports OK')"`
+- `ruff check src/brokers/__init__.py` -> 0 errors
+- `mypy src/brokers/__init__.py` -> 0 errors
+
+================================================================================
+STEP 13: EXTEND pyproject.toml
+================================================================================
+
+Instruction 13.1: Add new dependencies and mypy overrides
+---
+**Action:** EXTEND `pyproject.toml` — add 2 new runtime dependencies and 2 mypy override entries.
+
+```toml
+# ADD to [project] dependencies list (after "kiteconnect>=5.0"):
+"smartapi-python>=1.0",
+"dhanhq>=1.0",
+
+# ADD to [[tool.mypy.overrides]] module list:
+"smartapi.*",
+"dhanhq.*",
+"SmartApi.*",
+
+# ADD to [tool.pytest.ini_options] markers list:
+"broker_failover: multi-broker failover and redundancy tests",
+```
+
+### 13.2 Verification Gate:
+- `pip install -e ".[dev]"` -> succeeds without dependency conflicts
+- `python -c "import smartapi; import dhanhq; print('New deps import OK')"` -> no errors
+- `pip-audit` -> 0 known vulnerabilities
+- `pip check` -> no dependency conflicts
+
+================================================================================
+STEP 14: ADD DAILY PRE-OPEN MULTI-BROKER CHECKLIST
+================================================================================
+
+Instruction 14.1: Create multi-broker pre-open checklist
+---
+**Action:** CREATE new file `src/brokers/pre_open.py`
+**Depends on:** Step 6 (BrokerHealthMonitor), Step 7 (BrokerFailoverManager), Step 2 (MultiBrokerSettings)
+
+```python
+class MultiBrokerPreOpenChecklist:
+    """Pre-open checklist for multi-broker system.
+
+    Per Lopez de Prado Ch.14: Production deployment sanity checks
+    must be run BEFORE every trading session.
+    Per Vine Ch.4: Operational risk prevention through daily checks.
+
+    Runs at 8:30 AM IST (before NSE pre-market at 9:00).
+    Must complete before trading is allowed.
+
+    Checklist items (8 items — extends Ph14 PreOpenChecklist 7 items):
+    1. Primary broker authenticated and healthy (Zerodha)
+    2. Fallback broker authenticated and healthy (Angel One)
+    3. Depth data broker authenticated and healthy (Dhan)
+    4. At least MIN_BROKERS_FOR_TRADING (2) brokers are healthy
+    5. Primary broker supports all required segments (NSE + MCX)
+    6. Failover manager is in NORMAL state
+    7. Position reconciliation passed for all brokers
+    8. Failover count from previous day reset to 0
+
+    If ANY check fails:
+    - Log CRITICAL to audit trail
+    - Send CRITICAL alert via Telegram
+    - Block trading start (require human resolution)
+
+    Args:
+        brokers: Dict of broker_name -> BrokerInterface.
+        health_monitor: BrokerHealthMonitor.
+        failover_manager: BrokerFailoverManager.
+        reconciler: BrokerReconciler.
+        settings: MultiBrokerSettings.
+        audit_logger: AuditLogger.
+        alert_dispatcher: AlertDispatcher.
+    """
+
+    def __init__(
+        self,
+        brokers: dict[str, BrokerInterface],
+        health_monitor: BrokerHealthMonitor,
+        failover_manager: BrokerFailoverManager,
+        reconciler: BrokerReconciler,
+        settings: MultiBrokerSettings,
+        audit_logger: AuditLogger,
+        alert_dispatcher: AlertDispatcher,
+    ) -> None: ...
+
+    async def run_checklist(self) -> dict:
+        """Run all 8 pre-open checks.
+
+        Returns dict with keys:
+        - all_passed: bool
+        - check_results: list[dict] (each: check_name, passed, details)
+        - healthy_broker_count: int
+        - can_start_trading: bool
+        - timestamp: float
+        """
+
+    async def check_broker_authentication(self, broker_name: str) -> dict:
+        """Check if a broker is authenticated and session is valid.
+
+        Steps:
+        1. Call broker.get_session_status()
+        2. Verify is_authenticated = True
+        3. Verify token is not expired
+        4. If expired: attempt re-authentication
+        5. Return check result
+        """
+
+    async def check_minimum_brokers(self) -> dict:
+        """Check if minimum required brokers are healthy.
+
+        Per MultiBrokerSettings.MIN_BROKERS_FOR_TRADING (default 2).
+        Must have at least primary + one fallback.
+        """
+
+    async def check_segment_coverage(self) -> dict:
+        """Check that all required segments have at least 2 broker options.
+
+        NSE: must have primary + fallback
+        MCX: must have primary + fallback (Angel One only)
+        """
+
+    async def reset_daily_counters(self) -> None:
+        """Reset daily failover counters at start of new trading day."""
+```
+
+### 14.2 Verification Gate:
+- `python -c "from src.brokers.pre_open import MultiBrokerPreOpenChecklist; print('PreOpenChecklist import OK')"`
+- `ruff check src/brokers/pre_open.py` -> 0 errors
+- `mypy src/brokers/pre_open.py` -> 0 errors
+- Test: run_checklist() returns all 8 check results
+- Test: run_checklist() with all brokers healthy -> all_passed=True, can_start_trading=True
+- Test: run_checklist() with primary broker down -> all_passed=False
+- Test: run_checklist() with < MIN_BROKERS_FOR_TRADING -> all_passed=False
+- Test: check_broker_authentication() with expired token -> attempts re-auth
+- Test: check_segment_coverage() with no MCX fallback -> fails
+- Test: reset_daily_counters() resets failover_count_today to 0
+
+================================================================================
+STEP 15: CREATE MULTI-BROKER INTEGRATION FACTORY (src/brokers/factory.py — NEW FILE)
+================================================================================
+
+Instruction 15.1: Create broker factory for dependency injection
+---
+**Action:** CREATE new file `src/brokers/factory.py`
+**Depends on:** Step 3 (AngelBroker), Step 4 (DhanBroker), Step 5 (BrokerRouter), Step 6 (BrokerHealthMonitor), Step 7 (BrokerFailoverManager), Step 8 (BrokerReconciler)
+
+```python
+class BrokerFactory:
+    """Factory for creating and wiring multi-broker system components.
+
+    Per Richards & Ford Ch.11: Dependency injection for testability.
+    This factory creates all broker components with proper wiring
+    and independent circuit breakers per broker (Nygard Ch.5: bulkheads).
+
+    Usage:
+        factory = BrokerFactory(settings_path="config/secrets.env")
+        system = factory.create_system()
+        await system.start()
+
+    Args:
+        multi_broker_settings: MultiBrokerSettings.
+        angel_settings: AngelOneSettings.
+        dhan_settings: DhanSettings.
+        failover_settings: FailoverSettings.
+        compliance_settings: ComplianceSettings.
+        kill_switch: KillSwitch instance.
+        audit_logger: AuditLogger instance.
+        alert_dispatcher: AlertDispatcher instance.
+    """
+
+    def __init__(
+        self,
+        multi_broker_settings: MultiBrokerSettings,
+        angel_settings: AngelOneSettings,
+        dhan_settings: DhanSettings,
+        failover_settings: FailoverSettings,
+        compliance_settings: ComplianceSettings,
+        kill_switch: KillSwitch,
+        audit_logger: AuditLogger,
+        alert_dispatcher: AlertDispatcher,
+    ) -> None: ...
+
+    def create_brokers(self) -> dict[str, BrokerInterface]:
+        """Create all broker instances with independent circuit breakers.
+
+        Per Nygard Ch.5: Bulkhead pattern — each broker has its own
+        circuit breaker, rate limiter, and session management.
+
+        Returns:
+            Dict mapping broker_name to BrokerInterface.
+            Keys: "zerodha" (KiteBroker from Ph3/14), "angel_one", "dhan"
+        """
+
+    def create_health_monitor(self, brokers: dict[str, BrokerInterface]) -> BrokerHealthMonitor:
+        """Create health monitor with all broker instances."""
+
+    def create_reconciler(self) -> BrokerReconciler:
+        """Create position reconciler."""
+
+    def create_router(self, brokers: dict[str, BrokerInterface]) -> BrokerRouter:
+        """Create broker router with routing configuration."""
+
+    def create_failover_manager(
+        self,
+        router: BrokerRouter,
+        health_monitor: BrokerHealthMonitor,
+        reconciler: BrokerReconciler,
+    ) -> BrokerFailoverManager:
+        """Create failover manager with all dependencies."""
+
+    def create_pre_open_checklist(
+        self,
+        brokers: dict[str, BrokerInterface],
+        health_monitor: BrokerHealthMonitor,
+        failover_manager: BrokerFailoverManager,
+        reconciler: BrokerReconciler,
+    ) -> MultiBrokerPreOpenChecklist:
+        """Create pre-open checklist."""
+
+    def create_system(self) -> MultiBrokerSystem:
+        """Create the complete multi-broker system with all components.
+
+        Wires all components together and returns a MultiBrokerSystem
+        that can be started/stopped as a unit.
+        """
+
+
+class MultiBrokerSystem:
+    """Complete multi-broker system as a managed unit.
+
+    Provides start/stop lifecycle and exposes all sub-components.
+
+    Args:
+        brokers: Dict of broker instances.
+        router: BrokerRouter.
+        health_monitor: BrokerHealthMonitor.
+        failover_manager: BrokerFailoverManager.
+        reconciler: BrokerReconciler.
+        pre_open_checklist: MultiBrokerPreOpenChecklist.
+    """
+
+    def __init__(
+        self,
+        brokers: dict[str, BrokerInterface],
+        router: BrokerRouter,
+        health_monitor: BrokerHealthMonitor,
+        failover_manager: BrokerFailoverManager,
+        reconciler: BrokerReconciler,
+        pre_open_checklist: MultiBrokerPreOpenChecklist,
+    ) -> None: ...
+
+    async def start(self) -> None:
+        """Start all broker components.
+
+        Steps:
+        1. Authenticate all brokers (parallel)
+        2. Start health monitoring
+        3. Run pre-open checklist
+        4. If checklist fails: alert + block trading
+        5. If checklist passes: mark system as ready
+        """
+
+    async def stop(self) -> None:
+        """Stop all broker components gracefully.
+
+        Steps:
+        1. Stop health monitoring
+        2. Log final routing status
+        3. Mark system as stopped
+        """
+
+    @property
+    def is_ready(self) -> bool:
+        """True if system has started and pre-open checklist passed."""
+
+    def get_status(self) -> dict:
+        """Get comprehensive system status."""
+```
+
+### 15.2 Verification Gate:
+- `python -c "from src.brokers.factory import BrokerFactory, MultiBrokerSystem; print('BrokerFactory import OK')"`
+- `ruff check src/brokers/factory.py` -> 0 errors
+- `mypy src/brokers/factory.py` -> 0 errors
+- Test: BrokerFactory.create_brokers() returns dict with 3 brokers (zerodha, angel_one, dhan)
+- Test: Each broker has independent circuit breaker
+- Test: BrokerFactory.create_system() returns fully wired MultiBrokerSystem
+- Test: MultiBrokerSystem.start() authenticates all brokers
+- Test: MultiBrokerSystem.stop() stops health monitoring
+
+================================================================================
+STEP 16: TELEGRAM COMMANDS FOR MULTI-BROKER CONTROL
+================================================================================
+
+Instruction 16.1: Extend Telegram control bot with multi-broker commands
+---
+**Action:** EXTEND the Telegram control system (from Ph14 `src/live_trading/telegram_control.py`) with broker-specific commands. These commands are routed through the existing Telegram bot but handled by new broker command handlers.
+
+**New Telegram commands:**
+
+| Command | Purpose | Authorization |
+|---------|---------|---------------|
+| /broker status | Show current active broker per segment, health of all brokers | All users |
+| /broker health | Force health check on all brokers, show detailed status | All users |
+| /broker switch <name> | Force switch to named broker (requires confirmation) | Human only (requires typing broker name) |
+| /broker reconcile | Force position reconciliation between active and fallback | Human only |
+| /broker failover | Show failover status, event log, and state machine | All users |
+
+**Implementation notes:**
+- All commands log to audit trail via AuditLogger
+- /broker switch requires confirmation dialog (type broker name to confirm)
+- /broker reconcile may take up to 15 seconds (show progress indicator)
+- Commands are ADD-only — do NOT modify existing Telegram commands (/kill, /pause, /resume, /status, /scale, /positions, /pnl)
+
+### 16.2 Verification Gate:
+- Test: /broker status returns active_broker_nse, active_broker_mcx, health of each broker
+- Test: /broker health triggers force_health_check on all brokers
+- Test: /broker switch angel_one requires confirmation
+- Test: /broker switch dhan when segment=MCX -> error message (Dhan no MCX)
+- Test: /broker reconcile shows reconciliation results
+- Test: /broker failover shows FailoverState and event log
+
+================================================================================
+STEP 17: COMPREHENSIVE TEST SUITE
+================================================================================
+
+Instruction 17.1: Create test files
+---
+**Action:** CREATE the following test files. All tests use mocked broker APIs (NO real broker calls). Tests run on Windows 11 PC.
+
+### New test directory: tests/brokers/
+
+| File | Tests | Count |
+|------|-------|-------|
+| `tests/brokers/__init__.py` | Package init | 0 |
+| `tests/brokers/test_base.py` | BrokerInterface abstract method enforcement | 5 |
+| `tests/brokers/test_angel_broker.py` | AngelBroker: auth, orders, health, depth, segment, tag mapping | 25 |
+| `tests/brokers/test_dhan_broker.py` | DhanBroker: auth, orders, health, depth, MCX rejection, latency | 25 |
+| `tests/brokers/test_router.py` | BrokerRouter: routing, failover, failback, force switch, status | 30 |
+| `tests/brokers/test_health_monitor.py` | BrokerHealthMonitor: checks, intervals, transitions, segment filtering | 25 |
+| `tests/brokers/test_failover_manager.py` | BrokerFailoverManager: state machine, failover, failback, all-down | 30 |
+| `tests/brokers/test_reconciler.py` | BrokerReconciler: position match, mismatch, tolerance, timeout | 20 |
+| `tests/brokers/test_pre_open.py` | MultiBrokerPreOpenChecklist: 8 checks, auth, segment, counters | 15 |
+| `tests/brokers/test_factory.py` | BrokerFactory: creation, wiring, system lifecycle | 15 |
+| `tests/brokers/test_integration.py` | Full failover scenario integration tests (marked @pytest.mark.integration) | 10 |
+| `tests/brokers/test_property.py` | Hypothesis property-based tests for routing, reconciliation, state machine | 15 |
+
+**Total: ~215 test cases**
+
+### 17.2 Extend tests/conftest.py with broker fixtures:
+
+```python
+# ADD these fixtures to tests/conftest.py:
+
+@pytest.fixture
+def angel_settings() -> AngelOneSettings:
+    """Angel One settings with test defaults."""
+    return AngelOneSettings(
+        API_KEY="test_angel_key",
+        API_SECRET="test_angel_secret",
+        CLIENT_CODE="TESTCLIENT",
+        PASSWORD="test_password",
+        TOTP_SECRET="test_totp_secret",
+    )
+
+
+@pytest.fixture
+def dhan_settings() -> DhanSettings:
+    """Dhan settings with test defaults."""
+    return DhanSettings(
+        CLIENT_ID="test_dhan_client",
+        ACCESS_TOKEN="test_dhan_token",
+        API_SECRET="test_dhan_secret",
+    )
+
+
+@pytest.fixture
+def multi_broker_settings() -> MultiBrokerSettings:
+    """Multi-broker settings with test defaults."""
+    return MultiBrokerSettings()
+
+
+@pytest.fixture
+def failover_settings() -> FailoverSettings:
+    """Failover settings with test defaults."""
+    return FailoverSettings()
+
+
+@pytest.fixture
+def mock_angel_broker(angel_settings, compliance_settings) -> AngelBroker:
+    """Mocked AngelBroker for testing (no real API calls)."""
+
+
+@pytest.fixture
+def mock_dhan_broker(dhan_settings, compliance_settings) -> DhanBroker:
+    """Mocked DhanBroker for testing (no real API calls)."""
+
+
+@pytest.fixture
+def broker_circuit_breakers() -> dict[str, CircuitBreaker]:
+    """Independent circuit breakers per broker."""
+    return {
+        "zerodha": CircuitBreaker(failure_threshold=5, recovery_timeout_seconds=30),
+        "angel_one": CircuitBreaker(failure_threshold=5, recovery_timeout_seconds=30),
+        "dhan": CircuitBreaker(failure_threshold=5, recovery_timeout_seconds=30),
+    }
+
+
+@pytest.fixture
+def broker_router(multi_broker_settings, failover_settings, audit_logger, alert_dispatcher) -> BrokerRouter:
+    """BrokerRouter with mocked brokers for testing."""
+
+
+@pytest.fixture
+def health_monitor(failover_settings, compliance_settings, audit_logger, alert_dispatcher) -> BrokerHealthMonitor:
+    """BrokerHealthMonitor with mocked brokers for testing."""
+
+
+@pytest.fixture
+def failover_manager(broker_router, health_monitor, reconciler, kill_switch, failover_settings, audit_logger, alert_dispatcher) -> BrokerFailoverManager:
+    """BrokerFailoverManager for testing."""
+
+
+@pytest.fixture
+def reconciler(failover_settings, audit_logger, alert_dispatcher, kill_switch) -> BrokerReconciler:
+    """BrokerReconciler for testing."""
+```
+
+### 17.3 Verification Gate:
+- `pytest tests/brokers/ -v --tb=short -m "not integration"` -> all pass
+- `pytest tests/brokers/ --cov=src/brokers --cov-report=term-missing` -> >= 80% coverage
+- `pytest tests/brokers/ -m property` -> all hypothesis tests pass
+- `pytest tests/brokers/ -m broker_failover` -> all failover-specific tests pass
+- `pytest tests/brokers/ --benchmark-sort=fullname` -> all benchmarks recorded
+- `pytest tests/brokers/ -n auto -m "not integration"` -> xdist parallel pass
+
+================================================================================
+STEP 18: COMPREHENSIVE VERIFICATION PIPELINE
+================================================================================
+
+Instruction 18.1: Run the complete verification pipeline
+---
+**Action:** Execute the following verification commands sequentially on Windows 11 PC. ALL must pass with ZERO errors, ZERO warnings, ZERO regressions.
+
+```powershell
+# 0. Activate virtual environment
+cd G:\OC\02June26\indian-trading-bot
+.\.venv\Scripts\Activate.ps1
+
+# 1. Install dependencies (including new broker SDKs)
+pip install -e ".[dev]"
+pip install smartapi-python dhanhq
+pip check  # -> no dependency conflicts
+
+# 2. Static analysis — ruff (linter + formatter)
+ruff check src/brokers/ config/settings.py tests/brokers/ --fix
+ruff format src/brokers/ config/settings.py tests/brokers/ --check
+# -> 0 errors, 0 warnings
+
+# 3. Type checking — mypy (strict mode)
+mypy src/brokers/ config/settings.py --strict
+# -> 0 errors
+
+# 4. Security scanning — bandit
+bandit -c pyproject.toml -r src/brokers/
+# -> 0 high/medium findings
+
+# 5. Secret detection — gitleaks
+gitleaks detect --no-git
+# -> 0 findings
+
+# 6. Dependency audit — pip-audit
+pip-audit --strict
+# -> 0 known vulnerabilities
+
+# 7. SBOM generation — cyclonedx-bom
+cyclonedx-bom -r -i requirements.txt -o sbom.json --format json
+# -> generates without error
+
+# 8. Container security — trivy (filesystem scan)
+trivy fs --config .trivy.yaml .
+# -> 0 HIGH/CRITICAL vulnerabilities
+
+# 9. Dead code detection — vulture
+vulture --min-confidence 80 src/brokers/ tests/brokers/
+# -> 0 findings
+
+# 10. Unit tests — pytest (full suite, no integration)
+pytest tests/brokers/ -v --tb=short -m "not integration" -p no:warnings
+# -> all pass
+
+# 11. Coverage — pytest-cov (branch coverage)
+pytest tests/brokers/ --cov=src/brokers --cov-report=term-missing --cov-fail-under=80 --branch
+# -> >= 80% branch coverage
+
+# 12. Property-based tests — hypothesis
+pytest tests/brokers/ -m property -v --tb=long
+# -> all pass (no flaky failures)
+
+# 13. Benchmark tests — pytest-benchmark
+pytest tests/brokers/ -m bench --benchmark-sort=mean
+# -> all recorded
+
+# 14. Parallel execution — pytest-xdist
+pytest tests/brokers/ -n auto -m "not integration" --tb=short
+# -> all pass
+
+# 15. Async tests — pytest-asyncio (auto mode)
+pytest tests/brokers/ -v -k "async" --tb=short
+# -> all pass
+
+# 16. Integration tests (requires mocked broker infrastructure)
+pytest tests/brokers/ -m integration -v --tb=long
+# -> all pass
+
+# 17. Full project test suite (regression check — must NOT break Ph0-15 tests)
+pytest tests/ -v --tb=short -m "not integration" --timeout=300
+# -> all pass, 0 regressions
+
+# 18. Pre-commit hooks
+pre-commit run --all-files
+# -> all pass
+```
+
+### 18.2 Zero-Tolerance Verification Checklist:
+
+| Check | Command | Expected | Actual |
+|-------|---------|----------|--------|
+| Dependency install | `pip install -e ".[dev]"` | Success | ___ |
+| No dependency conflicts | `pip check` | 0 conflicts | ___ |
+| Ruff lint | `ruff check src/brokers/ config/ tests/brokers/` | 0 errors | ___ |
+| Ruff format | `ruff format --check` | 0 files changed | ___ |
+| Mypy strict | `mypy src/brokers/ --strict` | 0 errors | ___ |
+| Bandit | `bandit -c pyproject.toml -r src/brokers/` | 0 high/medium | ___ |
+| Gitleaks | `gitleaks detect --no-git` | 0 findings | ___ |
+| Pip-audit | `pip-audit --strict` | 0 vulnerabilities | ___ |
+| Trivy | `trivy fs .` | 0 HIGH/CRITICAL | ___ |
+| Vulture | `vulture src/brokers/` | 0 findings | ___ |
+| Unit tests | `pytest tests/brokers/ -m "not integration"` | All pass | ___ |
+| Coverage | `pytest --cov --cov-fail-under=80` | >= 80% | ___ |
+| Property tests | `pytest -m property` | All pass | ___ |
+| Benchmark | `pytest -m bench` | All recorded | ___ |
+| xdist parallel | `pytest -n auto` | All pass | ___ |
+| Regression | `pytest tests/ -m "not integration"` | 0 regressions | ___ |
+| Pre-commit | `pre-commit run --all-files` | All pass | ___ |
+
+================================================================================
+STEP 19: FILE MANIFEST — ALL FILES CREATED/MODIFIED
+================================================================================
+
+### NEW files created (8 source + 11 test):
+
+| File | Purpose | Lines (est.) |
+|------|---------|--------------|
+| `src/brokers/angel.py` | AngelBroker implementation | ~350 |
+| `src/brokers/dhan.py` | DhanBroker implementation | ~300 |
+| `src/brokers/router.py` | BrokerRouter — smart order routing | ~250 |
+| `src/brokers/health_monitor.py` | BrokerHealthMonitor + BrokerHealthStatus | ~300 |
+| `src/brokers/failover_manager.py` | BrokerFailoverManager + FailoverState + FailoverEvent | ~350 |
+| `src/brokers/reconciler.py` | BrokerReconciler + ReconciliationResult | ~250 |
+| `src/brokers/pre_open.py` | MultiBrokerPreOpenChecklist | ~200 |
+| `src/brokers/factory.py` | BrokerFactory + MultiBrokerSystem | ~200 |
+| `tests/brokers/__init__.py` | Test package init | 0 |
+| `tests/brokers/test_base.py` | BrokerInterface tests | ~80 |
+| `tests/brokers/test_angel_broker.py` | AngelBroker tests | ~350 |
+| `tests/brokers/test_dhan_broker.py` | DhanBroker tests | ~350 |
+| `tests/brokers/test_router.py` | BrokerRouter tests | ~400 |
+| `tests/brokers/test_health_monitor.py` | BrokerHealthMonitor tests | ~350 |
+| `tests/brokers/test_failover_manager.py` | BrokerFailoverManager tests | ~400 |
+| `tests/brokers/test_reconciler.py` | BrokerReconciler tests | ~300 |
+| `tests/brokers/test_pre_open.py` | PreOpenChecklist tests | ~200 |
+| `tests/brokers/test_factory.py` | BrokerFactory tests | ~200 |
+| `tests/brokers/test_integration.py` | Integration tests | ~200 |
+| `tests/brokers/test_property.py` | Hypothesis property tests | ~250 |
+
+### EXISTING files extended (7 files — NO overwrites):
+
+| File | Extension | Lines Added (est.) |
+|------|-----------|-------------------|
+| `src/brokers/base.py` | +5 abstract methods | ~40 |
+| `src/brokers/__init__.py` | +12 exports | ~12 |
+| `config/settings.py` | +4 settings classes | ~200 |
+| `config/secrets.env.example` | +Dhan secrets + failover config | ~15 |
+| `src/metrics/collector.py` | +5 Prometheus metrics + 5 helper functions | ~50 |
+| `src/risk/audit.py` | +7 event type constants | ~7 |
+| `src/risk/kill_switch.py` | +1 method (activate_all_brokers_down) | ~10 |
+| `pyproject.toml` | +2 deps, +3 mypy overrides, +1 marker | ~8 |
+| `.gitleaks.toml` | +4 rules (Angel One + Dhan) | ~25 |
+| `tests/conftest.py` | +8 fixtures | ~80 |
+
+### Total estimated new code: ~4,300+ lines (source + tests)
+
+================================================================================
+STEP 20: SEQUENTIAL EXECUTION ORDER FOR AI CODING AGENT
+================================================================================
+
+The AI coding agent MUST execute steps in this EXACT order. Each step depends on the previous step's verification gate passing.
+
+| Order | Step | Action | Verification Gate |
+|-------|------|--------|-------------------|
+| 1 | 2 | Add MultiBrokerSettings, AngelOneSettings, DhanSettings, FailoverSettings to config/settings.py | Import + validator tests |
+| 2 | 2.2 | Update secrets.env.example with Dhan + failover config | File exists with new entries |
+| 3 | 2.3 | Update .gitleaks.toml with Angel One + Dhan rules | File exists with new rules |
+| 4 | 13 | Update pyproject.toml: add smartapi-python, dhanhq deps, mypy overrides, marker | pip install succeeds |
+| 5 | 1 | Extend BrokerInterface with 5 new abstract methods | ruff + mypy pass |
+| 6 | 10 | Extend audit.py with 7 new broker event type constants | Import test |
+| 7 | 11 | Extend kill_switch.py with activate_all_brokers_down() | Unit test |
+| 8 | 9 | Extend metrics/collector.py with 5 new Prometheus metrics | Import + metric tests |
+| 9 | 3 | Create AngelBroker in src/brokers/angel.py | ruff + mypy + bandit + unit tests |
+| 10 | 4 | Create DhanBroker in src/brokers/dhan.py | ruff + mypy + bandit + unit tests |
+| 11 | 8 | Create BrokerReconciler in src/brokers/reconciler.py | ruff + mypy + unit tests |
+| 12 | 5 | Create BrokerRouter in src/brokers/router.py | ruff + mypy + unit tests |
+| 13 | 6 | Create BrokerHealthMonitor in src/brokers/health_monitor.py | ruff + mypy + unit tests |
+| 14 | 7 | Create BrokerFailoverManager in src/brokers/failover_manager.py | ruff + mypy + unit tests |
+| 15 | 14 | Create MultiBrokerPreOpenChecklist in src/brokers/pre_open.py | ruff + mypy + unit tests |
+| 16 | 15 | Create BrokerFactory + MultiBrokerSystem in src/brokers/factory.py | ruff + mypy + unit tests |
+| 17 | 12 | Update src/brokers/__init__.py with all public exports | Import test |
+| 18 | 17 | Create all test files in tests/brokers/ | All pytest pass |
+| 19 | 17.2 | Extend tests/conftest.py with broker fixtures | Fixtures load |
+| 20 | 16 | Extend Telegram control with broker commands (deferred to Ph14 telegram_control.py integration) | Command tests |
+| 21 | 18 | Run FULL verification pipeline (ruff -> mypy -> bandit -> gitleaks -> pip-audit -> trivy -> vulture -> pytest -> coverage -> hypothesis -> benchmark -> xdist -> regression) | ALL ZERO |
+
+================================================================================
+RISK REGISTER — PHASE 16
+================================================================================
+
+| # | Risk | Impact | Likelihood | Mitigation |
+|---|------|--------|------------|------------|
+| 1 | Angel One SmartAPI SDK instability | HIGH | MEDIUM | Independent circuit breaker per broker; failover to next broker; monitor SDK GitHub issues |
+| 2 | Dhan API deprecation or breaking changes | MEDIUM | LOW | Pin SDK version; abstract behind BrokerInterface; health monitor detects API changes |
+| 3 | Both Zerodha + Angel One down simultaneously | CRITICAL | LOW | ALL_BROKERS_DOWN kill switch; Dhan as last resort for NSE; human intervention required |
+| 4 | Position reconciliation mismatch during failover | CRITICAL | MEDIUM | PAUSE on mismatch; human review; Rs 500 tolerance; audit trail of all positions |
+| 5 | TOTP automation failure at 6 AM re-auth | HIGH | MEDIUM | Retry 3 times; if fails, mark broker UNHEALTHY; alert human; use fallback broker |
+| 6 | Race condition during failover (orders in-flight) | HIGH | MEDIUM | OrderIdempotencyGuard; block new orders during failover; cancel pending orders on primary |
+| 7 | API rate limit exhaustion across brokers | MEDIUM | MEDIUM | Per-broker rate limiters; combined OPS check; adaptive health check intervals |
+| 8 | Split-brain (two brokers both think they're active) | CRITICAL | LOW | STICKY failover; single active broker per segment; state machine enforces ONE active |
+| 9 | Dhan higher latency causes order misses | MEDIUM | HIGH | Dhan is LAST RESORT only; latency warning if > 300ms; timeout on all API calls |
+| 10 | Angel One MCX WebSocket requires paid subscription | LOW | CERTAIN | Fall back to REST-polling for MCX data; health check reports ws_connected=False for MCX |
+
+================================================================================
+DEPENDENCY MAP — CRITICAL PATH
+================================================================================
+
+```
+Step 2 (Settings)
+    |
+    +---> Step 1 (BrokerInterface extend)
+    |       |
+    |       +---> Step 3 (AngelBroker) ---+--> Step 5 (BrokerRouter)
+    |       |                              |
+    |       +---> Step 4 (DhanBroker) -----+
+    |                                      |
+    +---> Step 9 (Metrics) ----------------+
+    |                                      |
+    +---> Step 8 (Reconciler) ------------+
+    |                                      |
+    +---> Step 6 (HealthMonitor) ---------+
+                                           |
+                              Step 7 (FailoverManager)
+                                           |
+                              Step 14 (PreOpenChecklist)
+                                           |
+                              Step 15 (Factory + System)
+                                           |
+                              Step 12 (Package exports)
+                                           |
+                              Step 17 (Test suite)
+                                           |
+                              Step 18 (Full verification)
+```
+
+================================================================================
+REFERENCE SUMMARY
+================================================================================
+
+### Books:
+1. Kleppmann "Designing Data-Intensive Applications" Ch.5-8
+2. Nygard "Release It!" Ch.5-7
+3. Bass et al. "Software Architecture in Practice" Ch.4-6
+4. Hohpe & Woolf "Enterprise Integration Patterns" Ch.4-6
+5. Richards & Ford "Fundamentals of Software Architecture" Ch.11
+6. Seth et al. "Algorithmic Trading and DMA" Ch.6-7
+
+### Standards:
+1. SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013 (algo framework)
+2. ISO 20022 (financial messaging)
+3. FIX 5.0 SP2 (order routing protocol)
+4. MiFID II Art.17 + Art.25 + RTS 6
+5. ISO 27001 A.8.20 (networks security)
+6. NIST SP 800-61 Rev.2 (incident handling)
+7. NIST DE.CM-6 (external service monitoring)
+8. SOC 2 CC.A1 (availability)
+
+### Testing & Security Stack:
+- pytest + pytest-cov + coverage + ruff + mypy + bandit
+- pip-audit + gitleaks + hypothesis + pytest-benchmark
+- pytest-xdist + pytest-asyncio + cyclonedx-bom + trivy + locust
+
+================================================================================
+END OF PHASE 16 PLAN
+================================================================================

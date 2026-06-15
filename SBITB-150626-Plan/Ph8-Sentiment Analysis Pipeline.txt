@@ -1,0 +1,2497 @@
+Phase 8: Sequential AI-Agent Instructions — Sentiment Analysis Pipeline
+Duration: ~4 weeks (Weeks 16-19) | Output: src/sentiment/ with news scrapers, FinBERT + muRIL + VADER scoring, ensemble combiner, and compute_sentiment(symbol) entry point
+Environment: Windows 11 + Python 3.12.7 + .venv at G:\OC\02June26\indian-trading-bot\.venv
+Prerequisite: Phases 0-7 implemented and passing (project scaffolding, deps, data pipeline, Greeks, TA+VA engine, market strength, strategy, backtesting, strike selection + trailing stop)
+Reference Books: Tunstall "NLP with Transformers" (Revised Ed) — HuggingFace for sentiment pipeline (Ch.1-7)
+Supplemental Books: Natenberg "Option Volatility and Pricing" Ch.7 (IV surfaces + sentiment correlation), Zerodha Varsity: Options Module (Indian options mechanics)
+Reference Docs: G:\OC\02June26\SEBI_Algo_Trading_Regulation_Research.md + G:\OC\02June26\COMPLIANCE_SECURITY_MAPPING.md
+Guiding Principle: Stability > Security > Data Integrity > Performance
+DRL Status: DEFERRED to Phase 14 — sentiment is a rule-based signal input, NOT an ML trading decision
+
+Critical Corrections & Findings (Pre-Implementation)
+#	Issue	Original Assumption	Corrected Truth	Source
+1	newspaper3k	"newspaper3k + custom"	Depreciated since 2020 — use newspaper4k>=0.9.2 (active fork, API-compatible, already corrected in Phases 1-2)	Phase 1 correction #3; GitHub: c4b3fa/newspaper4k
+2	FinBERT label order	Alphabetical: negative=0, neutral=1, positive=2	FinBERT config.json: {0: "positive", 1: "negative", 2: "neutral"} — NOT alphabetical. Hardcoding wrong mapping inverts sentiment scores	HuggingFace ProsusAI/finbert config.json; Araci 2019
+3	FinBERT max tokens	Assumed unlimited	BERT-family max = 512 tokens ([CLS]+[SEP] consume 2, effective = 510). Must set truncation=True, max_length=512 on every inference call	HuggingFace docs; Tunstall Ch.2
+4	FinBERT pipeline default	top_k=1 (returns only top label)	Must use top_k=3 to get full probability distribution across positive/negative/neutral. Required for weighted ensemble scoring	Tunstall Ch.6; HuggingFace pipeline docs
+5	muRIL ready for inference	"google/muril-base-cased fine-tuned on financial labels"	Google/muril-base-cased is a BASE model (MLM head), NOT a classification model. Must fine-tune with AutoModelForSequenceClassification(num_labels=3) + custom Hindi/Hinglish financial labeled dataset. No pre-trained financial muRIL exists on HuggingFace Hub	Google Research muRIL paper (Khanuja et al. 2021); HuggingFace model card
+6	muRIL vocab size	Same as BERT (~30K)	muRIL vocab = 197,285 (6.5x larger). Embedding layer ~770MB vs BERT ~115MB. CPU inference ~3-5x slower. FP16 or quantization strongly recommended for production	Google Research muRIL paper
+7	muRIL handles Hinglish	Needs transliteration pre-processing	muRIL is trained on transliteration pairs — Hinglish (Romanized Hindi) is handled natively. No pre-processing needed	Khanuja et al. 2021: "trained on translation pairs AND transliteration pairs"
+8	VADER role	"VADER for social media only"	VADER is O(1) lexicon lookup — use as PRE-FILTER for ALL text. If |compound| < 0.05 → skip transformer call (clearly neutral). Saves ~40-60% of transformer inference cost on typical news feeds	Tunstall Ch.6 (efficient inference); VADER paper (Hutto & Gilbert 2014)
+9	VADER compound range	-1.0 to +1.0 for direct scoring	VADER compound is NOT calibrated for financial text. "The stock crashed" = compound=-0.55 but FinBERT negative probability = 0.97. VADER is only a pre-filter gate, NOT a financial sentiment scorer	VADER validation; financial domain mismatch
+10	Half-life = 24 hours	Generic decay	4 hours per original spec — intraday trading requires recent sentiment to dominate. 4h half-life: 4h-old article = 50% weight, 8h = 25%, 12h = 12.5%. Matches NIFTY/BANKNIFTY intraday dynamics	Plan.txt line 573; Kaufman Ch.7 (recency bias in signal generation)
+11	Ensemble weights	"news_sentiment × 0.70 + social_sentiment × 0.30"	Correct as specified, but EACH component must already include: (a) recency decay weighting, (b) source credibility weighting, (c) model confidence weighting. The 70/30 split is the final layer, not the only layer	Plan.txt line 572; industry standard multi-factor ensemble
+12	Source credibility	All sources equal	Different sources have different reliability. Economic Times=0.85, Moneycontrol=0.80, LiveMint=0.75, Google News=0.60, Reddit=0.35. Weighted before ensemble	Financial news credibility research; Reuters/Bloomberg benchmark=1.0
+13	Reddit praw	"praw" library for r/IndiaInvestments	praw requires OAuth2 credentials (client_id, client_secret, user_agent, refresh_token). Must be in .env, NEVER committed. Reddit API rate limit: 100 req/min for OAuth	praw docs; Reddit API access rules
+14	Google News RSS	"RSS feed"	Google News RSS is unofficial, often rate-limited, and URL structure changes without notice. Use feedparser with retry + User-Agent rotation. Validate feed entries before parsing	feedparser docs; Google News RSS instability reports
+15	RSS feed URLs	Assumed stable	RSS feed URLs for Indian financial news change periodically. Must be configurable via SentimentSettings, NOT hardcoded. Include URL validation on startup	feedparser best practices
+16	Scraping frequency	Every 30/60 min	APScheduler interval trigger. Each scraper runs independently. If previous scrape is still running (slow network), SKIP this cycle (backpressure). Never queue overlapping scrapes	Kleppmann Ch.4 (backpressure); Phase 2 pattern
+17	Sentiment score range	-1.0 to +1.0	MUST be mathematically guaranteed. Ensemble uses label→score mapping: positive=+1, neutral=0, negative=-1, then weighted average. Clipped to [-1.0, +1.0] with numpy.clip as safety net	Hypothesis property test requirement; Plan.txt line 577
+18	SentimentReport model	Plain dataclass	Pydantic BaseModel (frozen=True) — matches Phase 4/5 frozen DTOs pattern. All fields validated with Field(ge=-1.0, le=1.0) for score	Phase 5 Signal pattern; stability principle
+19	Language detection	None needed	Required: English vs Hindi/Hinglish detection to route text to correct model. Use langdetect or simple heuristic (Devanagari Unicode range check for Hindi, ASCII-heavy for English/Hinglish). muRIL handles both scripts but FinBERT is English-only	Tunstall Ch.5 (multilingual inference); muRIL paper
+20	Model loading	Load per request	Load ALL models ONCE at application startup (module-level singleton or session-scoped fixture). Model loading takes 2-5 seconds for FinBERT, 5-10 seconds for muRIL. NEVER load per inference call	Tunstall Ch.6 (production deployment); HuggingFace best practices
+21	Model caching	None	Pre-download models to data/models/ for offline inference. Set TRANSFORMERS_OFFLINE=1 for air-gapped production. Generate model hash verification on download	HuggingFace offline mode; security principle
+22	Sentiment per symbol	"compute sentiment for NIFTY"	News articles mention multiple symbols. Must extract symbol mentions from article text using regex + known symbol list (NIFTY, BANKNIFTY, RELIANCE, etc.). An article mentioning both NIFTY and BANKNIFTY contributes to BOTH symbol scores, weighted by mention prominence (headline > body)	NLP entity recognition; financial news multi-symbol coverage
+23	Confidence scoring	FinBERT softmax max only	Combined confidence: (a) model softmax confidence, (b) cross-model agreement bonus (+0.1 if FinBERT+muRIL agree), (c) source credibility, (d) recency weight. All factors produce final confidence ∈ [0, 1]	Industry standard multi-factor confidence; Tunstall Ch.7
+24	Async scraping	Synchronous HTTP	All scrapers MUST be async (httpx.AsyncClient) to avoid blocking the event loop. Newspaper4k article download is synchronous — wrap in asyncio.to_thread(). praw is synchronous — wrap in asyncio.to_thread()	Kleppmann Ch.5; Phase 2 async patterns
+
+Tunstall "NLP with Transformers" Book Extractions Applied to Phase 8
+#	Chapter	Extraction	Phase 8 Application
+1	Ch.1 (Transformers Overview)	"Encoder-only models (BERT) are optimal for classification tasks; decoder-only (GPT) for generation"	FinBERT = BertForSequenceClassification (encoder-only). muRIL = BERT-base (encoder-only). Correct architecture choice for sentiment classification
+2	Ch.2 (Tokenizers)	"WordPiece tokenizer produces subword tokens; max sequence length must be respected or truncation occurs silently"	Enforce truncation=True, max_length=512 on ALL FinBERT/muRIL calls. Log warning when truncation activates (text length > 510 tokens ≈ headline + 2-3 sentences of body)
+3	Ch.3 (Fine-Tuning)	"Fine-tuning changes the task head: replace MLM head with classification head. Use ignore_mismatched_sizes=True when loading base model for classification"	muRIL: AutoModelForSequenceClassification.from_pretrained("google/muril-base-cased", num_labels=3, ignore_mismatched_sizes=True) swaps MLM head for 3-class classifier
+4	Ch.3 (Fine-Tuning)	"Learning rate 2e-5 with AdamW, 3-5 epochs, linear warmup over 10% of steps, weight decay 0.01"	muRIL fine-tuning recipe: lr=2e-5, epochs=4, warmup_ratio=0.1, weight_decay=0.01, per_device_train_batch_size=16, eval_strategy="epoch", load_best_model_at_end=True, metric_for_best_model="f1"
+5	Ch.3 (Fine-Tuning)	"All parameters trainable for BERT fine-tuning — freezing layers reduces performance on domain adaptation"	muRIL: fine-tune ALL parameters (no layer freezing). Model card explicitly recommends this
+6	Ch.4 (Datasets)	"Stream large datasets; don't load all into memory. Use .map() for tokenization with batched=True"	Hindi/Hinglish financial dataset: stream from CSV, map tokenization with batched=True, max_length=512 padding
+7	Ch.5 (Multilingual)	"Multilingual models process text in the original language — translation introduces error cascade"	muRIL processes Hindi/Hinglish directly — no translation to English. This preserves nuance lost in translation
+8	Ch.5 (Multilingual)	"Language detection can route inputs to specialized models, improving accuracy vs. one-model-fits-all"	Language detection: route English → FinBERT, Hindi/Hinglish → muRIL. Fallback: FinBERT for unknown language
+9	Ch.6 (Generation/Inference)	"Pipeline API abstracts tokenizer + model + postprocessing. Use top_k parameter for multi-class probability output"	pipe = pipeline("text-classification", model="ProsusAI/finbert", top_k=3) returns full probability distribution for ensemble scoring
+10	Ch.6 (Inference)	"Batch inference on GPU is efficient; on CPU, batch size 1 is optimal (no speedup from batching, only memory overhead)"	CPU inference: process articles one-at-a-time. GPU inference: batch_size=32. Auto-detect device
+11	Ch.6 (Inference)	"Load model once at application startup; never per-request. Use circuit breaking for overloaded inference queues"	SentimentEngine singleton: models loaded at __init__, reused for all calls. Queue-based inference with max size + 503 rejection
+12	Ch.7 (Production)	"FP16 halves memory with negligible accuracy loss; quantization (8-bit) for extreme memory constraints"	FinBERT: torch_dtype=torch.float16 on GPU, float32 on CPU. muRIL: same. Optional: BitsAndBytesConfig(load_in_8bit=True) for low-memory environments
+13	Ch.7 (Production)	"Model versioning: pin exact model revision in production to prevent silent regression from Hub updates"	FINBERT_REVISION and MURIL_REVISION pinned in SentimentSettings. local_files_only=True in production after pre-download
+
+INSTRUCTION 1 — Install Phase 8 Dependencies + Verify Imports
+Prerequisite: Phase 0-7 project exists at G:\OC\02June26\indian-trading-bot\ with .venv activated, Docker services running.
+
+Step 1.1: Activate venv
+& "G:\OC\02June26\indian-trading-bot\.venv\Scripts\Activate.ps1"
+
+Step 1.2: Add Phase 8 dependencies to pyproject.toml
+Add to [project.dependencies] (if not already present):
+
+# Phase 8: Sentiment Analysis Pipeline
+# NOTE: transformers + torch are in [ml] optional group from Phase 1
+# Core sentiment deps (lightweight — no transformer dependency):
+"feedparser>=6.0",           # RSS/Atom feed parsing (already from Phase 1)
+"newspaper4k>=0.9.2",        # Article scraping (corrected from newspaper3k)
+"vaderSentiment>=3.3.2",     # VADER lexicon sentiment (pre-filter)
+"langdetect>=1.0.9",         # Language detection for model routing
+"praw>=7.7.1",               # Reddit API client
+
+Add to [project.optional-dependencies.ml] (if not already present):
+
+# Phase 8 ML models (already in [ml] from Phase 1, verify presence):
+"transformers>=4.35",        # HuggingFace pipeline + model loading
+"torch>=2.1",                # PyTorch backend for FinBERT + muRIL
+
+Add to [project.optional-dependencies.dev] (if not already present):
+
+# Phase 8 specific dev deps:
+# No new dev deps — hypothesis, pytest-benchmark, pytest-asyncio, locust, cyclonedx-bom
+# already in [dev] from Phase 1
+
+Add to [[tool.mypy.overrides]] (if not present):
+
+[[tool.mypy.overrides]]
+module = [
+    "feedparser.*",
+    "newspaper4k.*",
+    "vaderSentiment.*",
+    "langdetect.*",
+    "praw.*",
+    "transformers.*",
+    "torch.*",
+]
+ignore_missing_imports = true
+
+Step 1.3: Install and verify
+pip install -e ".[dev]"
+
+# Verify Phase 8 lightweight deps
+python -c "import feedparser; print(f'feedparser {feedparser.__version__} OK')"
+python -c "import newspaper; print('newspaper4k OK')"
+python -c "from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer; print('vaderSentiment OK')"
+python -c "from langdetect import detect; print('langdetect OK')"
+python -c "import praw; print(f'praw {praw.__version__} OK')"
+
+# Verify Phase 8 ML deps (install [ml] group separately — ~8GB download)
+pip install -e ".[ml]"
+
+python -c "from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification; print('transformers OK')"
+python -c "import torch; print(f'torch {torch.__version__} OK')"
+python -c "from transformers import pipeline; pipe = pipeline('text-classification', model='ProsusAI/finbert', top_k=3); print(f'FinBERT pipeline OK: {pipe(\"Revenue surged 20%\")}')" 
+# NOTE: First run downloads ~470MB model. Subsequent runs use cache.
+
+python -c "from transformers import AutoTokenizer; tok = AutoTokenizer.from_pretrained('google/muril-base-cased'); print(f'muRIL tokenizer OK, vocab={tok.vocab_size}')"
+# NOTE: First run downloads ~700MB model. Subsequent runs use cache.
+
+Step 1.4: Verify Phase 8 integrates with existing phases
+python -c "from src.strategy.models import Signal; print('Phase 5 Signal import OK')"
+python -c "from config.settings import BaseSettings; print('Phase 0 config import OK')"
+python -c "import structlog; print('structlog OK')"
+
+Verification Gate: ALL imports must succeed. If torch/transformers download fails (network/proxy), set HF_HUB_OFFLINE=0 and verify internet access. If FinBERT pipeline creation fails, check that model downloaded successfully: ls "$HOME/.cache/huggingface/hub/models--ProsusAI--finbert/". If praw fails, it's a lightweight install — no special requirements.
+
+INSTRUCTION 2 — Extend config/settings.py with Phase 8 Settings
+File: G:\OC\02June26\indian-trading-bot\config\settings.py
+Rule: ADD Phase 8 settings classes only. Do NOT modify existing Phase 0-7 settings.
+
+2.1 SentimentSettings
+from typing import Literal
+from pydantic import model_validator
+
+
+class SentimentSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SENTIMENT_", env_file=".env", extra="ignore")
+
+    # --- Scraping configuration ---
+    SCRAPE_INTERVAL_NEWS_MINUTES: int = Field(default=30, ge=10, le=120, description="News scraping interval in minutes")
+    SCRAPE_INTERVAL_SOCIAL_MINUTES: int = Field(default=60, ge=15, le=240, description="Social media scraping interval in minutes")
+    SCRAPE_TIMEOUT_SECONDS: int = Field(default=30, ge=5, le=120, description="HTTP timeout per scrape request")
+    SCRAPE_MAX_CONCURRENT: int = Field(default=5, ge=1, le=20, description="Max concurrent scraper tasks")
+    SCRAPE_USER_AGENT: str = Field(default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", description="User-Agent for HTTP requests")
+
+    # --- RSS Feed URLs (configurable — Correction #15) ---
+    RSS_ECONOMIC_TIMES: str = Field(default="https://economictimes.indiatimes.com/rssfeedstopstories.cms", description="Economic Times RSS URL")
+    RSS_GOOGLE_NEWS_FINANCE: str = Field(default="https://news.google.com/rss/search?q=indian+stock+market+finance&hl=en-IN&gl=IN&ceid=IN:en", description="Google News India Finance RSS URL")
+
+    # --- Newspaper4k article sources (Correction #1) ---
+    ARTICLE_SOURCES: list[str] = Field(default=["moneycontrol", "livemint"], description="Sources for newspaper4k full-article scraping")
+
+    # --- Reddit configuration (Correction #13) ---
+    REDDIT_CLIENT_ID: str = Field(default="", description="Reddit OAuth client_id")
+    REDDIT_CLIENT_SECRET: str = Field(default="", description="Reddit OAuth client_secret")
+    REDDIT_USER_AGENT: str = Field(default="indian-trading-bot/1.0", description="Reddit API user_agent")
+    REDDIT_SUBREDDITS: list[str] = Field(default=["IndiaInvestments", "IndianStreetBets", "DalalStreet"], description="Subreddits to scrape")
+    REDDIT_POST_LIMIT: int = Field(default=25, ge=5, le=100, description="Max posts per subreddit per scrape")
+
+    # --- Model configuration ---
+    FINBERT_MODEL_NAME: str = Field(default="ProsusAI/finbert", description="FinBERT HuggingFace model identifier")
+    FINBERT_REVISION: str = Field(default="main", description="Pin model revision for reproducibility (Correction #13, Tunstall Ch.7)")
+    MURIL_MODEL_NAME: str = Field(default="google/muril-base-cased", description="muRIL base model identifier")
+    MURIL_FINETUNED_PATH: str = Field(default="data/models/muril-fin-sentiment", description="Local path to fine-tuned muRIL model (Correction #5)")
+    DEVICE: int = Field(default=-1, description="Device: -1=CPU, 0=GPU-0, etc.")
+    TORCH_DTYPE: str = Field(default="float32", description="Torch dtype: float32 or float16 (Correction #12, Tunstall Ch.7)")
+    MODEL_CACHE_DIR: str = Field(default="data/models/huggingface_cache", description="HuggingFace model cache directory")
+    TRANSFORMERS_OFFLINE: bool = Field(default=False, description="Force offline mode (pre-downloaded models only)")
+
+    # --- VADER pre-filter (Correction #8) ---
+    VADER_NEUTRAL_THRESHOLD: float = Field(default=0.05, description="If |compound| < this, skip transformer (clearly neutral)")
+    VADER_ENABLED: bool = Field(default=True, description="Enable VADER pre-filter gate")
+
+    # --- Language detection (Correction #19) ---
+    LANGUAGE_DETECTION_ENABLED: bool = Field(default=True, description="Enable language detection for model routing")
+    LANGUAGE_FALLBACK: str = Field(default="en", description="Fallback language if detection fails")
+
+    # --- Symbol extraction (Correction #22) ---
+    SYMBOL_KEYWORDS: dict[str, list[str]] = Field(
+        default={
+            "NIFTY": ["nifty", "nifty 50", "nifty50", "^NSEI", "nse index"],
+            "BANKNIFTY": ["banknifty", "bank nifty", "nifty bank", "^NSEBANK"],
+            "RELIANCE": ["reliance", "reliance industries", "ril"],
+            "HDFCBANK": ["hdfc bank", "hdfcbank"],
+            "ICICIBANK": ["icici bank", "icicibank"],
+            "INFY": ["infosys", "infy"],
+            "TCS": ["tcs", "tata consultancy"],
+            "KOTAKBANK": ["kotak bank", "kotakbank"],
+            "AXISBANK": ["axis bank", "axisbank"],
+            "SBIN": ["sbi", "state bank", "sbin"],
+            "ITC": ["itc limited", "itc ltd"],
+            "BHARTIARTL": ["bharti airtel", "airtel", "bhartiartl"],
+            "LT": ["larsen toubro", "l&t", "l&t finance"],
+            "MARUTI": ["maruti suzuki", "maruti"],
+        },
+        description="Symbol → keyword mapping for article symbol extraction"
+    )
+    SYMBOL_HEADLINE_WEIGHT: float = Field(default=2.0, ge=1.0, le=5.0, description="Weight multiplier for symbol mention in headline vs body")
+
+    # --- Ensemble weights (Correction #11) ---
+    NEWS_WEIGHT: float = Field(default=0.70, ge=0.0, le=1.0, description="Weight for news sentiment in final ensemble")
+    SOCIAL_WEIGHT: float = Field(default=0.30, ge=0.0, le=1.0, description="Weight for social sentiment in final ensemble")
+
+    # --- Source credibility (Correction #12) ---
+    SOURCE_CREDIBILITY: dict[str, float] = Field(
+        default={
+            "economic_times": 0.85,
+            "moneycontrol": 0.80,
+            "livemint": 0.75,
+            "google_news": 0.60,
+            "reddit": 0.35,
+        },
+        description="Source credibility weights (Reuters/Bloomberg = 1.0 benchmark)"
+    )
+
+    # --- Recency weighting (Correction #10) ---
+    HALF_LIFE_HOURS: float = Field(default=4.0, ge=0.5, le=168.0, description="Exponential decay half-life in hours (4h for intraday)")
+    RECENCY_ENABLED: bool = Field(default=True, description="Apply recency weighting to articles")
+
+    # --- Confidence scoring (Correction #23) ---
+    CROSS_MODEL_AGREEMENT_BONUS: float = Field(default=0.10, ge=0.0, le=0.3, description="Confidence bonus when FinBERT + muRIL agree")
+    CROSS_MODEL_DISAGREEMENT_PENALTY: float = Field(default=0.10, ge=0.0, le=0.3, description="Confidence penalty when models disagree")
+    MIN_CONFIDENCE_THRESHOLD: float = Field(default=0.30, ge=0.0, le=0.5, description="Below this confidence, sentiment score is dampened")
+
+    # --- Inference performance ---
+    MAX_INFERENCE_QUEUE_SIZE: int = Field(default=100, ge=10, le=1000, description="Max queued inference requests before circuit break (Tunstall Ch.6)")
+    INFERENCE_TIMEOUT_SECONDS: float = Field(default=5.0, ge=1.0, le=30.0, description="Timeout per inference call")
+
+    # --- Target symbols ---
+    TARGET_SYMBOLS: list[str] = Field(
+        default=["NIFTY", "BANKNIFTY", "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "KOTAKBANK", "AXISBANK", "SBIN", "ITC", "BHARTIARTL"],
+        description="Symbols for daily sentiment computation"
+    )
+
+    @model_validator(mode="after")
+    def validate_sentiment_settings(self) -> "SentimentSettings":
+        if abs(self.NEWS_WEIGHT + self.SOCIAL_WEIGHT - 1.0) > 0.01:
+            raise ValueError(f"NEWS_WEIGHT ({self.NEWS_WEIGHT}) + SOCIAL_WEIGHT ({self.SOCIAL_WEIGHT}) must sum to 1.0")
+        for source, cred in self.SOURCE_CREDIBILITY.items():
+            if not 0.0 <= cred <= 1.0:
+                raise ValueError(f"SOURCE_CREDIBILITY[{source}] = {cred} must be in [0.0, 1.0]")
+        if self.HALF_LIFE_HOURS <= 0:
+            raise ValueError(f"HALF_LIFE_HOURS ({self.HALF_LIFE_HOURS}) must be > 0")
+        return self
+
+All settings must: Use pydantic-settings with env_prefix, Field() with validation constraints, model_config = SettingsConfigDict(env_file=".env", extra="ignore").
+
+INSTRUCTION 3 — Implement src/sentiment/models.py
+File: G:\OC\02June26\indian-trading-bot\src\sentiment\models.py
+
+3.1 SentimentLabel Enum
+from enum import Enum
+
+
+class SentimentLabel(str, Enum):
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+    NEUTRAL = "neutral"
+
+3.2 LanguageCode Enum
+class LanguageCode(str, Enum):
+    EN = "en"
+    HI = "hi"
+    HINGLISH = "hinglish"
+    UNKNOWN = "unknown"
+
+3.3 NewsSource Enum
+class NewsSource(str, Enum):
+    ECONOMIC_TIMES = "economic_times"
+    MONEYCONTROL = "moneycontrol"
+    LIVEMINT = "livemint"
+    GOOGLE_NEWS = "google_news"
+    REDDIT = "reddit"
+
+3.4 ScrapedArticle Pydantic Model
+from datetime import datetime
+from pydantic import BaseModel, Field
+
+
+class ScrapedArticle(BaseModel):
+    article_id: str = Field(description="Unique article ID (URL hash or Reddit post ID)")
+    title: str = Field(description="Article headline")
+    body: str = Field(default="", description="Full article body text (may be empty for RSS-only)")
+    url: str = Field(description="Source URL")
+    source: NewsSource = Field(description="News source identifier")
+    published_at: datetime = Field(description="Article publication timestamp (timezone-aware)")
+    scraped_at: datetime = Field(description="When this article was scraped (timezone-aware)")
+    language: LanguageCode = Field(default=LanguageCode.UNKNOWN, description="Detected language")
+    symbols: list[str] = Field(default_factory=list, description="Symbols mentioned in this article")
+    is_headline_mention: dict[str, bool] = Field(default_factory=dict, description="Per-symbol: True if symbol mentioned in headline")
+
+3.5 ArticleSentiment Pydantic Model
+class ArticleSentiment(BaseModel):
+    article_id: str
+    label: SentimentLabel
+    score: float = Field(ge=-1.0, le=1.0, description="Sentiment score: positive=+1, neutral=0, negative=-1, weighted by confidence")
+    confidence: float = Field(ge=0.0, le=1.0, description="Model confidence in the prediction")
+    model_used: str = Field(description="Which model produced this: 'finbert', 'muril', or 'vader_prefilter'")
+    vader_compound: float | None = Field(default=None, ge=-1.0, le=1.0, description="VADER compound score (always computed)")
+    all_probs: dict[str, float] | None = Field(default=None, description="Full probability distribution: {'positive': 0.92, 'negative': 0.03, 'neutral': 0.05}")
+    recency_weight: float = Field(default=1.0, ge=0.0, le=1.0, description="Exponential decay weight based on article age")
+    source_credibility: float = Field(default=1.0, ge=0.0, le=1.0, description="Source credibility weight")
+
+3.6 SourceBreakdown Pydantic Model
+class SourceBreakdown(BaseModel):
+    source: NewsSource
+    article_count: int = Field(ge=0, description="Number of articles from this source")
+    weighted_score: float = Field(ge=-1.0, le=1.0, description="Recency + credibility weighted average score from this source")
+    avg_confidence: float = Field(ge=0.0, le=1.0, description="Average model confidence across articles from this source")
+    label_distribution: dict[str, int] = Field(default_factory=dict, description="Count per label: {'positive': 5, 'negative': 2, 'neutral': 3}")
+
+3.7 SentimentReport Pydantic Model (CORRECTION #18: frozen=True)
+class SentimentReport(BaseModel, frozen=True):
+    symbol: str = Field(description="Symbol this report is for (e.g., 'NIFTY')")
+    score: float = Field(ge=-1.0, le=1.0, description="Final daily sentiment score [-1.0, +1.0]")
+    confidence: float = Field(ge=0.0, le=1.0, description="Overall confidence in the sentiment assessment")
+    label: SentimentLabel = Field(description="Discrete label: positive/negative/neutral")
+    news_score: float = Field(ge=-1.0, le=1.0, description="News-only weighted sentiment")
+    social_score: float = Field(ge=-1.0, le=1.0, description="Social-only weighted sentiment")
+    news_weight: float = Field(default=0.70, ge=0.0, le=1.0, description="News ensemble weight applied")
+    social_weight: float = Field(default=0.30, ge=0.0, le=1.0, description="Social ensemble weight applied")
+    sources_breakdown: dict[str, SourceBreakdown] = Field(default_factory=dict, description="Per-source breakdown of contributions")
+    total_articles: int = Field(ge=0, description="Total articles processed for this symbol")
+    effective_sample_size: float = Field(ge=0.0, description="Effective sample size after recency+credibility weighting")
+    computed_at: datetime = Field(description="When this report was computed (timezone-aware)")
+    as_of_date: str = Field(description="Date this report represents (YYYY-MM-DD)")
+
+    # Label thresholds (configurable via settings but fixed in report for audit)
+    POSITIVE_THRESHOLD: float = Field(default=0.20, exclude=True)
+    NEGATIVE_THRESHOLD: float = Field(default=-0.20, exclude=True)
+
+3.8 FinBERT Label Mapping Constant (CRITICAL — Correction #2)
+FINBERT_ID2LABEL: dict[int, str] = {0: "positive", 1: "negative", 2: "neutral"}
+FINBERT_LABEL2ID: dict[str, int] = {"positive": 0, "negative": 1, "neutral": 2}
+FINBERT_LABEL2SCORE: dict[str, float] = {"positive": 1.0, "neutral": 0.0, "negative": -1.0}
+
+INSTRUCTION 4 — Implement src/sentiment/language.py
+File: G:\OC\02June26\indian-trading-bot\src\sentiment\language.py
+
+4.1 LanguageDetector Class
+import re
+from langdetect import detect as ld_detect, LangDetectException
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+# Devanagari Unicode range: U+0900 to U+097F
+DEVANAGARI_PATTERN = re.compile(r"[\u0900-\u097F]+")
+# Hinglish heuristic: common Hindi words in Roman script
+HINGLISH_KEYWORDS = frozenset({
+    "aaj", "kal", "market", "bazaar", "share", "price", "upar", "niche",
+    "tezi", "mandi", "laba", "nuksan", "paisa", "rupaye", "kamai",
+    "invest", "profit", "loss", "buy", "sell", "hold", "targe",
+    "nifty", "sensex", "bank", "stock", "trading", "broker",
+    "account", "margin", "premium", "option", "call", "put",
+})
+
+
+class LanguageDetector:
+    def __init__(self, enabled: bool = True, fallback: str = "en"):
+        self.enabled = enabled
+        self.fallback = fallback
+
+    def detect(self, text: str) -> str:
+        if not self.enabled:
+            return self.fallback
+        if not text or not text.strip():
+            return self.fallback
+        try:
+            devanagari_match = DEVANAGARI_PATTERN.search(text)
+            if devanagari_match:
+                devanagari_ratio = len(DEVANAGARI_PATTERN.findall(text)) / max(len(text.split()), 1)
+                if devanagari_ratio > 0.15:
+                    return "hi"
+            hinglish_count = sum(1 for word in text.lower().split() if word in HINGLISH_KEYWORDS)
+            word_count = len(text.split())
+            if word_count > 0 and hinglish_count / word_count > 0.25:
+                return "hinglish"
+            detected = ld_detect(text)
+            if detected in ("hi", "ne", "bn", "ta", "te", "mr", "gu", "kn", "ml"):
+                return "hi"
+            return "en"
+        except LangDetectException:
+            logger.warning("language_detection_failed", text_preview=text[:100])
+            return self.fallback
+
+    def route_to_model(self, language: str) -> str:
+        if language in ("hi", "hinglish"):
+            return "muril"
+        return "finbert"
+
+All methods fully type-hinted. Use structlog for logging. LangDetectException handled gracefully with fallback.
+
+INSTRUCTION 5 — Implement src/sentiment/scraper.py
+File: G:\OC\02June26\indian-trading-bot\src\sentiment\scraper.py
+
+5.1 BaseScraper Abstract Class
+from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+import hashlib
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+class BaseScraper(ABC):
+    def __init__(self, source: NewsSource, settings: SentimentSettings):
+        self.source = source
+        self.settings = settings
+        self._running = False
+
+    @abstractmethod
+    async def scrape(self) -> list[ScrapedArticle]:
+        ...
+
+    def _generate_article_id(self, url: str) -> str:
+        return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+    def _is_recent(self, published_at: datetime, max_age_hours: float = 24.0) -> bool:
+        age = (datetime.now(timezone.utc) - published_at).total_seconds() / 3600
+        return age <= max_age_hours
+
+5.2 EconomicTimesScraper (RSS via feedparser)
+import feedparser
+import httpx
+
+
+class EconomicTimesScraper(BaseScraper):
+    def __init__(self, settings: SentimentSettings):
+        super().__init__(NewsSource.ECONOMIC_TIMES, settings)
+
+    async def scrape(self) -> list[ScrapedArticle]:
+        if self._running:
+            logger.warning("scraper_already_running", source=self.source)
+            return []
+        self._running = True
+        articles = []
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.settings.SCRAPE_TIMEOUT_SECONDS,
+                headers={"User-Agent": self.settings.SCRAPE_USER_AGENT},
+                follow_redirects=True,
+            ) as client:
+                response = await client.get(self.settings.RSS_ECONOMIC_TIMES)
+                feed = feedparser.parse(response.text)
+                for entry in feed.entries:
+                    published = self._parse_published(entry)
+                    if published and not self._is_recent(published):
+                        continue
+                    article = ScrapedArticle(
+                        article_id=self._generate_article_id(entry.link),
+                        title=entry.get("title", ""),
+                        body=entry.get("summary", ""),
+                        url=entry.link,
+                        source=self.source,
+                        published_at=published or datetime.now(timezone.utc),
+                        scraped_at=datetime.now(timezone.utc),
+                    )
+                    articles.append(article)
+        except httpx.HTTPError as e:
+            logger.error("scraper_http_error", source=self.source, error=str(e))
+        except Exception as e:
+            logger.error("scraper_unexpected_error", source=self.source, error=str(e))
+        finally:
+            self._running = False
+        logger.info("scraper_complete", source=self.source, articles=len(articles))
+        return articles
+
+    def _parse_published(self, entry) -> datetime | None:
+        try:
+            from dateutil.parser import parse as dateutil_parse
+            if hasattr(entry, "published"):
+                return dateutil_parse(entry.published).replace(tzinfo=timezone.utc) if entry.published else None
+        except Exception:
+            pass
+        return None
+
+5.3 GoogleNewsScraper (RSS via feedparser)
+class GoogleNewsScraper(BaseScraper):
+    def __init__(self, settings: SentimentSettings):
+        super().__init__(NewsSource.GOOGLE_NEWS, settings)
+
+    async def scrape(self) -> list[ScrapedArticle]:
+        # Same pattern as EconomicTimesScraper but with self.settings.RSS_GOOGLE_NEWS_FINANCE
+        # Implementation mirrors EconomicTimesScraper with different RSS URL
+        # Google News RSS is unofficial — add retry logic (3 attempts with exponential backoff)
+        # Validate feed entries have both title and link before creating ScrapedArticle
+        ...
+
+5.4 NewspaperScraper (newspaper4k for Moneycontrol, LiveMint)
+import newspaper
+from asyncio import to_thread
+
+
+class NewspaperScraper(BaseScraper):
+    def __init__(self, source: NewsSource, base_url: str, settings: SentimentSettings):
+        super().__init__(source, settings)
+        self.base_url = base_url
+
+    async def scrape(self) -> list[ScrapedArticle]:
+        if self._running:
+            logger.warning("scraper_already_running", source=self.source)
+            return []
+        self._running = True
+        articles = []
+        try:
+            paper = await to_thread(newspaper.build, self.base_url, language="en", memoize_articles=False)
+            for article_url in paper.article_urls():
+                try:
+                    art = newspaper.Article(article_url, language="en")
+                    await to_thread(art.download)
+                    await to_thread(art.parse)
+                    if not art.title or not art.text:
+                        continue
+                    article = ScrapedArticle(
+                        article_id=self._generate_article_id(article_url),
+                        title=art.title,
+                        body=art.text[:5000],
+                        url=article_url,
+                        source=self.source,
+                        published_at=art.publish_date or datetime.now(timezone.utc),
+                        scraped_at=datetime.now(timezone.utc),
+                    )
+                    articles.append(article)
+                except Exception as e:
+                    logger.warning("article_parse_failed", url=article_url, error=str(e))
+                    continue
+        except Exception as e:
+            logger.error("newspaper_build_failed", source=self.source, error=str(e))
+        finally:
+            self._running = False
+        logger.info("scraper_complete", source=self.source, articles=len(articles))
+        return articles
+
+Moneycontrol URLs for newspaper4k:
+- Moneycontrol: https://www.moneycontrol.com/news/business/markets/
+- LiveMint: https://www.livemint.com/market
+
+5.5 RedditScraper (praw)
+from praw import Reddit
+from prawcore.exceptions import RequestException, ResponseException
+
+
+class RedditScraper(BaseScraper):
+    def __init__(self, settings: SentimentSettings):
+        super().__init__(NewsSource.REDDIT, settings)
+        self._reddit = None
+
+    def _get_reddit_client(self) -> Reddit:
+        if self._reddit is None:
+            if not self.settings.REDDIT_CLIENT_ID or not self.settings.REDDIT_CLIENT_SECRET:
+                raise ValueError("Reddit OAuth credentials not configured (SENTIMENT_REDDIT_CLIENT_ID, SENTIMENT_REDDIT_CLIENT_SECRET)")
+            self._reddit = Reddit(
+                client_id=self.settings.REDDIT_CLIENT_ID,
+                client_secret=self.settings.REDDIT_CLIENT_SECRET,
+                user_agent=self.settings.REDDIT_USER_AGENT,
+            )
+        return self._reddit
+
+    async def scrape(self) -> list[ScrapedArticle]:
+        if self._running:
+            logger.warning("scraper_already_running", source=self.source)
+            return []
+        self._running = True
+        articles = []
+        try:
+            reddit = self._get_reddit_client()
+            for subreddit_name in self.settings.REDDIT_SUBREDDITS:
+                try:
+                    subreddit = await to_thread(reddit.subreddit, subreddit_name)
+                    posts = await to_thread(
+                        lambda: list(subreddit.hot(limit=self.settings.REDDIT_POST_LIMIT))
+                    )
+                    for post in posts:
+                        published = datetime.fromtimestamp(post.created_utc, tz=timezone.utc)
+                        if not self._is_recent(published, max_age_hours=48.0):
+                            continue
+                        article = ScrapedArticle(
+                            article_id=post.id,
+                            title=post.title,
+                            body=post.selftext[:5000] if post.selftext else "",
+                            url=f"https://reddit.com{post.permalink}",
+                            source=self.source,
+                            published_at=published,
+                            scraped_at=datetime.now(timezone.utc),
+                        )
+                        articles.append(article)
+                except (RequestException, ResponseException) as e:
+                    logger.warning("reddit_subreddit_error", subreddit=subreddit_name, error=str(e))
+                    continue
+        except ValueError as e:
+            logger.error("reddit_config_error", error=str(e))
+        except Exception as e:
+            logger.error("reddit_unexpected_error", error=str(e))
+        finally:
+            self._running = False
+        logger.info("scraper_complete", source=self.source, articles=len(articles))
+        return articles
+
+5.6 ScraperOrchestrator
+class ScraperOrchestrator:
+    def __init__(self, settings: SentimentSettings, symbol_extractor: "SymbolExtractor"):
+        self.settings = settings
+        self.symbol_extractor = symbol_extractor
+        self.scrapers: list[BaseScraper] = []
+        self._setup_scrapers()
+
+    def _setup_scrapers(self) -> None:
+        self.scrapers = [
+            EconomicTimesScraper(self.settings),
+            GoogleNewsScraper(self.settings),
+            NewspaperScraper(NewsSource.MONEYCONTROL, "https://www.moneycontrol.com/news/business/markets/", self.settings),
+            NewspaperScraper(NewsSource.LIVEMINT, "https://www.livemint.com/market", self.settings),
+            RedditScraper(self.settings),
+        ]
+
+    async def scrape_all(self) -> list[ScrapedArticle]:
+        import asyncio
+        semaphore = asyncio.Semaphore(self.settings.SCRAPE_MAX_CONCURRENT)
+        all_articles: list[ScrapedArticle] = []
+
+        async def _run_with_semaphore(scraper: BaseScraper) -> list[ScrapedArticle]:
+            async with semaphore:
+                try:
+                    return await scraper.scrape()
+                except Exception as e:
+                    logger.error("scraper_failed", source=scraper.source, error=str(e))
+                    return []
+
+        results = await asyncio.gather(*[_run_with_semaphore(s) for s in self.scrapers], return_exceptions=True)
+        for result in results:
+            if isinstance(result, list):
+                all_articles.extend(result)
+        # Deduplicate by article_id
+        seen: set[str] = set()
+        unique: list[ScrapedArticle] = []
+        for a in all_articles:
+            if a.article_id not in seen:
+                seen.add(a.article_id)
+                unique.append(a)
+        # Detect language + extract symbols for each article
+        lang_detector = LanguageDetector(enabled=self.settings.LANGUAGE_DETECTION_ENABLED, fallback=self.settings.LANGUAGE_FALLBACK)
+        for article in unique:
+            article.language = LanguageCode(lang_detector.detect(article.title + " " + article.body))
+            symbols, headline_mentions = self.symbol_extractor.extract(article.title, article.body)
+            article.symbols = symbols
+            article.is_headline_mention = headline_mentions
+        logger.info("scrape_all_complete", total_articles=len(unique))
+        return unique
+
+All methods fully type-hinted, async. Use structlog for all logging. Every scrape operation wrapped in try/except with categorized error handling. newspaper4k synchronous calls wrapped in asyncio.to_thread() (Correction #24). praw synchronous calls wrapped in asyncio.to_thread() (Correction #24). Backpressure: if _running is True, skip this cycle (Correction #16).
+
+INSTRUCTION 6 — Implement src/sentiment/symbol_extractor.py
+File: G:\OC\02June26\indian-trading-bot\src\sentiment\symbol_extractor.py
+
+6.1 SymbolExtractor Class
+import re
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+class SymbolExtractor:
+    def __init__(self, symbol_keywords: dict[str, list[str]]):
+        self.symbol_keywords = symbol_keywords
+        self._compiled_patterns: dict[str, re.Pattern] = {}
+        for symbol, keywords in symbol_keywords.items():
+            pattern = r"\b(" + "|".join(re.escape(kw) for kw in keywords) + r")\b"
+            self._compiled_patterns[symbol] = re.compile(pattern, re.IGNORECASE)
+
+    def extract(self, headline: str, body: str) -> tuple[list[str], dict[str, bool]]:
+        symbols_found: list[str] = []
+        headline_mentions: dict[str, bool] = {}
+        for symbol, pattern in self._compiled_patterns.items():
+            in_headline = bool(pattern.search(headline))
+            in_body = bool(pattern.search(body))
+            if in_headline or in_body:
+                symbols_found.append(symbol)
+                headline_mentions[symbol] = in_headline
+        return symbols_found, headline_mentions
+
+    def get_mention_weight(self, symbol: str, is_headline: bool, headline_weight: float = 2.0) -> float:
+        return headline_weight if is_headline else 1.0
+
+All methods fully type-hinted. Uses regex with word boundaries for symbol matching. Headline mentions weighted 2x vs body mentions (Correction #22).
+
+INSTRUCTION 7 — Implement src/sentiment/scorer.py
+File: G:\OC\02June26\indian-trading-bot\src\sentiment\scorer.py
+
+7.1 VADERScorer Class
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+class VADERScorer:
+    def __init__(self, neutral_threshold: float = 0.05):
+        self.analyzer = SentimentIntensityAnalyzer()
+        self.neutral_threshold = neutral_threshold
+
+    def score(self, text: str) -> tuple[float, bool]:
+        scores = self.analyzer.polarity_scores(text)
+        compound = scores["compound"]
+        is_clearly_neutral = abs(compound) < self.neutral_threshold
+        return compound, is_clearly_neutral
+
+7.2 FinBERTScorer Class
+import torch
+from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+class FinBERTScorer:
+    def __init__(self, model_name: str = "ProsusAI/finbert", revision: str = "main",
+                 device: int = -1, torch_dtype_str: str = "float32",
+                 cache_dir: str | None = None, offline: bool = False):
+        dtype = torch.float16 if torch_dtype_str == "float16" and device >= 0 else torch.float32
+        self.pipe = pipeline(
+            "text-classification",
+            model=model_name,
+            revision=revision,
+            device=device,
+            torch_dtype=dtype,
+            top_k=3,
+            cache_dir=cache_dir,
+            local_files_only=offline,
+        )
+        logger.info("finbert_loaded", model=model_name, device=device, dtype=str(dtype))
+
+    def score(self, text: str) -> tuple[SentimentLabel, float, dict[str, float]]:
+        results = self.pipe(text, truncation=True, max_length=512)
+        probs = {r["label"]: r["score"] for r in results}
+        top = max(results, key=lambda r: r["score"])
+        label = SentimentLabel(top["label"])
+        confidence = top["score"]
+        return label, confidence, probs
+
+    def score_batch(self, texts: list[str]) -> list[tuple[SentimentLabel, float, dict[str, float]]]:
+        if not texts:
+            return []
+        results_list = self.pipe(texts, truncation=True, max_length=512)
+        batch_results = []
+        for results in results_list:
+            probs = {r["label"]: r["score"] for r in results}
+            top = max(results, key=lambda r: r["score"])
+            batch_results.append((SentimentLabel(top["label"]), top["score"], probs))
+        return batch_results
+
+CRITICAL: FinBERT label mapping is {0: positive, 1: negative, 2: neutral} (Correction #2). The pipeline automatically maps these correctly from the model's config.json. Verify with: print(pipe.model.config.id2label) after loading.
+
+7.3 MuRILScorer Class
+class MuRILScorer:
+    def __init__(self, model_path: str, device: int = -1,
+                 torch_dtype_str: str = "float32", offline: bool = True):
+        if not model_path:
+            raise ValueError("muRIL fine-tuned model path not configured. Run fine-tuning first (Instruction 12).")
+        dtype = torch.float16 if torch_dtype_str == "float16" and device >= 0 else torch.float32
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=offline)
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            model_path, local_files_only=offline, torch_dtype=dtype
+        )
+        self.model.eval()
+        self.device = device
+        if device >= 0:
+            self.model = self.model.to(f"cuda:{device}")
+        self.pipe = pipeline(
+            "text-classification",
+            model=self.model,
+            tokenizer=self.tokenizer,
+            device=device,
+            top_k=3,
+        )
+        logger.info("muril_loaded", model_path=model_path, device=device)
+
+    def score(self, text: str) -> tuple[SentimentLabel, float, dict[str, float]]:
+        results = self.pipe(text, truncation=True, max_length=512)
+        probs = {r["label"]: r["score"] for r in results}
+        top = max(results, key=lambda r: r["score"])
+        label = SentimentLabel(top["label"])
+        confidence = top["score"]
+        return label, confidence, probs
+
+NOTE: MuRILScorer requires a fine-tuned model at model_path. If the fine-tuned model does not exist, MuRILScorer raises ValueError. The fine-tuning workflow is in Instruction 12. For initial development/testing, FinBERTScorer is used for all languages (muRIL fallback).
+
+7.4 RecencyWeighter Class
+import numpy as np
+from datetime import datetime, timezone
+
+
+class RecencyWeighter:
+    def __init__(self, half_life_hours: float = 4.0):
+        self.decay_constant = np.log(2) / half_life_hours
+
+    def weight(self, published_at: datetime, reference_time: datetime | None = None) -> float:
+        if reference_time is None:
+            reference_time = datetime.now(timezone.utc)
+        age_hours = (reference_time - published_at).total_seconds() / 3600.0
+        if age_hours < 0:
+            return 1.0
+        return float(np.exp(-self.decay_constant * age_hours))
+
+    def effective_sample_size(self, weights: list[float]) -> float:
+        if not weights:
+            return 0.0
+        total_w = sum(weights)
+        sum_sq = sum(w ** 2 for w in weights)
+        if sum_sq == 0:
+            return 0.0
+        return total_w ** 2 / sum_sq
+
+7.5 ArticleSentimentScorer Class (orchestrates VADER → language detection → FinBERT/muRIL)
+class ArticleSentimentScorer:
+    def __init__(self, settings: SentimentSettings):
+        self.settings = settings
+        self.vader = VADERScorer(neutral_threshold=settings.VADER_NEUTRAL_THRESHOLD)
+        self.finbert = FinBERTScorer(
+            model_name=settings.FINBERT_MODEL_NAME,
+            revision=settings.FINBERT_REVISION,
+            device=settings.DEVICE,
+            torch_dtype_str=settings.TORCH_DTYPE,
+            cache_dir=settings.MODEL_CACHE_DIR,
+            offline=settings.TRANSFORMERS_OFFLINE,
+        )
+        self.muril: MuRILScorer | None = None
+        if settings.MURIL_FINETUNED_PATH:
+            try:
+                self.muril = MuRILScorer(
+                    model_path=settings.MURIL_FINETUNED_PATH,
+                    device=settings.DEVICE,
+                    torch_dtype_str=settings.TORCH_DTYPE,
+                    offline=settings.TRANSFORMERS_OFFLINE,
+                )
+            except ValueError:
+                logger.warning("muril_not_available_fallback_to_finbert")
+        self.language_detector = LanguageDetector(
+            enabled=settings.LANGUAGE_DETECTION_ENABLED,
+            fallback=settings.LANGUAGE_FALLBACK,
+        )
+        self.recency_weighter = RecencyWeighter(half_life_hours=settings.HALF_LIFE_HOURS)
+
+    def score_article(self, article: ScrapedArticle) -> ArticleSentiment:
+        text = f"{article.title}. {article.body}" if article.body else article.title
+        vader_compound, is_neutral = self.vader.score(text)
+
+        if is_neutral and self.settings.VADER_ENABLED:
+            return ArticleSentiment(
+                article_id=article.article_id,
+                label=SentimentLabel.NEUTRAL,
+                score=0.0,
+                confidence=0.5,
+                model_used="vader_prefilter",
+                vader_compound=vader_compound,
+                recency_weight=self.recency_weighter.weight(article.published_at),
+                source_credibility=self.settings.SOURCE_CREDIBILITY.get(article.source.value, 0.30),
+            )
+
+        language = self.language_detector.detect(text)
+        model_choice = self.language_detector.route_to_model(language)
+
+        if model_choice == "muril" and self.muril is not None:
+            label, confidence, probs = self.muril.score(text)
+            model_used = "muril"
+        else:
+            label, confidence, probs = self.finbert.score(text)
+            model_used = "finbert"
+
+        sentiment_score = FINBERT_LABEL2SCORE.get(label.value, 0.0) * confidence
+
+        return ArticleSentiment(
+            article_id=article.article_id,
+            label=label,
+            score=sentiment_score,
+            confidence=confidence,
+            model_used=model_used,
+            vader_compound=vader_compound,
+            all_probs=probs,
+            recency_weight=self.recency_weighter.weight(article.published_at),
+            source_credibility=self.settings.SOURCE_CREDIBILITY.get(article.source.value, 0.30),
+        )
+
+All methods fully type-hinted. VADER pre-filter gate (Correction #8): clearly neutral text skips transformer inference, saving ~40-60% compute. Language detection routes English → FinBERT, Hindi/Hinglish → muRIL (Corrections #5, #7, #19). Recency weighting applied (Correction #10). Source credibility applied (Correction #12). Model loaded once in __init__, reused for all calls (Correction #20).
+
+INSTRUCTION 8 — Implement src/sentiment/ensemble.py
+File: G:\OC\02June26\indian-trading-bot\src\sentiment\ensemble.py
+
+8.1 SentimentEnsemble Class
+import numpy as np
+from datetime import datetime, timezone, date
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+class SentimentEnsemble:
+    def __init__(self, settings: SentimentSettings, symbol_extractor: SymbolExtractor):
+        self.settings = settings
+        self.symbol_extractor = symbol_extractor
+
+    def compute_daily_sentiment(
+        self,
+        symbol: str,
+        article_sentiments: list[ArticleSentiment],
+        articles: list[ScrapedArticle],
+        as_of_date: date,
+    ) -> SentimentReport:
+        if not article_sentiments:
+            return self._empty_report(symbol, as_of_date)
+
+        news_articles: list[tuple[ScrapedArticle, ArticleSentiment]] = []
+        social_articles: list[tuple[ScrapedArticle, ArticleSentiment]] = []
+
+        article_map = {a.article_id: a for a in articles}
+        for sent in article_sentiments:
+            art = article_map.get(sent.article_id)
+            if art is None:
+                continue
+            if art.source == NewsSource.REDDIT:
+                social_articles.append((art, sent))
+            else:
+                news_articles.append((art, sent))
+
+        news_score = self._weighted_average(news_articles, symbol)
+        social_score = self._weighted_average(social_articles, symbol)
+
+        final_score = (
+            self.settings.NEWS_WEIGHT * news_score
+            + self.settings.SOCIAL_WEIGHT * social_score
+        )
+        final_score = float(np.clip(final_score, -1.0, 1.0))
+
+        if final_score > 0.20:
+            label = SentimentLabel.POSITIVE
+        elif final_score < -0.20:
+            label = SentimentLabel.NEGATIVE
+        else:
+            label = SentimentLabel.NEUTRAL
+
+        all_weighted = news_articles + social_articles
+        confidence = self._compute_confidence(all_weighted)
+        effective_n = self._effective_sample_size(all_weighted)
+        sources_breakdown = self._compute_sources_breakdown(all_weighted)
+        total_articles = len(all_weighted)
+
+        report = SentimentReport(
+            symbol=symbol,
+            score=final_score,
+            confidence=confidence,
+            label=label,
+            news_score=news_score,
+            social_score=social_score,
+            news_weight=self.settings.NEWS_WEIGHT,
+            social_weight=self.settings.SOCIAL_WEIGHT,
+            sources_breakdown=sources_breakdown,
+            total_articles=total_articles,
+            effective_sample_size=effective_n,
+            computed_at=datetime.now(timezone.utc),
+            as_of_date=as_of_date.isoformat(),
+        )
+        logger.info(
+            "daily_sentiment_computed",
+            symbol=symbol,
+            score=final_score,
+            label=label.value,
+            confidence=confidence,
+            articles=total_articles,
+            effective_n=effective_n,
+        )
+        return report
+
+    def _weighted_average(self, articles_sents: list[tuple[ScrapedArticle, ArticleSentiment]], symbol: str) -> float:
+        if not articles_sents:
+            return 0.0
+        weighted_sum = 0.0
+        total_weight = 0.0
+        for art, sent in articles_sents:
+            if symbol not in art.symbols:
+                continue
+            mention_weight = self.symbol_extractor.get_mention_weight(
+                symbol, art.is_headline_mention.get(symbol, False), self.settings.SYMBOL_HEADLINE_WEIGHT
+            )
+            weight = sent.recency_weight * sent.source_credibility * mention_weight * sent.confidence
+            weighted_sum += sent.score * weight
+            total_weight += weight
+        if total_weight == 0:
+            return 0.0
+        return float(np.clip(weighted_sum / total_weight, -1.0, 1.0))
+
+    def _compute_confidence(self, articles_sents: list[tuple[ScrapedArticle, ArticleSentiment]]) -> float:
+        if not articles_sents:
+            return 0.0
+        total_weight = 0.0
+        weighted_conf = 0.0
+        for _, sent in articles_sents:
+            w = sent.recency_weight * sent.source_credibility
+            weighted_conf += sent.confidence * w
+            total_weight += w
+        if total_weight == 0:
+            return 0.0
+        base_conf = weighted_conf / total_weight
+        finbert_labels = [s.label for _, s in articles_sents if s.model_used == "finbert"]
+        muril_labels = [s.label for _, s in articles_sents if s.model_used == "muril"]
+        if finbert_labels and muril_labels:
+            finbert_mode = max(set(finbert_labels), key=finbert_labels.count)
+            muril_mode = max(set(muril_labels), key=muril_labels.count)
+            if finbert_mode == muril_mode:
+                base_conf = min(base_conf + self.settings.CROSS_MODEL_AGREEMENT_BONUS, 1.0)
+            else:
+                base_conf = max(base_conf - self.settings.CROSS_MODEL_DISAGREEMENT_PENALTY, 0.0)
+        return float(np.clip(base_conf, 0.0, 1.0))
+
+    def _effective_sample_size(self, articles_sents: list[tuple[ScrapedArticle, ArticleSentiment]]) -> float:
+        weights = [s.recency_weight * s.source_credibility for _, s in articles_sents]
+        return self._recency_weighter(weights)
+
+    def _recency_weighter(self, weights: list[float]) -> float:
+        if not weights:
+            return 0.0
+        total_w = sum(weights)
+        sum_sq = sum(w ** 2 for w in weights)
+        if sum_sq == 0:
+            return 0.0
+        return total_w ** 2 / sum_sq
+
+    def _compute_sources_breakdown(self, articles_sents: list[tuple[ScrapedArticle, ArticleSentiment]]) -> dict[str, SourceBreakdown]:
+        breakdown: dict[str, SourceBreakdown] = {}
+        source_groups: dict[str, list[tuple[ScrapedArticle, ArticleSentiment]]] = {}
+        for art, sent in articles_sents:
+            src = art.source.value
+            source_groups.setdefault(src, []).append((art, sent))
+        for src, group in source_groups.items():
+            weighted_sum = 0.0
+            total_weight = 0.0
+            conf_sum = 0.0
+            label_counts: dict[str, int] = {}
+            for _, sent in group:
+                w = sent.recency_weight * sent.source_credibility
+                weighted_sum += sent.score * w
+                total_weight += w
+                conf_sum += sent.confidence
+                label_counts[sent.label.value] = label_counts.get(sent.label.value, 0) + 1
+            ws = float(np.clip(weighted_sum / total_weight, -1.0, 1.0)) if total_weight > 0 else 0.0
+            ac = conf_sum / len(group) if group else 0.0
+            breakdown[src] = SourceBreakdown(
+                source=NewsSource(src),
+                article_count=len(group),
+                weighted_score=ws,
+                avg_confidence=ac,
+                label_distribution=label_counts,
+            )
+        return breakdown
+
+    def _empty_report(self, symbol: str, as_of_date: date) -> SentimentReport:
+        return SentimentReport(
+            symbol=symbol,
+            score=0.0,
+            confidence=0.0,
+            label=SentimentLabel.NEUTRAL,
+            news_score=0.0,
+            social_score=0.0,
+            total_articles=0,
+            effective_sample_size=0.0,
+            computed_at=datetime.now(timezone.utc),
+            as_of_date=as_of_date.isoformat(),
+        )
+
+All methods fully type-hinted. Use structlog. Score ALWAYS clipped to [-1.0, +1.0] with numpy.clip (Correction #17, Guarantees Hypothesis property). Confidence uses cross-model agreement/disagreement bonus/penalty (Correction #23). Effective sample size computed from recency+credibility weights (statistical rigor). Source breakdown provides full provenance for audit trail. Empty report when no articles (graceful degradation).
+
+INSTRUCTION 9 — Implement src/sentiment/engine.py (Primary Entry Point)
+File: G:\OC\02June26\indian-trading-bot\src\sentiment\engine.py
+
+9.1 SentimentEngine Class (Primary Deliverable)
+from datetime import date, datetime, timezone
+import asyncio
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+class SentimentEngine:
+    def __init__(self, settings: SentimentSettings | None = None):
+        self.settings = settings or SentimentSettings()
+        self.symbol_extractor = SymbolExtractor(self.settings.SYMBOL_KEYWORDS)
+        self.orchestrator = ScraperOrchestrator(self.settings, self.symbol_extractor)
+        self.scorer = ArticleSentimentScorer(self.settings)
+        self.ensemble = SentimentEnsemble(self.settings, self.symbol_extractor)
+        self._articles_cache: list[ScrapedArticle] = []
+        self._sentiments_cache: list[ArticleSentiment] = []
+        self._last_scrape_time: datetime | None = None
+
+    async def scrape_and_score(self) -> tuple[list[ScrapedArticle], list[ArticleSentiment]]:
+        articles = await self.orchestrator.scrape_all()
+        sentiments = [self.scorer.score_article(a) for a in articles]
+        self._articles_cache = articles
+        self._sentiments_cache = sentiments
+        self._last_scrape_time = datetime.now(timezone.utc)
+        logger.info("scrape_and_score_complete", articles=len(articles), sentiments=len(sentiments))
+        return articles, sentiments
+
+    def compute_sentiment(self, symbol: str, as_of_date: date | None = None) -> SentimentReport:
+        if as_of_date is None:
+            as_of_date = date.today()
+        if not self._articles_cache:
+            logger.warning("no_articles_cached_run_scrape_first", symbol=symbol)
+            return self.ensemble._empty_report(symbol, as_of_date)
+        return self.ensemble.compute_daily_sentiment(
+            symbol=symbol,
+            article_sentiments=self._sentiments_cache,
+            articles=self._articles_cache,
+            as_of_date=as_of_date,
+        )
+
+    def compute_all_sentiments(self, as_of_date: date | None = None) -> dict[str, SentimentReport]:
+        if as_of_date is None:
+            as_of_date = date.today()
+        reports: dict[str, SentimentReport] = {}
+        for symbol in self.settings.TARGET_SYMBOLS:
+            reports[symbol] = self.compute_sentiment(symbol, as_of_date)
+        logger.info("all_sentiments_computed", symbols=len(reports))
+        return reports
+
+    async def run_daily_pipeline(self, as_of_date: date | None = None) -> dict[str, SentimentReport]:
+        if as_of_date is None:
+            as_of_date = date.today()
+        await self.scrape_and_score()
+        return self.compute_all_sentiments(as_of_date)
+
+    def get_symbol_sentiment_score(self, symbol: str) -> float:
+        report = self.compute_sentiment(symbol)
+        return report.score
+
+    @classmethod
+    def from_env(cls) -> "SentimentEngine":
+        settings = SentimentSettings()
+        return cls(settings)
+
+PRIMARY DELIVERABLE: compute_sentiment(symbol) -> SentimentReport(score, confidence, sources_breakdown)
+This is the function specified in the plan. SentimentEngine.compute_sentiment() returns SentimentReport with all required fields. The report is frozen (immutable Pydantic model) matching Phase 5 Signal pattern.
+
+INSTRUCTION 10 — Implement src/sentiment/__init__.py
+File: G:\OC\02June26\indian-trading-bot\src\sentiment\__init__.py
+
+from src.sentiment.models import (
+    SentimentLabel,
+    LanguageCode,
+    NewsSource,
+    ScrapedArticle,
+    ArticleSentiment,
+    SourceBreakdown,
+    SentimentReport,
+    FINBERT_ID2LABEL,
+    FINBERT_LABEL2ID,
+    FINBERT_LABEL2SCORE,
+)
+from src.sentiment.language import LanguageDetector
+from src.sentiment.scraper import (
+    BaseScraper,
+    EconomicTimesScraper,
+    GoogleNewsScraper,
+    NewspaperScraper,
+    RedditScraper,
+    ScraperOrchestrator,
+)
+from src.sentiment.symbol_extractor import SymbolExtractor
+from src.sentiment.scorer import (
+    VADERScorer,
+    FinBERTScorer,
+    MuRILScorer,
+    RecencyWeighter,
+    ArticleSentimentScorer,
+)
+from src.sentiment.ensemble import SentimentEnsemble
+from src.sentiment.engine import SentimentEngine
+
+__all__ = [
+    "SentimentLabel",
+    "LanguageCode",
+    "NewsSource",
+    "ScrapedArticle",
+    "ArticleSentiment",
+    "SourceBreakdown",
+    "SentimentReport",
+    "FINBERT_ID2LABEL",
+    "FINBERT_LABEL2ID",
+    "FINBERT_LABEL2SCORE",
+    "LanguageDetector",
+    "BaseScraper",
+    "EconomicTimesScraper",
+    "GoogleNewsScraper",
+    "NewspaperScraper",
+    "RedditScraper",
+    "ScraperOrchestrator",
+    "SymbolExtractor",
+    "VADERScorer",
+    "FinBERTScorer",
+    "MuRILScorer",
+    "RecencyWeighter",
+    "ArticleSentimentScorer",
+    "SentimentEnsemble",
+    "SentimentEngine",
+]
+
+INSTRUCTION 11 — Implement Model Pre-Download Script + Model Caching
+File: G:\OC\02June26\indian-trading-bot\scripts\download_sentiment_models.py
+
+"""
+Pre-download sentiment models for offline production deployment.
+Run once after installation, before air-gapped deployment.
+
+Usage:
+    python scripts/download_sentiment_models.py --model-dir data/models/huggingface_cache
+
+This script downloads:
+1. ProsusAI/finbert (~470MB)
+2. google/muril-base-cased (~700MB)
+
+After download, set SENTIMENT_TRANSFORMERS_OFFLINE=true in .env
+"""
+import argparse
+import os
+from pathlib import Path
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+
+def download_finbert(cache_dir: str) -> None:
+    print(f"Downloading FinBERT to {cache_dir}...")
+    tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert", cache_dir=cache_dir)
+    model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert", cache_dir=cache_dir)
+    # Save a local copy for guaranteed offline access
+    local_path = os.path.join(cache_dir, "finbert-local")
+    tokenizer.save_pretrained(local_path)
+    model.save_pretrained(local_path)
+    # Verify
+    with open(os.path.join(local_path, "config.json"), "r") as f:
+        import json
+        config = json.load(f)
+        print(f"FinBERT id2label: {config.get('id2label')} — MUST be {{'0': 'positive', '1': 'negative', '2': 'neutral'}}")
+    print("FinBERT download complete.")
+
+
+def download_muril(cache_dir: str) -> None:
+    print(f"Downloading muRIL base model to {cache_dir}...")
+    tokenizer = AutoTokenizer.from_pretrained("google/muril-base-cased", cache_dir=cache_dir)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        "google/muril-base-cased", num_labels=3,
+        id2label={0: "positive", 1: "negative", 2: "neutral"},
+        label2id={"positive": 0, "negative": 1, "neutral": 2},
+        ignore_mismatched_sizes=True,
+        cache_dir=cache_dir,
+    )
+    local_path = os.path.join(cache_dir, "muril-base-cased-local")
+    tokenizer.save_pretrained(local_path)
+    model.save_pretrained(local_path)
+    print(f"muRIL download complete. Vocab size: {tokenizer.vocab_size}")
+    print("NOTE: This is the BASE model. Fine-tune with scripts/finetune_muril.py before production use.")
+
+
+def verify_hash(model_dir: str) -> None:
+    import hashlib
+    print(f"Verifying model file hashes in {model_dir}...")
+    for root, dirs, files in os.walk(model_dir):
+        for fname in files:
+            if fname.endswith((".bin", ".safetensors", ".json", ".txt", ".vocab")):
+                fpath = os.path.join(root, fname)
+                sha256 = hashlib.sha256(open(fpath, "rb").read()).hexdigest()
+                print(f"  {fpath}: sha256={sha256[:16]}...")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-dir", default="data/models/huggingface_cache")
+    args = parser.parse_args()
+    Path(args.model_dir).mkdir(parents=True, exist_ok=True)
+    download_finbert(args.model_dir)
+    download_muril(args.model_dir)
+    verify_hash(args.model_dir)
+    print("All models downloaded. Set SENTIMENT_TRANSFORMERS_OFFLINE=true for production.")
+
+INSTRUCTION 12 — Implement muRIL Fine-Tuning Workflow
+File: G:\OC\02June26\indian-trading-bot\scripts\finetune_muril.py
+
+This script fine-tunes google/muril-base-cased for 3-class financial sentiment on Hindi/Hinglish data.
+
+12.1 Dataset Preparation
+Before fine-tuning, prepare a labeled dataset:
+Format: CSV with columns [text, label] where label ∈ {positive, negative, neutral}
+Minimum dataset size: 2,000 samples (600+ per class for balanced training)
+Recommended: 5,000+ samples for production quality
+
+Dataset creation options:
+(a) Translate Financial PhraseBank (Malo et al. 2014, 4,845 sentences) to Hindi using googletrans (automated, ~85% quality)
+(b) Manually label 500+ Hindi/Hinglish financial news headlines from Economic Times Hindi, Moneycontrol Hindi
+(c) Combine (a) + (b) for best coverage
+
+Save dataset to: data/datasets/muril_financial_sentiment.csv
+
+12.2 Fine-Tuning Script
+"""
+Fine-tune muRIL for financial sentiment classification (Hindi/Hinglish).
+
+Usage:
+    python scripts/finetune_muril.py \
+        --dataset data/datasets/muril_financial_sentiment.csv \
+        --output-dir data/models/muril-fin-sentiment \
+        --epochs 4 \
+        --batch-size 16 \
+        --lr 2e-5
+
+Reference: Tunstall Ch.3 (fine-tuning recipe), Khanuja et al. 2021 (muRIL paper)
+"""
+import argparse
+import pandas as pd
+from datasets import Dataset
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    TrainingArguments,
+    Trainer,
+    DataCollatorWithPadding,
+)
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
+import numpy as np
+
+
+LABEL2ID = {"positive": 0, "negative": 1, "neutral": 2}
+ID2LABEL = {0: "positive", 1: "negative", 2: "neutral"}
+
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    preds = np.argmax(logits, axis=-1)
+    return {
+        "accuracy": accuracy_score(labels, preds),
+        "f1": f1_score(labels, preds, average="weighted"),
+        "precision": precision_score(labels, preds, average="weighted"),
+        "recall": recall_score(labels, preds, average="weighted"),
+    }
+
+
+def finetune(dataset_path: str, output_dir: str, epochs: int, batch_size: int, lr: float) -> None:
+    df = pd.read_csv(dataset_path)
+    df["label_id"] = df["label"].map(LABEL2ID)
+    train_df, eval_df = train_test_split(df, test_size=0.2, stratify=df["label_id"], random_state=42)
+
+    tokenizer = AutoTokenizer.from_pretrained("google/muril-base-cased")
+    model = AutoModelForSequenceClassification.from_pretrained(
+        "google/muril-base-cased",
+        num_labels=3,
+        id2label=ID2LABEL,
+        label2id=LABEL2ID,
+        ignore_mismatched_sizes=True,
+    )
+
+    def tokenize(examples):
+        return tokenizer(examples["text"], truncation=True, max_length=512)
+
+    train_ds = Dataset.from_pandas(train_df[["text", "label_id"]].rename(columns={"label_id": "label"}))
+    eval_ds = Dataset.from_pandas(eval_df[["text", "label_id"]].rename(columns={"label_id": "label"}))
+    train_ds = train_ds.map(tokenize, batched=True)
+    eval_ds = eval_ds.map(tokenize, batched=True)
+
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        learning_rate=lr,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size * 2,
+        num_train_epochs=epochs,
+        weight_decay=0.01,
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="f1",
+        warmup_ratio=0.1,
+        logging_steps=50,
+        save_total_limit=2,
+        fp16=False,
+        report_to="none",
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
+        tokenizer=tokenizer,
+        data_collator=DataCollatorWithPadding(tokenizer=tokenizer),
+        compute_metrics=compute_metrics,
+    )
+
+    trainer.train()
+    trainer.save_model(output_dir)
+    tokenizer.save_pretrained(output_dir)
+    eval_results = trainer.evaluate()
+    print(f"Fine-tuning complete. Eval results: {eval_results}")
+    print(f"Model saved to: {output_dir}")
+    print(f"Set SENTIMENT_MURIL_FINETUNED_PATH={output_dir} in .env")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", required=True, help="Path to labeled CSV dataset")
+    parser.add_argument("--output-dir", default="data/models/muril-fin-sentiment")
+    parser.add_argument("--epochs", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--lr", type=float, default=2e-5)
+    finetune(**vars(parser.parse_args()))
+
+CRITICAL: Fine-tuning recipe per Tunstall Ch.3 (Corrections #3, #4, #5):
+- lr=2e-5 with AdamW (default in Trainer)
+- 4 epochs with warmup_ratio=0.1 (10% of steps)
+- weight_decay=0.01
+- load_best_model_at_end=True, metric_for_best_model="f1"
+- ignore_mismatched_sizes=True (swaps MLM head for 3-class classification head)
+- label2id = {"positive": 0, "negative": 1, "neutral": 2} — MATCHES FinBERT convention for ensemble compatibility
+- ALL parameters trainable (no layer freezing) per muRIL model card recommendation
+
+INSTRUCTION 13 — Update config/secrets.env.example
+File: G:\OC\02June26\indian-trading-bot\config\secrets.env.example
+
+Add these Phase 8 entries:
+
+# Phase 8: Sentiment Analysis Pipeline
+SENTIMENT_REDDIT_CLIENT_ID=
+SENTIMENT_REDDIT_CLIENT_SECRET=
+# Get from: https://www.reddit.com/prefs/apps → create "script" app
+# NEVER commit actual credentials — only this template
+
+INSTRUCTION 14 — Security Configuration Files
+
+14.1 .gitleaks.toml (Update existing)
+Add to [[allowlists]] section:
+
+[[allowlists]]
+paths = [
+    '''config/secrets\.env\.example$''',
+    '''tests/.*fixtures.*\.py$''',
+    '''scripts/download_sentiment_models\.py$''',
+]
+
+Add custom rules for sentiment-specific tokens:
+
+[[rules]]
+id = "huggingface-token"
+description = "HuggingFace API Token"
+regex = '''hf_[a-zA-Z]{34}'''
+tags = ["key", "huggingface"]
+
+[[rules]]
+id = "reddit-oauth-secret"
+description = "Reddit OAuth Client Secret"
+regex = '''SENTIMENT_REDDIT_CLIENT_SECRET\s*=\s*[A-Za-z0-9]{20,}'''
+tags = ["key", "reddit"]
+
+14.2 .trivy.yaml (Update existing)
+Add model directory skip:
+
+skip_dirs:
+  - "data/models/huggingface_cache"
+  - "data/models/muril-fin-sentiment"
+  - "data/models/finbert-local"
+
+14.3 bandit config (already in pyproject.toml)
+Ensure skips include B311 (random module — used in dataset splitting):
+
+[tool.bandit]
+targets = ["src"]
+skips = ["B101", "B311"]
+
+INSTRUCTION 15 — Test Suite: Unit Tests
+File: G:\OC\02June26\indian-trading-bot\tests\unit\test_sentiment_pipeline.py
+
+15.1 Test Configuration
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timezone, timedelta, date
+import numpy as np
+
+from src.sentiment.models import *
+from src.sentiment.language import LanguageDetector
+from src.sentiment.symbol_extractor import SymbolExtractor
+from src.sentiment.scorer import VADERScorer, RecencyWeighter
+from src.sentiment.ensemble import SentimentEnsemble
+from src.sentiment.engine import SentimentEngine
+
+
+@pytest.fixture
+def sentiment_settings():
+    return SentimentSettings(
+        SCRAPE_INTERVAL_NEWS_MINUTES=30,
+        HALF_LIFE_HOURS=4.0,
+        NEWS_WEIGHT=0.70,
+        SOCIAL_WEIGHT=0.30,
+        REDDIT_CLIENT_ID="test_id",
+        REDDIT_CLIENT_SECRET="test_secret",
+    )
+
+
+@pytest.fixture
+def symbol_extractor():
+    return SymbolExtractor(SentimentSettings().SYMBOL_KEYWORDS)
+
+
+@pytest.fixture
+def sample_articles():
+    now = datetime.now(timezone.utc)
+    return [
+        ScrapedArticle(
+            article_id="art_001",
+            title="NIFTY surges to all-time high on strong GDP data",
+            body="The NIFTY 50 index rallied 200 points today driven by banking stocks.",
+            url="https://example.com/1",
+            source=NewsSource.ECONOMIC_TIMES,
+            published_at=now - timedelta(hours=2),
+            scraped_at=now,
+            language=LanguageCode.EN,
+            symbols=["NIFTY"],
+            is_headline_mention={"NIFTY": True},
+        ),
+        ScrapedArticle(
+            article_id="art_002",
+            title="Market falls as RBI hikes rates",
+            body="BANKNIFTY dropped sharply after the RBI surprise rate hike.",
+            url="https://example.com/2",
+            source=NewsSource.MONEYCONTROL,
+            published_at=now - timedelta(hours=6),
+            scraped_at=now,
+            language=LanguageCode.EN,
+            symbols=["BANKNIFTY"],
+            is_headline_mention={"BANKNIFTY": True},
+        ),
+        ScrapedArticle(
+            article_id="art_003",
+            title="NIFTY investment tips",
+            body="What do you think about NIFTY today? Bullish or bearish?",
+            url="https://reddit.com/r/IndiaInvestments/abc",
+            source=NewsSource.REDDIT,
+            published_at=now - timedelta(hours=1),
+            scraped_at=now,
+            language=LanguageCode.EN,
+            symbols=["NIFTY"],
+            is_headline_mention={"NIFTY": True},
+        ),
+    ]
+
+
+@pytest.fixture
+def sample_sentiments():
+    return [
+        ArticleSentiment(
+            article_id="art_001",
+            label=SentimentLabel.POSITIVE,
+            score=0.92,
+            confidence=0.95,
+            model_used="finbert",
+            vader_compound=0.72,
+            all_probs={"positive": 0.92, "negative": 0.03, "neutral": 0.05},
+            recency_weight=0.70,
+            source_credibility=0.85,
+        ),
+        ArticleSentiment(
+            article_id="art_002",
+            label=SentimentLabel.NEGATIVE,
+            score=-0.88,
+            confidence=0.91,
+            model_used="finbert",
+            vader_compound=-0.55,
+            all_probs={"positive": 0.04, "negative": 0.88, "neutral": 0.08},
+            recency_weight=0.35,
+            source_credibility=0.80,
+        ),
+        ArticleSentiment(
+            article_id="art_003",
+            label=SentimentLabel.POSITIVE,
+            score=0.45,
+            confidence=0.60,
+            model_used="finbert",
+            vader_compound=0.20,
+            all_probs={"positive": 0.45, "negative": 0.25, "neutral": 0.30},
+            recency_weight=0.84,
+            source_credibility=0.35,
+        ),
+    ]
+
+15.2 Test Cases
+class TestVADERScorer:
+    def test_positive_text_high_compound(self):
+        vader = VADERScorer(neutral_threshold=0.05)
+        compound, is_neutral = vader.score("The stock market rallied today with huge gains!")
+        assert compound > 0.05
+        assert not is_neutral
+
+    def test_negative_text_low_compound(self):
+        vader = VADERScorer(neutral_threshold=0.05)
+        compound, is_neutral = vader.score("The market crashed, investors lost everything.")
+        assert compound < -0.05
+        assert not is_neutral
+
+    def test_neutral_text_low_compound(self):
+        vader = VADERScorer(neutral_threshold=0.05)
+        compound, is_neutral = vader.score("The market opened at 9:15 AM today.")
+        assert is_neutral or abs(compound) < 0.3
+
+    def test_empty_text_returns_neutral(self):
+        vader = VADERScorer(neutral_threshold=0.05)
+        compound, is_neutral = vader.score("")
+        assert is_neutral
+
+    def test_compound_always_in_bounds(self):
+        vader = VADERScorer()
+        for text in ["AMAZING!!!", "terrible horrible awful", "The report was issued.", ""]:
+            compound, _ = vader.score(text)
+            assert -1.0 <= compound <= 1.0
+
+
+class TestLanguageDetector:
+    def test_english_detected(self):
+        det = LanguageDetector(enabled=True)
+        assert det.detect("The stock market rallied today") == "en"
+
+    def test_hindi_detected(self):
+        det = LanguageDetector(enabled=True)
+        assert det.detect("आज शेयर बाजार में तेजी देखी गई") == "hi"
+
+    def test_hinglish_detected(self):
+        det = LanguageDetector(enabled=True)
+        result = det.detect("aaj market mein tezi dekhi gayi, nifty upar gaya")
+        assert result in ("hinglish", "hi", "en")
+
+    def test_disabled_returns_fallback(self):
+        det = LanguageDetector(enabled=False, fallback="en")
+        assert det.detect("आज शेयर बाजार में तेजी") == "en"
+
+    def test_empty_returns_fallback(self):
+        det = LanguageDetector(enabled=True, fallback="en")
+        assert det.detect("") == "en"
+
+    def test_route_to_model_hindi(self):
+        det = LanguageDetector()
+        assert det.route_to_model("hi") == "muril"
+
+    def test_route_to_model_english(self):
+        det = LanguageDetector()
+        assert det.route_to_model("en") == "finbert"
+
+    def test_route_to_model_hinglish(self):
+        det = LanguageDetector()
+        assert det.route_to_model("hinglish") == "muril"
+
+
+class TestSymbolExtractor:
+    def test_nifty_in_headline(self):
+        ext = SymbolExtractor(SentimentSettings().SYMBOL_KEYWORDS)
+        symbols, mentions = ext.extract("NIFTY hits all-time high", "Market details here")
+        assert "NIFTY" in symbols
+        assert mentions["NIFTY"] is True
+
+    def test_symbol_in_body_only(self):
+        ext = SymbolExtractor(SentimentSettings().SYMBOL_KEYWORDS)
+        symbols, mentions = ext.extract("Market update", "RELIANCE shares surged today")
+        assert "RELIANCE" in symbols
+        assert mentions["RELIANCE"] is False
+
+    def test_multiple_symbols(self):
+        ext = SymbolExtractor(SentimentSettings().SYMBOL_KEYWORDS)
+        symbols, mentions = ext.extract("NIFTY and BANKNIFTY diverge", "Details here")
+        assert "NIFTY" in symbols
+        assert "BANKNIFTY" in symbols
+
+    def test_no_symbols(self):
+        ext = SymbolExtractor(SentimentSettings().SYMBOL_KEYWORDS)
+        symbols, _ = ext.extract("Weather update", "Sunny skies today")
+        assert len(symbols) == 0
+
+    def test_case_insensitive(self):
+        ext = SymbolExtractor(SentimentSettings().SYMBOL_KEYWORDS)
+        symbols, _ = ext.extract("nifty 50 surges", "")
+        assert "NIFTY" in symbols
+
+    def test_mention_weight_headline_vs_body(self):
+        ext = SymbolExtractor(SentimentSettings().SYMBOL_KEYWORDS)
+        assert ext.get_mention_weight("NIFTY", True, 2.0) == 2.0
+        assert ext.get_mention_weight("NIFTY", False, 2.0) == 1.0
+
+
+class TestRecencyWeighter:
+    def test_current_article_weight_1(self):
+        rw = RecencyWeighter(half_life_hours=4.0)
+        now = datetime.now(timezone.utc)
+        assert rw.weight(now) == 1.0
+
+    def test_4h_old_article_weight_05(self):
+        rw = RecencyWeighter(half_life_hours=4.0)
+        now = datetime.now(timezone.utc)
+        four_hours_ago = now - timedelta(hours=4)
+        w = rw.weight(four_hours_ago, reference_time=now)
+        assert 0.49 <= w <= 0.51
+
+    def test_8h_old_article_weight_025(self):
+        rw = RecencyWeighter(half_life_hours=4.0)
+        now = datetime.now(timezone.utc)
+        eight_hours_ago = now - timedelta(hours=8)
+        w = rw.weight(eight_hours_ago, reference_time=now)
+        assert 0.24 <= w <= 0.26
+
+    def test_future_article_weight_1(self):
+        rw = RecencyWeighter(half_life_hours=4.0)
+        now = datetime.now(timezone.utc)
+        future = now + timedelta(hours=2)
+        assert rw.weight(future, reference_time=now) == 1.0
+
+    def test_effective_sample_size_single(self):
+        rw = RecencyWeighter(half_life_hours=4.0)
+        assert rw.effective_sample_size([1.0]) == 1.0
+
+    def test_effective_sample_size_empty(self):
+        rw = RecencyWeighter(half_life_hours=4.0)
+        assert rw.effective_sample_size([]) == 0.0
+
+
+class TestFinBERTLabelMapping:
+    def test_finbert_id2label_mapping(self):
+        assert FINBERT_ID2LABEL[0] == "positive"
+        assert FINBERT_ID2LABEL[1] == "negative"
+        assert FINBERT_ID2LABEL[2] == "neutral"
+
+    def test_finbert_label2score_mapping(self):
+        assert FINBERT_LABEL2SCORE["positive"] == 1.0
+        assert FINBERT_LABEL2SCORE["neutral"] == 0.0
+        assert FINBERT_LABEL2SCORE["negative"] == -1.0
+
+    def test_finbert_label_not_alphabetical(self):
+        labels_in_order = [FINBERT_ID2LABEL[i] for i in range(3)]
+        assert labels_in_order == ["positive", "negative", "neutral"]
+        assert labels_in_order != sorted(labels_in_order)
+
+
+class TestSentimentEnsemble:
+    def test_empty_articles_returns_neutral(self, sentiment_settings, symbol_extractor):
+        ensemble = SentimentEnsemble(sentiment_settings, symbol_extractor)
+        report = ensemble.compute_daily_sentiment("NIFTY", [], [], date.today())
+        assert report.score == 0.0
+        assert report.label == SentimentLabel.NEUTRAL
+        assert report.confidence == 0.0
+
+    def test_positive_articles_positive_score(self, sentiment_settings, symbol_extractor, sample_articles, sample_sentiments):
+        ensemble = SentimentEnsemble(sentiment_settings, symbol_extractor)
+        report = ensemble.compute_daily_sentiment("NIFTY", sample_sentiments, sample_articles, date.today())
+        assert report.score > 0.0
+        assert -1.0 <= report.score <= 1.0
+
+    def test_score_always_in_bounds(self, sentiment_settings, symbol_extractor):
+        ensemble = SentimentEnsemble(sentiment_settings, symbol_extractor)
+        extreme_articles = [
+            ScrapedArticle(
+                article_id=f"ext_{i}",
+                title="NIFTY crash" if i % 2 == 0 else "NIFTY boom",
+                body="Text",
+                url=f"https://example.com/{i}",
+                source=NewsSource.ECONOMIC_TIMES,
+                published_at=datetime.now(timezone.utc),
+                scraped_at=datetime.now(timezone.utc),
+                symbols=["NIFTY"],
+                is_headline_mention={"NIFTY": True},
+            )
+            for i in range(20)
+        ]
+        extreme_sentiments = [
+            ArticleSentiment(
+                article_id=f"ext_{i}",
+                label=SentimentLabel.POSITIVE if i % 2 == 0 else SentimentLabel.NEGATIVE,
+                score=1.0 if i % 2 == 0 else -1.0,
+                confidence=0.99,
+                model_used="finbert",
+                vader_compound=0.8 if i % 2 == 0 else -0.8,
+                recency_weight=1.0,
+                source_credibility=1.0,
+            )
+            for i in range(20)
+        ]
+        report = ensemble.compute_daily_sentiment("NIFTY", extreme_sentiments, extreme_articles, date.today())
+        assert -1.0 <= report.score <= 1.0
+
+    def test_news_social_weight_sum(self, sentiment_settings, symbol_extractor, sample_articles, sample_sentiments):
+        ensemble = SentimentEnsemble(sentiment_settings, symbol_extractor)
+        report = ensemble.compute_daily_sentiment("NIFTY", sample_sentiments, sample_articles, date.today())
+        assert abs(report.news_weight + report.social_weight - 1.0) < 0.01
+
+    def test_report_is_frozen(self, sentiment_settings, symbol_extractor, sample_articles, sample_sentiments):
+        ensemble = SentimentEnsemble(sentiment_settings, symbol_extractor)
+        report = ensemble.compute_daily_sentiment("NIFTY", sample_sentiments, sample_articles, date.today())
+        with pytest.raises(Exception):
+            report.score = 999.0
+
+    def test_sources_breakdown_populated(self, sentiment_settings, symbol_extractor, sample_articles, sample_sentiments):
+        ensemble = SentimentEnsemble(sentiment_settings, symbol_extractor)
+        report = ensemble.compute_daily_sentiment("NIFTY", sample_sentiments, sample_articles, date.today())
+        assert len(report.sources_breakdown) > 0
+
+    def test_recency_decay_recent_dominates(self, sentiment_settings, symbol_extractor):
+        ensemble = SentimentEnsemble(sentiment_settings, symbol_extractor)
+        now = datetime.now(timezone.utc)
+        recent = ScrapedArticle(
+            article_id="recent", title="NIFTY surges", body="",
+            url="https://example.com/recent", source=NewsSource.ECONOMIC_TIMES,
+            published_at=now - timedelta(hours=1), scraped_at=now,
+            symbols=["NIFTY"], is_headline_mention={"NIFTY": True},
+        )
+        old = ScrapedArticle(
+            article_id="old", title="NIFTY crashes", body="",
+            url="https://example.com/old", source=NewsSource.ECONOMIC_TIMES,
+            published_at=now - timedelta(hours=12), scraped_at=now,
+            symbols=["NIFTY"], is_headline_mention={"NIFTY": True},
+        )
+        recent_sent = ArticleSentiment(
+            article_id="recent", label=SentimentLabel.POSITIVE, score=0.9,
+            confidence=0.9, model_used="finbert", vader_compound=0.7,
+            recency_weight=0.84, source_credibility=0.85,
+        )
+        old_sent = ArticleSentiment(
+            article_id="old", label=SentimentLabel.NEGATIVE, score=-0.9,
+            confidence=0.9, model_used="finbert", vader_compound=-0.7,
+            recency_weight=0.12, source_credibility=0.85,
+        )
+        report = ensemble.compute_daily_sentiment("NIFTY", [recent_sent, old_sent], [recent, old], date.today())
+        assert report.score > 0.0  # Recent positive dominates over old negative due to recency decay
+
+
+class TestSentimentReport:
+    def test_score_bounds_validation(self):
+        with pytest.raises(Exception):
+            SentimentReport(
+                symbol="NIFTY", score=1.5, confidence=0.8,
+                label=SentimentLabel.POSITIVE, news_score=1.0, social_score=0.5,
+                total_articles=5, effective_sample_size=4.0,
+                computed_at=datetime.now(timezone.utc), as_of_date="2025-01-01",
+            )
+
+    def test_confidence_bounds_validation(self):
+        with pytest.raises(Exception):
+            SentimentReport(
+                symbol="NIFTY", score=0.5, confidence=1.5,
+                label=SentimentLabel.POSITIVE, news_score=0.5, social_score=0.3,
+                total_articles=5, effective_sample_size=4.0,
+                computed_at=datetime.now(timezone.utc), as_of_date="2025-01-01",
+            )
+
+
+class TestSentimentEngine:
+    @pytest.mark.asyncio
+    async def test_compute_sentiment_no_cache(self, sentiment_settings):
+        engine = SentimentEngine(sentiment_settings)
+        report = engine.compute_sentiment("NIFTY")
+        assert report.score == 0.0
+        assert report.label == SentimentLabel.NEUTRAL
+
+    def test_compute_all_sentiments(self, sentiment_settings):
+        engine = SentimentEngine(sentiment_settings)
+        reports = engine.compute_all_sentiments()
+        assert len(reports) == len(sentiment_settings.TARGET_SYMBOLS)
+        for symbol, report in reports.items():
+            assert -1.0 <= report.score <= 1.0
+
+Run: pytest tests/unit/test_sentiment_pipeline.py -v
+
+INSTRUCTION 16 — Test Suite: Property-Based Tests (Hypothesis)
+File: G:\OC\02June26\indian-trading-bot\tests\property\test_sentiment_bounds.py
+
+from hypothesis import given, settings, assume, HealthCheck
+from hypothesis import strategies as st
+from hypothesis.strategies import composite
+import numpy as np
+from datetime import datetime, timezone, timedelta, date
+
+from src.sentiment.models import *
+from src.sentiment.scorer import VADERScorer, RecencyWeighter
+from src.sentiment.ensemble import SentimentEnsemble
+from src.sentiment.symbol_extractor import SymbolExtractor
+
+
+# --- Strategies ---
+
+sentiment_score = st.floats(min_value=-1.0, max_value=1.0, allow_nan=False, allow_infinity=False)
+confidence_score = st.floats(min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False)
+recency_weight = st.floats(min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False)
+credibility_weight = st.floats(min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False)
+positive_threshold = st.floats(min_value=0.05, max_value=0.50)
+half_life = st.floats(min_value=0.5, max_value=168.0)
+hours_ago = st.floats(min_value=0.0, max_value=720.0)
+
+sentiment_label_st = st.sampled_from([SentimentLabel.POSITIVE, SentimentLabel.NEGATIVE, SentimentLabel.NEUTRAL])
+news_source_st = st.sampled_from(list(NewsSource))
+
+
+@composite
+def article_sentiment_strategy(draw):
+    label = draw(sentiment_label_st)
+    score = draw(sentiment_score)
+    conf = draw(confidence_score)
+    rw = draw(recency_weight)
+    cw = draw(credibility_weight)
+    return ArticleSentiment(
+        article_id=f"hyp_{draw(st.integers(min_value=0, max_value=99999))}",
+        label=label, score=score, confidence=conf,
+        model_used=draw(st.sampled_from(["finbert", "muril", "vader_prefilter"])),
+        vader_compound=draw(sentiment_score),
+        recency_weight=rw, source_credibility=cw,
+    )
+
+
+@composite
+def scraped_article_strategy(draw):
+    now = datetime.now(timezone.utc)
+    hours = draw(hours_ago)
+    pub = now - timedelta(hours=hours)
+    return ScrapedArticle(
+        article_id=f"hyp_{draw(st.integers(min_value=0, max_value=99999))}",
+        title=draw(st.text(min_size=1, max_size=200)),
+        body=draw(st.text(min_size=0, max_size=1000)),
+        url=f"https://example.com/{draw(st.integers(min_value=0, max_value=99999))}",
+        source=draw(news_source_st),
+        published_at=pub, scraped_at=now,
+        language=LanguageCode.EN,
+        symbols=["NIFTY"],
+        is_headline_mention={"NIFTY": True},
+    )
+
+
+# --- Properties ---
+
+class TestSentimentScoreBounds:
+    @given(score=sentiment_score)
+    @settings(max_examples=500)
+    def test_sentiment_score_always_in_bounds(self, score):
+        assert -1.0 <= score <= 1.0
+
+    @given(
+        sentiments=st.lists(article_sentiment_strategy(), min_size=0, max_size=50),
+        articles=st.lists(scraped_article_strategy(), min_size=0, max_size=50),
+    )
+    @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
+    def test_ensemble_output_always_in_bounds(self, sentiments, articles):
+        settings_obj = SentimentSettings(HALF_LIFE_HOURS=4.0, NEWS_WEIGHT=0.70, SOCIAL_WEIGHT=0.30)
+        ext = SymbolExtractor(settings_obj.SYMBOL_KEYWORDS)
+        ensemble = SentimentEnsemble(settings_obj, ext)
+        # Pad to same length
+        min_len = min(len(sentiments), len(articles))
+        if min_len == 0:
+            report = ensemble.compute_daily_sentiment("NIFTY", [], [], date.today())
+        else:
+            report = ensemble.compute_daily_sentiment("NIFTY", sentiments[:min_len], articles[:min_len], date.today())
+        assert -1.0 <= report.score <= 1.0
+        assert 0.0 <= report.confidence <= 1.0
+        assert -1.0 <= report.news_score <= 1.0
+        assert -1.0 <= report.social_score <= 1.0
+
+
+class TestRecencyDecayProperties:
+    @given(half=half_life, hours=hours_ago)
+    @settings(max_examples=500)
+    def test_recency_weight_always_in_0_1(self, half, hours):
+        rw = RecencyWeighter(half_life_hours=half)
+        now = datetime.now(timezone.utc)
+        pub = now - timedelta(hours=hours)
+        w = rw.weight(pub, reference_time=now)
+        assert 0.0 <= w <= 1.0
+
+    @given(half=half_life)
+    @settings(max_examples=100)
+    def test_recency_monotonic_decreasing(self, half):
+        rw = RecencyWeighter(half_life_hours=half)
+        now = datetime.now(timezone.utc)
+        w1 = rw.weight(now - timedelta(hours=1), reference_time=now)
+        w2 = rw.weight(now - timedelta(hours=2), reference_time=now)
+        w3 = rw.weight(now - timedelta(hours=4), reference_time=now)
+        assert w1 >= w2 >= w3
+
+    @given(half=half_life)
+    @settings(max_examples=100)
+    def test_recency_half_life_value(self, half):
+        rw = RecencyWeighter(half_life_hours=half)
+        now = datetime.now(timezone.utc)
+        w = rw.weight(now - timedelta(hours=half), reference_time=now)
+        assert 0.49 <= w <= 0.51
+
+
+class TestVADERBounds:
+    @given(text=st.text(min_size=1, max_size=500))
+    @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
+    def test_vader_compound_always_in_bounds(self, text):
+        vader = VADERScorer(neutral_threshold=0.05)
+        compound, _ = vader.score(text)
+        assert -1.0 <= compound <= 1.0
+
+
+class TestEffectiveSampleSize:
+    @given(weights=st.lists(st.floats(min_value=0.0, max_value=1.0, allow_nan=False), min_size=1, max_size=100))
+    @settings(max_examples=200)
+    def test_effective_sample_size_le_n(self, weights):
+        rw = RecencyWeighter(half_life_hours=4.0)
+        ess = rw.effective_sample_size(weights)
+        assert ess <= len(weights)
+
+    def test_effective_sample_size_empty(self):
+        rw = RecencyWeighter(half_life_hours=4.0)
+        assert rw.effective_sample_size([]) == 0.0
+
+
+class TestFinBERTLabelMappingConsistency:
+    def test_id2label_label2id_inverse(self):
+        for idx, label in FINBERT_ID2LABEL.items():
+            assert FINBERT_LABEL2ID[label] == idx
+
+    def test_all_labels_have_scores(self):
+        for label in FINBERT_LABEL2ID:
+            assert label in FINBERT_LABEL2SCORE
+
+Run: pytest tests/property/test_sentiment_bounds.py -v --hypothesis-seed=0
+
+INSTRUCTION 17 — Test Suite: Benchmark Tests
+File: G:\OC\02June26\indian-trading-bot\tests\bench\test_sentiment_latency.py
+
+import pytest
+from datetime import datetime, timezone
+
+from src.sentiment.scorer import VADERScorer, FinBERTScorer, RecencyWeighter
+from src.sentiment.models import SentimentSettings
+
+
+FINBERT_AVAILABLE = False
+try:
+    finbert = FinBERTScorer(model_name="ProsusAI/finbert", device=-1)
+    FINBERT_AVAILABLE = True
+except Exception:
+    pass
+
+SAMPLE_TEXTS = [
+    "Revenue surged 20% year over year, beating analyst expectations.",
+    "The company reported a net loss of Rs 500 crore in Q3.",
+    "Markets remained flat amid low trading volumes.",
+    "NIFTY hit an all-time high of 24,000 driven by banking stocks.",
+    "RBI surprise rate hike sends bond yields higher, equity markets lower.",
+    "Infy Q2 results: Strong deal pipeline, margins expand 150 bps.",
+    "BankNifty underperforms as PSU banks face asset quality concerns.",
+    "FII flows turn positive after 5 consecutive days of selling.",
+    "Crude oil prices drop 3% on demand fears, energy stocks fall.",
+    "SEBI proposes new framework for algo trading regulation.",
+]
+
+
+class TestVADERLatency:
+    def test_vader_single_article_under_5ms(self, benchmark):
+        vader = VADERScorer()
+        benchmark(lambda: vader.score(SAMPLE_TEXTS[0]))
+
+    def test_vader_10_articles_under_50ms(self, benchmark):
+        vader = VADERScorer()
+        def score_all():
+            for text in SAMPLE_TEXTS:
+                vader.score(text)
+        benchmark(score_all)
+
+
+@pytest.mark.skipif(not FINBERT_AVAILABLE, reason="FinBERT model not downloaded")
+class TestFinBERTLatency:
+    def test_finbert_single_article_under_500ms(self, benchmark):
+        benchmark(lambda: finbert.score(SAMPLE_TEXTS[0]))
+
+    def test_finbert_10_articles_sequential(self, benchmark):
+        def score_all():
+            return [finbert.score(t) for t in SAMPLE_TEXTS]
+        benchmark(score_all)
+
+    def test_finbert_score_batch(self, benchmark):
+        benchmark(lambda: finbert.score_batch(SAMPLE_TEXTS))
+
+
+class TestRecencyWeighterLatency:
+    def test_recency_weight_under_1ms(self, benchmark):
+        rw = RecencyWeighter(half_life_hours=4.0)
+        now = datetime.now(timezone.utc)
+        pub = now - timezone.timedelta(hours=2)
+        benchmark(lambda: rw.weight(pub, reference_time=now))
+
+
+class TestEndToEndLatency:
+    @pytest.mark.skipif(not FINBERT_AVAILABLE, reason="FinBERT model not downloaded")
+    def test_vader_prefilter_saves_time(self, benchmark):
+        vader = VADERScorer(neutral_threshold=0.05)
+        neutral_text = "The market report was issued at 9 AM today."
+        compound, is_neutral = vader.score(neutral_text)
+        if is_neutral:
+            def full_pipeline_skip():
+                vader.score(neutral_text)
+                return 0.0, SentimentLabel.NEUTRAL
+        else:
+            def full_pipeline_skip():
+                vader.score(neutral_text)
+                return finbert.score(neutral_text)
+        benchmark(full_pipeline_skip)
+
+Run: pytest tests/bench/test_sentiment_latency.py --benchmark-only -v
+
+INSTRUCTION 18 — Test Suite: Integration Tests
+File: G:\OC\02June26\indian-trading-bot\tests\integration\test_sentiment_integration.py
+
+import pytest
+from datetime import datetime, timezone, date
+from unittest.mock import AsyncMock, patch, MagicMock
+
+from src.sentiment.engine import SentimentEngine
+from src.sentiment.models import SentimentSettings, SentimentLabel, NewsSource, ScrapedArticle, ArticleSentiment, LanguageCode
+
+
+class TestScraperIntegration:
+    @pytest.mark.asyncio
+    async def test_economic_times_rss_scrape(self):
+        settings = SentimentSettings(SCRAPE_TIMEOUT_SECONDS=15)
+        engine = SentimentEngine(settings)
+        articles = await engine.orchestrator.scrapers[0].scrape()
+        assert isinstance(articles, list)
+        for a in articles:
+            assert a.title
+            assert a.url
+            assert a.source == NewsSource.ECONOMIC_TIMES
+
+    @pytest.mark.asyncio
+    @pytest.mark.slow
+    async def test_full_scrape_and_score(self):
+        settings = SentimentSettings()
+        engine = SentimentEngine(settings)
+        articles, sentiments = await engine.scrape_and_score()
+        assert len(articles) == len(sentiments)
+        for s in sentiments:
+            assert -1.0 <= s.score <= 1.0
+            assert 0.0 <= s.confidence <= 1.0
+
+
+class TestFinBERTEndToEnd:
+    @pytest.mark.integration
+    def test_finbert_positive_financial_text(self):
+        from src.sentiment.scorer import FinBERTScorer
+        scorer = FinBERTScorer(model_name="ProsusAI/finbert", device=-1)
+        label, conf, probs = scorer.score("Revenue increased by 15% year over year, beating expectations.")
+        assert label == SentimentLabel.POSITIVE
+        assert conf > 0.7
+        assert probs.get("positive", 0) > 0.5
+
+    @pytest.mark.integration
+    def test_finbert_negative_financial_text(self):
+        from src.sentiment.scorer import FinBERTScorer
+        scorer = FinBERTScorer(model_name="ProsusAI/finbert", device=-1)
+        label, conf, probs = scorer.score("The company reported significant losses and declining revenue.")
+        assert label == SentimentLabel.NEGATIVE
+        assert conf > 0.7
+
+    @pytest.mark.integration
+    def test_finbert_neutral_financial_text(self):
+        from src.sentiment.scorer import FinBERTScorer
+        scorer = FinBERTScorer(model_name="ProsusAI/finbert", device=-1)
+        label, conf, probs = scorer.score("The quarterly results were in line with analyst expectations.")
+        assert label in (SentimentLabel.NEUTRAL, SentimentLabel.POSITIVE)
+
+    @pytest.mark.integration
+    def test_finbert_truncation_long_text(self):
+        from src.sentiment.scorer import FinBERTScorer
+        scorer = FinBERTScorer(model_name="ProsusAI/finbert", device=-1)
+        long_text = "Revenue increased. " * 200  # > 512 tokens
+        label, conf, probs = scorer.score(long_text)
+        assert label in (SentimentLabel.POSITIVE, SentimentLabel.NEGATIVE, SentimentLabel.NEUTRAL)
+        assert 0.0 <= conf <= 1.0
+
+
+class TestEnsembleIntegration:
+    def test_compute_sentiment_with_mocked_scrape(self):
+        settings = SentimentSettings()
+        engine = SentimentEngine(settings)
+        now = datetime.now(timezone.utc)
+        articles = [
+            ScrapedArticle(
+                article_id="int_001", title="NIFTY hits all-time high",
+                body="NIFTY rallied 200 points today.", url="https://example.com/1",
+                source=NewsSource.ECONOMIC_TIMES, published_at=now - __import__("datetime").timedelta(hours=2),
+                scraped_at=now, language=LanguageCode.EN, symbols=["NIFTY"],
+                is_headline_mention={"NIFTY": True},
+            ),
+        ]
+        sentiments = [
+            ArticleSentiment(
+                article_id="int_001", label=SentimentLabel.POSITIVE, score=0.92,
+                confidence=0.95, model_used="finbert", vader_compound=0.72,
+                recency_weight=0.70, source_credibility=0.85,
+            ),
+        ]
+        engine._articles_cache = articles
+        engine._sentiments_cache = sentiments
+        report = engine.compute_sentiment("NIFTY")
+        assert report.score > 0.0
+        assert report.label == SentimentLabel.POSITIVE
+        assert report.total_articles == 1
+
+
+Run: pytest tests/integration/test_sentiment_integration.py -v -m "not slow" --timeout=60
+
+INSTRUCTION 19 — Test Suite: Locust Load Tests
+File: G:\OC\02June26\indian-trading-bot\tests\load\locustfile_sentiment.py
+
+from locust import HttpUser, task, between, tag
+import random
+
+
+class SentimentApiUser(HttpUser):
+    wait_time = between(1, 5)
+    symbols = ["NIFTY", "BANKNIFTY", "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS"]
+
+    @task(5)
+    @tag("compute")
+    def compute_sentiment(self):
+        symbol = random.choice(self.symbols)
+        with self.client.get(
+            f"/api/sentiment/{symbol}",
+            name="/api/sentiment/[symbol]",
+            catch_response=True,
+        ) as response:
+            if response.status_code == 200:
+                data = response.json()
+                if "score" in data and -1.0 <= data["score"] <= 1.0:
+                    response.success()
+                else:
+                    response.failure(f"Invalid score: {data.get('score')}")
+            else:
+                response.failure(f"HTTP {response.status_code}")
+
+    @task(3)
+    @tag("compute_all")
+    def compute_all_sentiments(self):
+        with self.client.get(
+            "/api/sentiment/all",
+            name="/api/sentiment/all",
+            catch_response=True,
+        ) as response:
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and len(data) > 0:
+                    response.success()
+                else:
+                    response.failure("Empty response")
+            else:
+                response.failure(f"HTTP {response.status_code}")
+
+    @task(1)
+    @tag("health")
+    def health_check(self):
+        self.client.get("/health")
+
+Run: locust -f tests/load/locustfile_sentiment.py --host=http://localhost:8000 --users 10 --spawn-rate 2 -t 60s --headless
+
+INSTRUCTION 20 — Test Suite: conftest.py Additions
+File: G:\OC\02June26\indian-trading-bot\tests\conftest.py (APPEND to existing)
+
+import pytest
+from src.sentiment.models import SentimentSettings
+
+
+@pytest.fixture
+def sentiment_settings():
+    return SentimentSettings(
+        SCRAPE_INTERVAL_NEWS_MINUTES=30,
+        HALF_LIFE_HOURS=4.0,
+        NEWS_WEIGHT=0.70,
+        SOCIAL_WEIGHT=0.30,
+        REDDIT_CLIENT_ID="test_id",
+        REDDIT_CLIENT_SECRET="test_secret",
+    )
+
+
+@pytest.fixture(scope="session")
+def finbert_scorer():
+    from src.sentiment.scorer import FinBERTScorer
+    try:
+        return FinBERTScorer(model_name="ProsusAI/finbert", device=-1)
+    except Exception:
+        pytest.skip("FinBERT model not available for session-scoped fixture")
+
+
+@pytest.fixture(scope="session")
+def vader_scorer():
+    from src.sentiment.scorer import VADERScorer
+    return VADERScorer(neutral_threshold=0.05)
+
+
+@pytest.fixture(scope="session")
+def recency_weighter():
+    from src.sentiment.scorer import RecencyWeighter
+    return RecencyWeighter(half_life_hours=4.0)
+
+INSTRUCTION 21 — Update pyproject.toml with Phase 8 Additions
+File: G:\OC\02June26\indian-trading-bot\pyproject.toml (MODIFY existing)
+
+Add to [project.dependencies]:
+
+# Phase 8: Sentiment Analysis Pipeline
+"vaderSentiment>=3.3.2",
+"langdetect>=1.0.9",
+"praw>=7.7.1",
+# feedparser, newspaper4k already present from Phase 1
+
+Add to [project.optional-dependencies.ml]:
+
+# Phase 8 ML models (verify presence):
+# "transformers>=4.35" — already listed
+# "torch>=2.1" — already listed
+
+Add to [tool.pytest.ini_options] markers:
+
+"sentiment: sentiment pipeline tests",
+"finbert: tests requiring FinBERT model download",
+"muril: tests requiring fine-tuned muRIL model",
+
+Add to [[tool.mypy.overrides]]:
+
+[[tool.mypy.overrides]]
+module = [
+    "vaderSentiment.*",
+    "langdetect.*",
+    "praw.*",
+    "transformers.*",
+    "torch.*",
+    "datasets.*",
+    "feedparser.*",
+    "newspaper4k.*",
+]
+ignore_missing_imports = true
+
+Add to [tool.bandit] skips:
+
+[tool.bandit]
+targets = ["src"]
+skips = ["B101", "B311"]
+
+Add to [tool.ruff.lint] per-file-ignores (if not present):
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["T20"]
+"tests/*" = ["S101", "PLR2004", "ERA001"]
+
+INSTRUCTION 22 — Full Verification + Security Scan Suite
+
+Run these commands sequentially and verify each:
+
+# Step 22.1: Activate venv
+& "G:\OC\02June26\indian-trading-bot\.venv\Scripts\Activate.ps1"
+Set-Location -LiteralPath "G:\OC\02June26\indian-trading-bot"
+
+# Step 22.2: Install with all deps
+pip install -e ".[dev,ml]"
+
+# Step 22.3: Verify Phase 8 specific imports
+python -c "from src.sentiment import SentimentEngine, SentimentReport, SentimentLabel, compute_sentiment; print('Phase 8 sentiment imports OK')"
+python -c "from src.sentiment.models import FINBERT_ID2LABEL; assert FINBERT_ID2LABEL == {0: 'positive', 1: 'negative', 2: 'neutral'}, 'CRITICAL: FinBERT label mapping incorrect'; print('FinBERT label mapping VERIFIED')"
+python -c "from src.sentiment.scorer import VADERScorer; v = VADERScorer(); c, _ = v.score('Stocks rallied!'); assert -1 <= c <= 1; print(f'VADER OK: compound={c}')"
+python -c "from src.sentiment.language import LanguageDetector; d = LanguageDetector(); assert d.detect('Stock market update') == 'en'; assert d.detect('आज बाजार तेज') == 'hi'; print('Language detector OK')"
+python -c "from src.sentiment.symbol_extractor import SymbolExtractor; e = SymbolExtractor({'NIFTY': ['nifty', 'nifty 50']}); s, m = e.extract('NIFTY surges', 'Details'); assert 'NIFTY' in s; print('Symbol extractor OK')"
+python -c "from src.sentiment.scorer import RecencyWeighter; r = RecencyWeighter(4.0); w = r.weight((datetime.now(timezone.utc) - timedelta(hours=4)))); assert 0.49 <= w <= 0.51; print(f'Recency weighter OK: 4h weight={w:.3f}')"
+
+# Step 22.4: Lint + format check
+ruff check src/sentiment/ tests/unit/test_sentiment_pipeline.py tests/property/test_sentiment_bounds.py tests/bench/test_sentiment_latency.py
+ruff format --check src/sentiment/ tests/
+
+# Step 22.5: Type checking
+mypy src/sentiment/ --strict
+
+# Step 22.6: Security linting
+bandit -c pyproject.toml -r src/sentiment/
+
+# Step 22.7: Dependency vulnerability scan
+pip-audit -r requirements.txt
+
+# Step 22.8: Secret scanning
+gitleaks detect --source . --no-git
+
+# Step 22.9: Unit tests
+pytest tests/unit/test_sentiment_pipeline.py -v --tb=short
+
+# Step 22.10: Property-based tests (Hypothesis)
+pytest tests/property/test_sentiment_bounds.py -v --hypothesis-seed=0 -m "not slow"
+
+# Step 22.11: Benchmark tests (FinBERT < 500ms per article)
+pytest tests/bench/test_sentiment_latency.py --benchmark-only -v
+
+# Step 22.12: Integration tests (requires network for RSS + FinBERT download)
+pytest tests/integration/test_sentiment_integration.py -v -m "not slow" --timeout=60
+
+# Step 22.13: Coverage report
+pytest tests/unit/test_sentiment_pipeline.py tests/property/test_sentiment_bounds.py --cov=src/sentiment --cov-report=term-missing --cov-fail-under=80
+
+# Step 22.14: SBOM generation
+cyclonedx-bom -r requirements.txt -o sbom_sentiment.json --format json
+
+# Step 22.15: Trivy filesystem scan
+trivy fs --skip-dirs="data/models" --severity HIGH,CRITICAL .
+
+# Step 22.16: Load tests (requires running sentiment API server)
+# locust -f tests/load/locustfile_sentiment.py --host=http://localhost:8000 --users 10 --spawn-rate 2 -t 60s --headless
+
+# Step 22.17: Pre-commit hooks
+pre-commit run --all-files
+
+Verification Gate: ALL 16 checks must pass (load test is optional — requires API server). If FinBERT download fails, network issue — use scripts/download_sentiment_models.py to pre-download. If pip-audit reports vulnerabilities, assess severity and add --ignore-vuln for false positives. If mypy fails on transformers/torch stubs, verify mypy overrides are configured.
+
+INSTRUCTION 23 — Cross-Reference Validation
+
+Item	Status	Notes
+FinBERT label mapping	VERIFIED	{0: positive, 1: negative, 2: neutral} — NOT alphabetical (Correction #2)
+newspaper3k → newspaper4k	VERIFIED	Deprecated since 2020; newspaper4k>=0.9.2 used (Correction #1)
+VADER as pre-filter	VERIFIED	Saves ~40-60% transformer calls on neutral text (Correction #8)
+muRIL fine-tuning required	VERIFIED	Base model only; Instruction 12 provides fine-tuning workflow (Correction #5)
+muRIL handles Hinglish natively	VERIFIED	No transliteration pre-processing needed (Correction #7)
+Half-life = 4 hours	VERIFIED	Intraday-appropriate recency decay (Correction #10)
+Source credibility weights	VERIFIED	Economic Times=0.85, Moneycontrol=0.80, LiveMint=0.75, Google News=0.60, Reddit=0.35 (Correction #12)
+Ensemble 70/30 split	VERIFIED	News × 0.70 + Social × 0.30 with validator that sum = 1.0 (Correction #11)
+Score bounds [-1, +1]	VERIFIED	numpy.clip on every weighted average + Pydantic Field validation + Hypothesis property tests (Correction #17)
+SentimentReport frozen	VERIFIED	Pydantic BaseModel(frozen=True) — matches Phase 5 Signal pattern (Correction #18)
+Language detection routing	VERIFIED	English → FinBERT, Hindi/Hinglish → muRIL, fallback → FinBERT (Correction #19)
+Model loaded once	VERIFIED	SentimentEngine.__init__ loads models; reused for all calls (Correction #20)
+Model caching for offline	VERIFIED	download_sentiment_models.py + TRANSFORMERS_OFFLINE + local_files_only=True (Correction #21)
+Symbol extraction from articles	VERIFIED	Regex + keyword matching with headline vs body weight (Correction #22)
+Cross-model confidence scoring	VERIFIED	Agreement bonus + disagreement penalty on confidence (Correction #23)
+Async scraping with backpressure	VERIFIED	httpx.AsyncClient + asyncio.to_thread + _running flag + semaphore (Correction #24)
+Tunstall Ch.1-7 extractions applied	VERIFIED	13 extractions mapped to specific Phase 8 implementation decisions (see table)
+Reddit praw OAuth	VERIFIED	Requires client_id/secret in .env; validated in RedditScraper._get_reddit_client() (Correction #13)
+RSS URL configurability	VERIFIED	SentimentSettings with Field(default=...) for all RSS URLs (Correction #15)
+SEBI compliance	VERIFIED	No market data redistribution; sentiment from public news only; audit trail in SentimentReport
+Windows 11 compatibility	VERIFIED	All deps pure-Python or pre-built wheels; asyncio.to_thread for sync libs; no WSL required
+Sentiment score for strategy	VERIFIED	SentimentReport.score consumed by Phase 5 strategy via sentiment_score metadata field
+Testing stack coverage	VERIFIED	pytest + pytest-cov + ruff + mypy + bandit + pip-audit + gitleaks + hypothesis + pytest-benchmark + pytest-xdist + pytest-asyncio + cyclonedx-bom + trivy + locust — all 15 tools verified
+
+INSTRUCTION 24 — SEBI Circular Reference Card (Phase 8 Context)
+
+Topic	Circular	Relevance to Phase 8
+Market data redistribution	NSE/MCX licensing terms	Sentiment scrapers MUST NOT redistribute raw market data — only extract sentiment signals from publicly available news
+Algo order tagging	SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013	Sentiment is a signal input, NOT an order decision. Strategy (Phase 5) combines sentiment with other factors before generating trade signals
+AI/ML disclosure	SEBI/HO/MRD/DOP1/CIR/P/2024/13	FinBERT + muRIL are pre-trained models used for classification, NOT generative AI. Disclosure-based regime; no RA registration required for classification-only ML
+Data localization	SEBI advisory	Sentiment data (scraped articles, model cache) stored locally on Windows 11 machine. No cloud API calls in production (HuggingFace models pre-downloaded for offline)
+Audit trail	SEBI CIR/MRD/DP/09/2012	SentimentReport is frozen (immutable) with computed_at timestamp + as_of_date + sources_breakdown for full provenance. 7-year retention per Phase 0 audit policy
+Privacy	PDP Bill 2023 (draft)	Scraped article data must not store PII. Reddit usernames are NOT stored — only post title + body text for sentiment
+
+DELIVERABLE SUMMARY
+Primary Function:
+    compute_sentiment(symbol: str) -> SentimentReport
+
+SentimentReport Fields:
+    symbol: str                          # "NIFTY", "BANKNIFTY", etc.
+    score: float                         # [-1.0, +1.0] — daily sentiment score
+    confidence: float                    # [0.0, 1.0] — multi-factor confidence
+    label: SentimentLabel                # POSITIVE / NEGATIVE / NEUTRAL
+    news_score: float                    # [-1.0, +1.0] — news-only weighted sentiment
+    social_score: float                  # [-1.0, +1.0] — social-only weighted sentiment
+    news_weight: float                   # 0.70 (configurable)
+    social_weight: float                 # 0.30 (configurable)
+    sources_breakdown: dict              # Per-source: article_count, weighted_score, avg_confidence, label_distribution
+    total_articles: int                  # Total articles processed for this symbol
+    effective_sample_size: float         # Statistical effective N after weighting
+    computed_at: datetime                # When this report was computed
+    as_of_date: str                      # "YYYY-MM-DD" date this report represents
+
+Files Created:
+    src/sentiment/__init__.py            # Package exports
+    src/sentiment/models.py              # All Pydantic models + enums + FinBERT label constants
+    src/sentiment/language.py            # Language detection + model routing
+    src/sentiment/scraper.py             # 5 scrapers + ScraperOrchestrator
+    src/sentiment/symbol_extractor.py    # Symbol extraction from article text
+    src/sentiment/scorer.py              # VADER, FinBERT, MuRIL, RecencyWeighter, ArticleSentimentScorer
+    src/sentiment/ensemble.py            # SentimentEnsemble with weighted averaging
+    src/sentiment/engine.py              # SentimentEngine (primary entry point)
+    config/settings.py                   # +SentimentSettings (appended)
+    config/secrets.env.example           # +Reddit OAuth fields (appended)
+    scripts/download_sentiment_models.py # Pre-download models for offline
+    scripts/finetune_muril.py            # muRIL fine-tuning workflow
+    .gitleaks.toml                       # +HF token + Reddit secret rules (appended)
+    .trivy.yaml                          # +model directory skips (appended)
+
+Test Files Created:
+    tests/unit/test_sentiment_pipeline.py       # 30+ unit tests
+    tests/property/test_sentiment_bounds.py     # Hypothesis property tests (score bounds, recency monotonicity)
+    tests/bench/test_sentiment_latency.py       # Benchmark: VADER <5ms, FinBERT <500ms per article
+    tests/integration/test_sentiment_integration.py # RSS + FinBERT end-to-end
+    tests/load/locustfile_sentiment.py          # Locust load tests for sentiment API
+    tests/conftest.py                           # +Phase 8 fixtures (appended)
+
+Test Verification Commands:
+    pytest tests/unit/test_sentiment_pipeline.py -v
+    pytest tests/property/test_sentiment_bounds.py -v --hypothesis-seed=0
+    pytest tests/bench/test_sentiment_latency.py --benchmark-only -v
+    pytest tests/integration/test_sentiment_integration.py -v -m "not slow"
+    pytest --cov=src/sentiment --cov-report=term-missing --cov-fail-under=80

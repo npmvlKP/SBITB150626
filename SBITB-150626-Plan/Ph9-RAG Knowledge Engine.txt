@@ -1,0 +1,3459 @@
+================================================================================
+PHASE 9: RAG KNOWLEDGE ENGINE — PRODUCTION-GRADE IMPLEMENTATION PLAN
+Weeks 19-21 | LangChain + ChromaDB + Ollama/Qwen 2.5 7B
+================================================================================
+
+CANONICAL REFERENCE STANDARDS:
+- "Designing Machine Learning Systems" (Huyen, 2022) — Ch.4: Data Engineering
+- "Building LLM Apps" (Biswas, 2024) — Ch.6: RAG Architecture Patterns
+- "Generative AI on AWS" (Perrone et al., 2024) — Ch.5: RAG with Vector Stores
+- LangChain Production KB: https://python.langchain.com/docs/productionization/
+- ChromaDB Docs: https://docs.trychroma.com/ (v0.4.x API)
+- NIST SP 800-53: AU-6, AU-12, SI-10, SC-8 (audit, input validation, encryption)
+- ISO 27001:2022 Annex A: A.8.15 (logging), A.8.24 (cryptography), A.8.28 (secure coding)
+- SEBI Cyber Security Framework: data retention, audit trails, access controls
+- "Retrieval-Augmented Generation for AI-Generated Content" (Lewis et al., 2020) — foundational RAG paper
+- "Evaluating RAG Systems" (Es et al., 2024) — RAGAS framework for evaluation
+
+ZERO-TOLERANCE POLICY:
+[NO assumptions | NO dependency conflicts | NO errors | NO test failures
+ NO blocking | NO regressions | NO hardcoded secrets | NO untyped code
+ NO missing error handling | NO unverified installations]
+
+================================================================================
+STEP 1: PRE-FLIGHT ENVIRONMENT VERIFICATION
+================================================================================
+
+INSTRUCTION 1.1 — Verify Python, pip, and virtual environment base:
+
+  python --version
+  # MUST return Python 3.11.x (3.11.0–3.11.9). If not, STOP and install 3.11.x from python.org.
+
+  pip --version
+  # MUST return pip 24.x+. If not: python -m pip install --upgrade pip
+
+  # Verify NO existing conflicting LangChain/ChromaDB installations:
+  pip list 2>$null | Select-String -Pattern "langchain|chromadb|ollama|sentence-transformers"
+  # If ANY matches found, they MUST be uninstalled first:
+  # pip uninstall langchain chromadb sentence-transformers -y
+
+INSTRUCTION 1.2 — Create and activate isolated virtual environment:
+
+  # Create project directory structure (if not exists)
+  New-Item -ItemType Directory -Path "G:\OC\02June26\src\rag_knowledge" -Force
+  New-Item -ItemType Directory -Path "G:\OC\02June26\tests\unit" -Force
+  New-Item -ItemType Directory -Path "G:\OC\02June26\tests\integration" -Force
+  New-Item -ItemType Directory -Path "G:\OC\02June26\tests\bench" -Force
+  New-Item -ItemType Directory -Path "G:\OC\02June26\tests\fixtures" -Force
+  New-Item -ItemType Directory -Path "G:\OC\02June26\data\rag_corpus" -Force
+  New-Item -ItemType Directory -Path "G:\OC\02June26\data\chroma_db" -Force
+  New-Item -ItemType Directory -Path "G:\OC\02June26\config" -Force
+
+  # Create and activate venv
+  python -m venv "G:\OC\02June26\.venv"
+  & "G:\OC\02June26\.venv\Scripts\Activate.ps1"
+  python --version   # Confirm venv Python
+  pip --version      # Confirm venv pip
+
+INSTRUCTION 1.3 — Verify Windows system resources for local LLM:
+
+  # RAM check — Qwen 2.5 7B quantized (Q4_K_M) requires ~5GB RAM
+  $os = Get-CimInstance Win32_OperatingSystem
+  $freeGB = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
+  Write-Host "Free RAM: $freeGB GB"
+  # MUST be >= 8 GB free. If less, STOP — cannot run Qwen 7B on CPU.
+
+  # Disk space check — ChromaDB + models need ~10GB
+  $drive = Get-PSDrive -Name "G"
+  $freeDiskGB = [math]::Round($drive.Free / 1GB, 1)
+  Write-Host "Free disk on G: $freeDiskGB GB"
+  # MUST be >= 15 GB free.
+
+================================================================================
+STEP 2: OLLAMA INSTALLATION + QWEN 2.5 7B MODEL SETUP
+================================================================================
+
+INSTRUCTION 2.1 — Install Ollama for Windows (CPU-only, local execution):
+
+  # Download Ollama for Windows from https://ollama.com/download/windows
+  # Run the installer (ollama-windows-amd64.exe)
+  # Verify installation:
+  ollama --version
+  # MUST return 0.5.x+ or newer.
+
+  # IMPORTANT: Ollama runs as a background service on Windows.
+  # Verify service is running:
+  Get-Service -Name "Ollama" -ErrorAction SilentlyContinue
+  # OR check the API endpoint:
+  Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -Method GET
+  # MUST return JSON with "models" array (may be empty initially).
+
+INSTRUCTION 2.2 — Pull Qwen 2.5 7B Instruct model:
+
+  ollama pull qwen2.5:7b-instruct
+  # This downloads ~4.7GB. Wait for completion.
+  # Verify:
+  ollama list
+  # MUST show "qwen2.5:7b-instruct" in the list.
+
+INSTRUCTION 2.3 — Test Ollama + Qwen inference endpoint:
+
+  # Quick smoke test via curl equivalent:
+  $body = @{
+    model = "qwen2.5:7b-instruct"
+    prompt = "What is NIFTY 50?"
+    stream = $false
+  } | ConvertTo-Json
+
+  $response = Invoke-RestMethod -Uri "http://localhost:11434/api/generate" -Method POST -Body $body -ContentType "application/json"
+  $response.response
+  # MUST return a coherent text response about NIFTY 50.
+  # If timeout or error: verify Ollama service is running, check port 11434.
+
+INSTRUCTION 2.4 — Verify Ollama API connectivity from Python (dry run):
+
+  pip install requests
+  python -c "import requests; r=requests.post('http://localhost:11434/api/generate', json={'model':'qwen2.5:7b-instruct','prompt':'Hello','stream':False}); print(r.status_code, r.json().get('response','')[:50])"
+  # MUST print: 200 followed by text snippet. If not, STOP and debug Ollama.
+
+================================================================================
+STEP 3: Pinned Dependency Installation (ZERO conflict protocol)
+================================================================================
+
+INSTRUCTION 3.1 — Create requirements-rag.txt with EXACT pinned versions:
+
+  File: G:\OC\02June26\requirements-rag.txt
+  ─────────────────────────────────────────────
+  # Core RAG stack — pinned for reproducibility
+  langchain==0.3.14
+  langchain-core==0.3.29
+  langchain-community==0.3.14
+  langchain-ollama==0.3.0
+  langchain-chroma==0.2.2
+  chromadb==0.5.23
+  sentence-transformers==3.3.1
+  # Embedding model dependency
+  torch==2.5.1+cpu
+  torchvision==0.20.1+cpu
+  # Document loading
+  pypdf==5.1.0
+  python-docx==1.1.2
+  markdown==3.7
+  beautifulsoup4==4.12.3
+  # Utilities
+  pydantic==2.10.6
+  pydantic-settings==2.7.1
+  python-dotenv==1.0.1
+  httpx==0.28.1
+  tenacity==9.0.0
+  # Testing & Security stack (dev)
+  pytest>=8.3.4
+  pytest-cov>=6.0.0
+  pytest-xdist>=3.6.1
+  pytest-asyncio>=0.25.0
+  pytest-benchmark>=4.0.0
+  hypothesis>=6.124.0
+  ruff>=0.8.6
+  mypy>=1.14.1
+  bandit[toml]>=1.9.0
+  pip-audit>=2.8.0
+  cyclonedx-bom>=4.0.0
+  locust>=2.32.4
+  # Security
+  gitleaks>=8.22.1
+  ─────────────────────────────────────────────
+
+  CRITICAL NOTE on torch CPU-only:
+  Use --extra-index-url for CPU wheels to avoid CUDA dependency bloat:
+  pip install torch==2.5.1+cpu torchvision==0.20.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
+
+INSTRUCTION 3.2 — Install dependencies in dependency-order (no conflict):
+
+  & "G:\OC\02June26\.venv\Scripts\Activate.ps1"
+
+  # Step A: Install torch CPU-only FIRST (avoids CUDA bloat)
+  pip install torch==2.5.1+cpu torchvision==0.20.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
+  python -c "import torch; print(f'torch={torch.__version__}, cuda={torch.cuda.is_available()}')"
+  # MUST print: torch=2.5.1+cpu, cuda=False
+
+  # Step B: Install sentence-transformers (depends on torch)
+  pip install sentence-transformers==3.3.1
+  python -c "from sentence_transformers import SentenceTransformer; print('sentence-transformers OK')"
+  # MUST print: sentence-transformers OK
+
+  # Step C: Install ChromaDB
+  pip install chromadb==0.5.23
+  python -c "import chromadb; print(f'chromadb={chromadb.__version__}')"
+  # MUST print: chromadb=0.5.23
+
+  # Step D: Install LangChain ecosystem
+  pip install langchain==0.3.14 langchain-core==0.3.29 langchain-community==0.3.14 langchain-ollama==0.3.0 langchain-chroma==0.2.2
+  python -c "import langchain; print(f'langchain={langchain.__version__}')"
+  # MUST print: langchain=0.3.14
+
+  # Step E: Install document loaders
+  pip install pypdf==5.1.0 python-docx==1.1.2 markdown==3.7 beautifulsoup4==4.12.3
+
+  # Step F: Install utilities
+  pip install pydantic==2.10.6 pydantic-settings==2.7.1 python-dotenv==1.0.1 httpx==0.28.1 tenacity==9.0.0
+
+  # Step G: Install dev/test/security tools
+  pip install pytest>=8.3.4 pytest-cov>=6.0.0 pytest-xdist>=3.6.1 pytest-asyncio>=0.25.0 pytest-benchmark>=4.0.0 hypothesis>=6.124.0 ruff>=0.8.6 mypy>=1.14.1 "bandit[toml]>=1.9.0" pip-audit>=2.8.0 cyclonedx-bom>=4.0.0 locust>=2.32.4
+
+INSTRUCTION 3.3 — Verify ALL imports simultaneously (conflict check):
+
+  python -c "
+  import langchain; print(f'langchain={langchain.__version__}')
+  import langchain_core; print(f'langchain-core={langchain_core.__version__}')
+  import langchain_community; print(f'langchain-community={langchain_community.__version__}')
+  import langchain_ollama; print(f'langchain-ollama={langchain_ollama.__version__}')
+  import langchain_chroma; print(f'langchain-chroma={langchain_chroma.__version__}')
+  import chromadb; print(f'chromadb={chromadb.__version__}')
+  import sentence_transformers; print(f'sentence-transformers={sentence_transformers.__version__}')
+  import torch; print(f'torch={torch.__version__}')
+  import pydantic; print(f'pydantic={pydantic.__version__}')
+  import pypdf; print(f'pypdf={pypdf.__version__}')
+  import pytest; print(f'pytest={pytest.__version__}')
+  print('ALL IMPORTS VERIFIED - ZERO CONFLICTS')
+  "
+  # Every line MUST print a version. If ANY ImportError: resolve before proceeding.
+
+INSTRUCTION 3.4 — Run pip-audit for vulnerability scan:
+
+  pip-audit --strict
+  # MUST exit code 0 (no vulnerabilities). If vulns found:
+  # pip-audit --ignore-vuln <VULN_ID>  (only for verified false positives with documented rationale)
+
+INSTRUCTION 3.5 — Freeze exact dependency tree for reproducibility:
+
+  pip freeze > "G:\OC\02June26\requirements-rag-lock.txt"
+  # This file is the golden lockfile. Never edit manually.
+
+================================================================================
+STEP 4: PROJECT STRUCTURE SCAFFOLDING
+================================================================================
+
+INSTRUCTION 4.1 — Create the complete directory tree:
+
+  G:\OC\02June26\
+  ├── src/
+  │   └── rag_knowledge/
+  │       ├── __init__.py
+  │       ├── config.py              # Pydantic Settings — all config from env
+  │       ├── models.py              # Pydantic models — RAGResponse, SourceDoc, etc.
+  │       ├── embeddings.py          # SentenceTransformer embedding wrapper
+  │       ├── vectorstore.py         # ChromaDB collection management
+  │       ├── ingest.py              # Document loading, chunking, ingestion pipeline
+  │       ├── retriever.py           # LangChain retriever with MMR + similarity
+  │       ├── generator.py           # Ollama/Qwen LLM invocation with prompts
+  │       ├── pipeline.py            # Orchestrator: query_rag() function
+  │       ├── confidence.py          # Confidence scoring module
+  │       ├── audit_logger.py        # Structured audit logging (NIST AU-12)
+  │       └── exceptions.py          # Custom exception hierarchy
+  ├── tests/
+  │   ├── __init__.py
+  │   ├── conftest.py                # Shared fixtures, mock Ollama, temp ChromaDB
+  │   ├── unit/
+  │   │   ├── __init__.py
+  │   │   ├── test_rag_pipeline.py   # Unit tests for pipeline components
+  │   │   ├── test_config.py
+  │   │   ├── test_models.py
+  │   │   ├── test_embeddings.py
+  │   │   ├── test_vectorstore.py
+  │   │   ├── test_ingest.py
+  │   │   ├── test_retriever.py
+  │   │   ├── test_generator.py
+  │   │   ├── test_confidence.py
+  │   │   └── test_audit_logger.py
+  │   ├── integration/
+  │   │   ├── __init__.py
+  │   │   └── test_rag_query.py      # End-to-end RAG query integration tests
+  │   ├── bench/
+  │   │   ├── __init__.py
+  │   │   └── test_rag_latency.py    # Latency benchmarks (<2s per query)
+  │   └── fixtures/
+  │       ├── sample_rbi_policy.pdf
+  │       ├── sample_sebi_circular.pdf
+  │       ├── sample_trade_journal.md
+  │       ├── sample_strategy_notes.txt
+  │       └── sample_research.pdf
+  ├── config/
+  │   └── rag_settings.toml          # RAG-specific configuration
+  ├── data/
+  │   ├── rag_corpus/                # Source documents for ingestion
+  │   └── chroma_db/                 # Persistent ChromaDB storage
+  ├── .gitleaks.toml                 # Gitleaks config (no secrets in repo)
+  ├── pyproject.toml                 # Project metadata + tool configs
+  └── requirements-rag.txt           # Pinned dependencies
+
+  Create all __init__.py files as empty (touch equivalent):
+  New-Item -ItemType File -Path "G:\OC\02June26\src\rag_knowledge\__init__.py" -Force
+  New-Item -ItemType File -Path "G:\OC\02June26\tests\__init__.py" -Force
+  New-Item -ItemType File -Path "G:\OC\02June26\tests\unit\__init__.py" -Force
+  New-Item -ItemType File -Path "G:\OC\02June26\tests\integration\__init__.py" -Force
+  New-Item -ItemType File -Path "G:\OC\02June26\tests\bench\__init__.py" -Force
+
+================================================================================
+STEP 5: PYPROJECT.TOML — FULL CONFIGURATION (ALL 13 TOOLS)
+================================================================================
+
+INSTRUCTION 5.1 — Write complete pyproject.toml:
+
+  File: G:\OC\02June26\pyproject.toml
+  ─────────────────────────────────────────────
+  [build-system]
+  requires = ["hatchling"]
+  build-backend = "hatchling.build"
+
+  [project]
+  name = "rag-knowledge-engine"
+  version = "0.1.0"
+  requires-python = ">=3.11"
+  dependencies = [
+    "langchain>=0.3.14",
+    "langchain-core>=0.3.29",
+    "langchain-community>=0.3.14",
+    "langchain-ollama>=0.3.0",
+    "langchain-chroma>=0.2.2",
+    "chromadb>=0.5.23",
+    "sentence-transformers>=3.3.1",
+    "pypdf>=5.1.0",
+    "python-docx>=1.1.2",
+    "markdown>=3.7",
+    "beautifulsoup4>=4.12.3",
+    "pydantic>=2.10.6",
+    "pydantic-settings>=2.7.1",
+    "python-dotenv>=1.0.1",
+    "httpx>=0.28.1",
+    "tenacity>=9.0.0",
+  ]
+
+  [project.optional-dependencies]
+  dev = [
+    "pytest>=8.3.4",
+    "pytest-cov>=6.0.0",
+    "pytest-xdist>=3.6.1",
+    "pytest-asyncio>=0.25.0",
+    "pytest-benchmark>=4.0.0",
+    "hypothesis>=6.124.0",
+    "ruff>=0.8.6",
+    "mypy>=1.14.1",
+    "bandit[toml]>=1.9.0",
+    "pip-audit>=2.8.0",
+    "cyclonedx-bom>=4.0.0",
+    "locust>=2.32.4",
+  ]
+
+  # ── Coverage ──
+  [tool.coverage.run]
+  branch = true
+  source = ["src/rag_knowledge"]
+  source_pkgs = ["rag_knowledge"]
+  parallel = true
+  concurrency = ["thread", "multiprocessing"]
+  omit = [
+    "src/rag_knowledge/__main__.py",
+    "tests/*",
+    "*/__init__.py",
+  ]
+
+  [tool.coverage.report]
+  fail_under = 80
+  precision = 2
+  show_missing = true
+  skip_covered = false
+  skip_empty = true
+  exclude_also = [
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@(abc\\.)?abstractmethod",
+    "\\.\\.\\.",
+    "pass",
+  ]
+
+  [tool.coverage.paths]
+  source = [
+    "src/rag_knowledge/",
+    "*/site-packages/rag_knowledge/",
+  ]
+
+  # ── Ruff ──
+  [tool.ruff]
+  target-version = "py311"
+  line-length = 120
+  indent-width = 4
+  extend-exclude = [
+    ".cache",
+    "chroma_db",
+    "data",
+    "*.bin",
+    "*.onnx",
+    "*.safetensors",
+    "model_cache",
+    "notebooks",
+  ]
+
+  [tool.ruff.lint]
+  select = [
+    "E", "W", "F", "I", "N", "UP", "B", "A", "C4", "SIM",
+    "TCH", "RUF", "PERF", "PGH", "PIE", "PL", "PTH", "TRY",
+  ]
+  ignore = [
+    "E501",
+    "PLR0913",
+    "PLR2004",
+    "TRY003",
+    "B905",
+    "PTH123",
+  ]
+
+  [tool.ruff.lint.per-file-ignores]
+  "tests/**" = ["PLR2004", "S101", "TCH"]
+
+  [tool.ruff.lint.isort]
+  known-first-party = ["rag_knowledge"]
+  known-third-party = ["langchain", "chromadb", "sentence_transformers", "ollama"]
+
+  [tool.ruff.lint.pylint]
+  max-args = 8
+  max-returns = 5
+
+  [tool.ruff.format]
+  quote-style = "double"
+  indent-style = "space"
+  docstring-code-format = true
+  docstring-code-line-length = 80
+
+  # ── mypy ──
+  [tool.mypy]
+  python_version = "3.11"
+  strict = true
+  warn_return_any = true
+  warn_unused_configs = true
+  warn_unused_ignores = true
+  warn_redundant_casts = true
+  disallow_untyped_defs = true
+  disallow_untyped_calls = true
+  disallow_incomplete_defs = true
+  disallow_untyped_decorators = true
+  check_untyped_defs = true
+  strict_optional = true
+  strict_equality = true
+  no_implicit_optional = true
+  no_implicit_reexport = true
+  show_error_codes = true
+  show_error_code_links = true
+  show_column_numbers = true
+  pretty = true
+  cache_dir = ".mypy_cache"
+  exclude = [
+    "tests/",
+    "model_cache/",
+    "data/",
+  ]
+
+  [[tool.mypy.overrides]]
+  module = [
+    "langchain.*",
+    "langchain_core.*",
+    "langchain_community.*",
+    "langchain_ollama.*",
+    "langchain_chroma.*",
+    "chromadb.*",
+    "sentence_transformers.*",
+    "torch.*",
+    "pypdf.*",
+    "docx.*",
+  ]
+  ignore_missing_imports = true
+
+  # ── bandit ──
+  [tool.bandit]
+  exclude_dirs = [
+    "tests",
+    "model_cache",
+    "data",
+    "chroma_db",
+    ".venv",
+  ]
+  skips = [
+    "B101",
+    "B311",
+  ]
+  tests = [
+    "B201",
+    "B301",
+    "B302",
+    "B303",
+    "B601",
+    "B602",
+    "B603",
+    "B607",
+  ]
+
+  # ── pytest ──
+  [tool.pytest.ini_options]
+  asyncio_mode = "auto"
+  asyncio_default_fixture_loop_scope = "function"
+  testpaths = ["tests"]
+  markers = [
+    "benchmark: marks benchmark tests (deselect with '-m \"not benchmark\"')",
+    "integration: marks integration tests requiring Ollama service",
+    "slow: marks slow tests (>5s)",
+  ]
+  addopts = """
+  --cov=rag_knowledge
+  --cov-report=term-missing
+  --cov-report=html
+  --cov-report=xml:coverage.xml
+  -n auto
+  --dist=worksteal
+  --tb=short
+  """
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 6: GITLEAKS CONFIGURATION (SECRET PREVENTION)
+================================================================================
+
+INSTRUCTION 6.1 — Write .gitleaks.toml at project root:
+
+  File: G:\OC\02June26\.gitleaks.toml
+  ─────────────────────────────────────────────
+  title = "RAG Knowledge Engine — Gitleaks Config"
+
+  [extend]
+  useDefault = true
+
+  disabledRules = ["generic-api-key"]
+
+  [[allowlists]]
+  description = "Allow test fixture data and sample documents"
+  paths = [
+    '''tests/fixtures/.*''',
+    '''data/rag_corpus/.*''',
+  ]
+  stopwords = [
+    "example",
+    "fake",
+    "test",
+    "dummy",
+    "demo",
+    "placeholder",
+    "sample",
+  ]
+
+  [[rules]]
+  id = "ollama-endpoint"
+  description = "Ollama API Endpoint URL"
+  regex = '''http://localhost:11434'''
+  keywords = ["ollama", "11434"]
+  tags = ["endpoint", "local"]
+  [[rules.allowlists]]
+  description = "Local Ollama is not a secret"
+  regexTarget = "match"
+  regexes = ['''http://localhost:11434''']
+  ─────────────────────────────────────────────
+
+  Verify:
+  gitleaks detect --no-git --source "G:\OC\02June26" --config "G:\OC\02June26\.gitleaks.toml"
+  # MUST exit code 0 (no leaks detected).
+
+================================================================================
+STEP 7: CONFIGURATION MODULE (config.py)
+================================================================================
+
+INSTRUCTION 7.1 — Implement Pydantic Settings-based configuration:
+
+  File: G:\OC\02June26\src\rag_knowledge\config.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Configuration (Pydantic Settings).
+
+  All configuration loaded from environment variables with sane defaults.
+  ZERO hardcoded secrets. Validates on instantiation.
+  """
+
+  from __future__ import annotations
+
+  from pathlib import Path
+  from pydantic import Field, field_validator
+  from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+  class RAGConfig(BaseSettings):
+      model_config = SettingsConfigDict(
+          env_prefix="RAG_",
+          env_file=".env",
+          env_file_encoding="utf-8",
+          extra="forbid",
+          frozen=True,
+      )
+
+      # ── LLM Settings ──
+      ollama_base_url: str = Field(
+          default="http://localhost:11434",
+          description="Ollama API base URL",
+      )
+      ollama_model: str = Field(
+          default="qwen2.5:7b-instruct",
+          description="Ollama model identifier for generation",
+      )
+      ollama_timeout_seconds: int = Field(
+          default=120,
+          ge=10,
+          le=600,
+          description="Timeout for Ollama LLM generation requests",
+      )
+      ollama_temperature: float = Field(
+          default=0.1,
+          ge=0.0,
+          le=2.0,
+          description="LLM temperature — low for factual RAG responses",
+      )
+      ollama_num_ctx: int = Field(
+          default=4096,
+          ge=512,
+          le=131072,
+          description="Context window size for Qwen 2.5 (supports up to 128K)",
+      )
+
+      # ── Embedding Settings ──
+      embedding_model_name: str = Field(
+          default="sentence-transformers/all-MiniLM-L6-v2",
+          description="HuggingFace sentence-transformer model for embeddings",
+      )
+      embedding_device: str = Field(
+          default="cpu",
+          description="Device for embedding inference: cpu or cuda",
+      )
+      embedding_batch_size: int = Field(
+          default=32,
+          ge=1,
+          le=256,
+          description="Batch size for embedding computation",
+      )
+
+      # ── ChromaDB Settings ──
+      chroma_persist_directory: Path = Field(
+          default=Path("data/chroma_db"),
+          description="ChromaDB persistent storage directory",
+      )
+      chroma_collection_name: str = Field(
+          default="indian_markets_knowledge",
+          description="ChromaDB collection name for market knowledge",
+      )
+      chroma_distance_function: str = Field(
+          default="cosine",
+          description="Distance function: cosine, l2, or ip",
+      )
+
+      # ── Retrieval Settings ──
+      retrieval_top_k: int = Field(
+          default=5,
+          ge=1,
+          le=50,
+          description="Number of documents to retrieve from vector store",
+      )
+      retrieval_score_threshold: float = Field(
+          default=0.3,
+          ge=0.0,
+          le=1.0,
+          description="Minimum similarity score for retrieval candidates",
+      )
+      retrieval_search_type: str = Field(
+          default="mmr",
+          description="Retrieval strategy: similarity, mmr, or similarity_score_threshold",
+      )
+      retrieval_mmr_lambda: float = Field(
+          default=0.5,
+          ge=0.0,
+          le=1.0,
+          description="MMR diversity parameter (0=max diversity, 1=max relevance)",
+      )
+
+      # ── Ingestion Settings ──
+      chunk_size: int = Field(
+          default=512,
+          ge=64,
+          le=4096,
+          description="Character count per document chunk",
+      )
+      chunk_overlap: int = Field(
+          default=64,
+          ge=0,
+          le=512,
+          description="Character overlap between consecutive chunks",
+      )
+      ingestion_batch_size: int = Field(
+          default=100,
+          ge=1,
+          le=1000,
+          description="Number of chunks to ingest per ChromaDB batch",
+      )
+
+      # ── Confidence Settings ──
+      confidence_min_sources: int = Field(
+          default=2,
+          ge=1,
+          le=10,
+          description="Minimum source documents for HIGH confidence",
+      )
+      confidence_high_threshold: float = Field(
+          default=0.75,
+          ge=0.0,
+          le=1.0,
+          description="Score threshold for HIGH confidence label",
+      )
+      confidence_medium_threshold: float = Field(
+          default=0.45,
+          ge=0.0,
+          le=1.0,
+          description="Score threshold for MEDIUM confidence label",
+      )
+
+      # ── Audit / Logging (NIST AU-12, ISO A.8.15) ──
+      audit_log_enabled: bool = Field(
+          default=True,
+          description="Enable structured audit logging for all RAG queries",
+      )
+      audit_log_path: Path = Field(
+          default=Path("logs/rag_audit.jsonl"),
+          description="Path for append-only audit log file",
+      )
+
+      # ── Guardrails ──
+      max_query_length: int = Field(
+          default=500,
+          ge=10,
+          le=5000,
+          description="Maximum character length for user queries (SI-10 input validation)",
+      )
+      disallowed_patterns: list[str] = Field(
+          default=[
+              "predict.*price",
+              "give.*buy.*signal",
+              "guaranteed.*return",
+              "what.*should.*i.*trade",
+              "recommend.*stock",
+              "future.*price",
+          ],
+          description="Regex patterns for disallowed predictive/trade queries",
+      )
+
+      @field_validator("chroma_distance_function")
+      @classmethod
+      def validate_distance_function(cls, v: str) -> str:
+          allowed = {"cosine", "l2", "ip"}
+          if v not in allowed:
+              msg = f"chroma_distance_function must be one of {allowed}, got '{v}'"
+              raise ValueError(msg)
+          return v
+
+      @field_validator("retrieval_search_type")
+      @classmethod
+      def validate_search_type(cls, v: str) -> str:
+          allowed = {"similarity", "mmr", "similarity_score_threshold"}
+          if v not in allowed:
+              msg = f"retrieval_search_type must be one of {allowed}, got '{v}'"
+              raise ValueError(msg)
+          return v
+
+      @field_validator("embedding_device")
+      @classmethod
+      def validate_device(cls, v: str) -> str:
+          allowed = {"cpu", "cuda"}
+          if v not in allowed:
+              msg = f"embedding_device must be one of {allowed}, got '{v}'"
+              raise ValueError(msg)
+          return v
+
+      @field_validator("disallowed_patterns")
+      @classmethod
+      def validate_patterns(cls, v: list[str]) -> list[str]:
+          import re
+          for pattern in v:
+              try:
+                  re.compile(pattern)
+              except re.PatternError as e:
+                  msg = f"Invalid regex in disallowed_patterns: '{pattern}' — {e}"
+                  raise ValueError(msg) from e
+          return v
+
+
+  def get_config() -> RAGConfig:
+      return RAGConfig()
+  ─────────────────────────────────────────────
+
+INSTRUCTION 7.2 — Verify config module:
+
+  cd G:\OC\02June26
+  python -c "from src.rag_knowledge.config import get_config; c=get_config(); print(c.ollama_model, c.embedding_model_name, c.retrieval_top_k)"
+  # MUST print: qwen2.5:7b-instruct sentence-transformers/all-MiniLM-L6-v2 5
+
+================================================================================
+STEP 8: PYDANTIC MODELS (models.py)
+================================================================================
+
+INSTRUCTION 8.1 — Define all data models with strict validation:
+
+  File: G:\OC\02June26\src\rag_knowledge\models.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Pydantic Data Models.
+
+  Strictly typed, validated models for all RAG pipeline inputs/outputs.
+  Per NIST SI-10: all input fields validated.
+  """
+
+  from __future__ import annotations
+
+  from datetime import datetime
+  from enum import Enum
+  from pathlib import Path
+  from pydantic import BaseModel, Field, field_validator
+
+
+  class ConfidenceLevel(str, Enum):
+      HIGH = "HIGH"
+      MEDIUM = "MEDIUM"
+      LOW = "LOW"
+      INSUFFICIENT = "INSUFFICIENT"
+
+
+  class SourceDocument(BaseModel):
+      content: str = Field(
+          ...,
+          min_length=1,
+          description="Retrieved document chunk text",
+      )
+      source_path: str = Field(
+          ...,
+          min_length=1,
+          description="Original file path or identifier of the source document",
+      )
+      page_number: int | None = Field(
+          default=None,
+          ge=0,
+          description="Page number in source PDF (if applicable)",
+      )
+      relevance_score: float = Field(
+          ...,
+          ge=0.0,
+          le=1.0,
+          description="Similarity/relevance score from vector store retrieval",
+      )
+      chunk_index: int = Field(
+          default=0,
+          ge=0,
+          description="Index of this chunk within the source document",
+      )
+      doc_type: str = Field(
+          default="unknown",
+          description="Document type: rbi_policy, sebi_circular, trade_journal, strategy_notes, research",
+      )
+      metadata: dict[str, str] = Field(
+          default_factory=dict,
+          description="Additional metadata key-value pairs",
+      )
+
+
+  class RAGResponse(BaseModel):
+      answer: str = Field(
+          ...,
+          min_length=1,
+          description="Generated answer from RAG pipeline (historical context only)",
+      )
+      sources: list[SourceDocument] = Field(
+          default_factory=list,
+          description="List of source documents used to generate the answer",
+      )
+      confidence: ConfidenceLevel = Field(
+          default=ConfidenceLevel.INSUFFICIENT,
+          description="Confidence level based on source quality and count",
+      )
+      confidence_score: float = Field(
+          default=0.0,
+          ge=0.0,
+          le=1.0,
+          description="Numerical confidence score",
+      )
+      query: str = Field(
+          ...,
+          min_length=1,
+          description="Original user query (for audit trail)",
+      )
+      is_trade_prediction: bool = Field(
+          default=False,
+          description="True if query was flagged as trade prediction attempt",
+      )
+      rejection_reason: str | None = Field(
+          default=None,
+          description="If query was rejected, the reason why",
+      )
+      latency_ms: float = Field(
+          default=0.0,
+          ge=0.0,
+          description="End-to-end query latency in milliseconds",
+      )
+      timestamp: datetime = Field(
+          default_factory=datetime.now,
+          description="Timestamp of the query execution (NIST AU-12)",
+      )
+      model_used: str = Field(
+          default="qwen2.5:7b-instruct",
+          description="LLM model used for generation",
+      )
+
+      @field_validator("answer")
+      @classmethod
+      def answer_must_not_contain_trade_advice(cls, v: str) -> str:
+          trade_patterns = [
+              "you should buy",
+              "you should sell",
+              "i recommend trading",
+              "guaranteed profit",
+              "this stock will go up",
+              "this stock will go down",
+              "place a buy order",
+              "place a sell order",
+          ]
+          v_lower = v.lower()
+          for pattern in trade_patterns:
+              if pattern in v_lower:
+                  msg = f"Answer contains prohibited trade advice pattern: '{pattern}'"
+                  raise ValueError(msg)
+          return v
+
+
+  class IngestResult(BaseModel):
+      documents_ingested: int = Field(
+          ...,
+          ge=0,
+          description="Total number of document chunks ingested",
+      )
+      sources_processed: int = Field(
+          ...,
+          ge=0,
+          description="Number of unique source files processed",
+      )
+      errors: list[str] = Field(
+          default_factory=list,
+          description="List of error messages from failed documents",
+      )
+      duration_seconds: float = Field(
+          ...,
+          ge=0.0,
+          description="Ingestion duration in seconds",
+      )
+
+
+  class QueryValidation(BaseModel):
+      is_valid: bool = Field(
+          ...,
+          description="Whether the query is valid for RAG processing",
+      )
+      sanitized_query: str = Field(
+          ...,
+          min_length=0,
+          description="Sanitized version of the query (empty if invalid)",
+      )
+      is_trade_prediction: bool = Field(
+          default=False,
+          description="Whether the query attempts to solicit trade predictions",
+      )
+      rejection_reason: str | None = Field(
+          default=None,
+          description="Reason for rejection if is_valid is False",
+      )
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 9: CUSTOM EXCEPTION HIERARCHY (exceptions.py)
+================================================================================
+
+INSTRUCTION 9.1 — Define typed exception hierarchy:
+
+  File: G:\OC\02June26\src\rag_knowledge\exceptions.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Custom Exception Hierarchy.
+
+  Every failure path MUST raise a typed exception — no bare raises, no generic Exception.
+  """
+
+
+  class RAGError(Exception):
+      """Base exception for all RAG Knowledge Engine errors."""
+
+
+  class OllamaConnectionError(RAGError):
+      """Ollama service unreachable or returned connection error."""
+
+
+  class OllamaGenerationError(RAGError):
+      """Ollama LLM generation failed after retries."""
+
+
+  class EmbeddingModelError(RAGError):
+      """Sentence-transformer embedding model failed to load or compute."""
+
+
+  class ChromaDBError(RAGError):
+      """ChromaDB operation failed (read, write, query)."""
+
+
+  class ChromaDBCollectionNotFoundError(ChromaDBError):
+      """Requested ChromaDB collection does not exist."""
+
+
+  class IngestionError(RAGError):
+      """Document ingestion pipeline failure."""
+
+
+  class IngestionFileError(IngestionError):
+      """Single file ingestion failure — file_path attribute available."""
+
+
+  class RetrievalError(RAGError):
+      """Document retrieval from vector store failed."""
+
+
+  class QueryValidationError(RAGError):
+      """User query failed validation (trade prediction, too long, empty)."""
+
+
+  class ConfidenceScoringError(RAGError):
+      """Confidence scoring computation failed."""
+
+
+  class AuditLoggingError(RAGError):
+      """Audit log write failure (non-blocking — logged but not raised to caller)."""
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 10: EMBEDDING WRAPPER (embeddings.py)
+================================================================================
+
+INSTRUCTION 10.1 — Implement SentenceTransformer embedding wrapper:
+
+  File: G:\OC\02June26\src\rag_knowledge\embeddings.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Embedding Model Wrapper.
+
+  Wraps sentence-transformers/all-MiniLM-L6-v2 with:
+  - Lazy singleton initialization (load once, reuse)
+  - Device selection (CPU/CUDA)
+  - Batch embedding with error handling
+  - Dimension validation (384 for all-MiniLM-L6-v2)
+  """
+
+  from __future__ import annotations
+
+  import logging
+  from functools import lru_cache
+  from typing import Any
+
+  from rag_knowledge.config import RAGConfig, get_config
+  from rag_knowledge.exceptions import EmbeddingModelError
+
+  logger = logging.getLogger(__name__)
+
+  EXPECTED_DIMENSION = 384
+
+
+  class EmbeddingEngine:
+      def __init__(self, config: RAGConfig | None = None) -> None:
+          self._config = config or get_config()
+          self._model: Any = None
+
+      def _load_model(self) -> Any:
+          if self._model is not None:
+              return self._model
+          try:
+              from sentence_transformers import SentenceTransformer
+
+              logger.info(
+                  "Loading embedding model: %s on %s",
+                  self._config.embedding_model_name,
+                  self._config.embedding_device,
+              )
+              self._model = SentenceTransformer(
+                  model_name=self._config.embedding_model_name,
+                  device=self._config.embedding_device,
+              )
+              dim = self._model.get_sentence_embedding_dimension()
+              if dim != EXPECTED_DIMENSION:
+                  msg = (
+                      f"Embedding dimension mismatch: expected {EXPECTED_DIMENSION}, "
+                      f"got {dim} from model {self._config.embedding_model_name}"
+                  )
+                  raise EmbeddingModelError(msg)
+              logger.info("Embedding model loaded. Dimension=%d", dim)
+              return self._model
+          except EmbeddingModelError:
+              raise
+          except Exception as e:
+              msg = f"Failed to load embedding model '{self._config.embedding_model_name}': {e}"
+              raise EmbeddingModelError(msg) from e
+
+      @property
+      def model(self) -> Any:
+          return self._load_model()
+
+      def embed_query(self, text: str) -> list[float]:
+          if not text or not text.strip():
+              msg = "Cannot embed empty query text"
+              raise EmbeddingModelError(msg)
+          try:
+              embedding = self.model.encode(text, show_progress_bar=False)
+              return embedding.tolist()
+          except Exception as e:
+              msg = f"Failed to embed query: {e}"
+              raise EmbeddingModelError(msg) from e
+
+      def embed_documents(self, texts: list[str]) -> list[list[float]]:
+          if not texts:
+              return []
+          try:
+              embeddings = self.model.encode(
+                  texts,
+                  batch_size=self._config.embedding_batch_size,
+                  show_progress_bar=False,
+              )
+              return embeddings.tolist()
+          except Exception as e:
+              msg = f"Failed to embed {len(texts)} documents: {e}"
+              raise EmbeddingModelError(msg) from e
+
+      @property
+      def dimension(self) -> int:
+          return EXPECTED_DIMENSION
+
+
+  @lru_cache(maxsize=1)
+  def get_embedding_engine(config: RAGConfig | None = None) -> EmbeddingEngine:
+      return EmbeddingEngine(config=config)
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 11: VECTOR STORE MODULE (vectorstore.py)
+================================================================================
+
+INSTRUCTION 11.1 — Implement ChromaDB vector store with persistence:
+
+  File: G:\OC\02June26\src\rag_knowledge\vectorstore.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — ChromaDB Vector Store Manager.
+
+  Persistent local ChromaDB with:
+  - Cosine similarity default
+  - Collection lifecycle (create, get, reset)
+  - Batch insertion with metadata
+  - MMR and similarity search
+  - Per NIST AU-12: all operations logged
+  """
+
+  from __future__ import annotations
+
+  import logging
+  from typing import Any
+
+  from rag_knowledge.config import RAGConfig, get_config
+  from rag_knowledge.exceptions import (
+      ChromaDBCollectionNotFoundError,
+      ChromaDBError,
+  )
+
+  logger = logging.getLogger(__name__)
+
+
+  class VectorStore:
+      def __init__(self, config: RAGConfig | None = None) -> None:
+          self._config = config or get_config()
+          self._client: Any = None
+          self._collection: Any = None
+
+      def _get_client(self) -> Any:
+          if self._client is not None:
+              return self._client
+          try:
+              import chromadb
+
+              persist_dir = str(self._config.chroma_persist_directory)
+              self._client = chromadb.PersistentClient(path=persist_dir)
+              logger.info("ChromaDB client initialized at: %s", persist_dir)
+              return self._client
+          except Exception as e:
+              msg = f"Failed to initialize ChromaDB client: {e}"
+              raise ChromaDBError(msg) from e
+
+      def get_collection(self) -> Any:
+          if self._collection is not None:
+              return self._collection
+          client = self._get_client()
+          try:
+              self._collection = client.get_or_create_collection(
+                  name=self._config.chroma_collection_name,
+                  metadata={"hnsw:space": self._config.chroma_distance_function},
+              )
+              logger.info(
+                  "ChromaDB collection '%s' loaded. Count=%d",
+                  self._config.chroma_collection_name,
+                  self._collection.count(),
+              )
+              return self._collection
+          except Exception as e:
+              msg = f"Failed to get/create ChromaDB collection '{self._config.chroma_collection_name}': {e}"
+              raise ChromaDBError(msg) from e
+
+      def add_documents(
+          self,
+          ids: list[str],
+          documents: list[str],
+          embeddings: list[list[float]],
+          metadatas: list[dict[str, Any]],
+      ) -> int:
+          if not ids:
+              return 0
+          collection = self.get_collection()
+          try:
+              batch_size = self._config.ingestion_batch_size
+              total_added = 0
+              for i in range(0, len(ids), batch_size):
+                  batch_ids = ids[i : i + batch_size]
+                  batch_docs = documents[i : i + batch_size]
+                  batch_embs = embeddings[i : i + batch_size]
+                  batch_meta = metadatas[i : i + batch_size]
+                  collection.add(
+                      ids=batch_ids,
+                      documents=batch_docs,
+                      embeddings=batch_embs,
+                      metadatas=batch_meta,
+                  )
+                  total_added += len(batch_ids)
+              logger.info("Added %d chunks to ChromaDB", total_added)
+              return total_added
+          except Exception as e:
+              msg = f"Failed to add documents to ChromaDB: {e}"
+              raise ChromaDBError(msg) from e
+
+      def similarity_search(
+          self,
+          query_embedding: list[float],
+          top_k: int | None = None,
+      ) -> dict[str, Any]:
+          collection = self.get_collection()
+          k = top_k or self._config.retrieval_top_k
+          try:
+              results = collection.query(
+                  query_embeddings=[query_embedding],
+                  n_results=k,
+                  include=["documents", "metadatas", "distances"],
+              )
+              return results
+          except Exception as e:
+              msg = f"ChromaDB similarity search failed: {e}"
+              raise ChromaDBError(msg) from e
+
+      def mmr_search(
+          self,
+          query_embedding: list[float],
+          top_k: int | None = None,
+      ) -> dict[str, Any]:
+          collection = self.get_collection()
+          k = top_k or self._config.retrieval_top_k
+          try:
+              results = collection.query(
+                  query_embeddings=[query_embedding],
+                  n_results=k * 3,
+                  include=["documents", "metadatas", "distances"],
+              )
+              selected_indices = self._mmr_select(
+                  query_embedding,
+                  results,
+                  k,
+              )
+              filtered: dict[str, Any] = {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+              for idx in selected_indices:
+                  filtered["documents"][0].append(results["documents"][0][idx])
+                  filtered["metadatas"][0].append(results["metadatas"][0][idx])
+                  filtered["distances"][0].append(results["distances"][0][idx])
+                  if "ids" in results:
+                      filtered["ids"][0].append(results["ids"][0][idx])
+              return filtered
+          except Exception as e:
+              msg = f"ChromaDB MMR search failed: {e}"
+              raise ChromaDBError(msg) from e
+
+      def _mmr_select(
+          self,
+          query_embedding: list[float],
+          results: dict[str, Any],
+          k: int,
+      ) -> list[int]:
+          import numpy as np
+
+          lambda_param = self._config.retrieval_mmr_lambda
+          doc_embeddings_raw = results.get("embeddings", [None])
+          if doc_embeddings_raw[0] is None:
+              return list(range(min(k, len(results["documents"][0]))))
+
+          doc_embs = np.array(doc_embeddings_raw[0])
+          query_emb = np.array(query_embedding)
+
+          n = doc_embs.shape[0]
+          selected: list[int] = []
+          remaining = list(range(n))
+
+          sim_to_query = np.dot(doc_embs, query_emb) / (
+              np.linalg.norm(doc_embs, axis=1) * np.linalg.norm(query_emb) + 1e-10
+          )
+
+          for _ in range(min(k, n)):
+              if not remaining:
+                  break
+              best_idx = -1
+              best_score = float("-inf")
+              for idx in remaining:
+                  relevance = lambda_param * sim_to_query[idx]
+                  diversity = 0.0
+                  if selected:
+                      sims = np.dot(doc_embs[idx], doc_embs[selected].T) / (
+                          np.linalg.norm(doc_embs[idx])
+                          * np.linalg.norm(doc_embs[selected], axis=1)
+                          + 1e-10
+                      )
+                      diversity = (1 - lambda_param) * float(np.max(sims))
+                  score = relevance - diversity
+                  if score > best_score:
+                      best_score = score
+                      best_idx = idx
+              if best_idx >= 0:
+                  selected.append(best_idx)
+                  remaining.remove(best_idx)
+          return selected
+
+      def reset_collection(self) -> None:
+          client = self._get_client()
+          try:
+              client.delete_collection(self._config.chroma_collection_name)
+              logger.warning("ChromaDB collection '%s' DELETED", self._config.chroma_collection_name)
+          except Exception as e:
+              msg = f"Failed to reset collection: {e}"
+              raise ChromaDBError(msg) from e
+          self._collection = None
+
+      def count(self) -> int:
+          collection = self.get_collection()
+          return collection.count()
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 12: DOCUMENT INGESTION PIPELINE (ingest.py)
+================================================================================
+
+INSTRUCTION 12.1 — Implement multi-format document ingestion:
+
+  File: G:\OC\02June26\src\rag_knowledge\ingest.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Document Ingestion Pipeline.
+
+  Loads, chunks, embeds, and stores documents into ChromaDB.
+  Supported formats: PDF, DOCX, TXT, MD
+  Chunks use RecursiveCharacterTextSplitter with overlap.
+  Metadata includes: source_path, doc_type, page_number, chunk_index.
+  """
+
+  from __future__ import annotations
+
+  import hashlib
+  import logging
+  import time
+  from pathlib import Path
+  from typing import Any
+
+  from rag_knowledge.config import RAGConfig, get_config
+  from rag_knowledge.embeddings import EmbeddingEngine, get_embedding_engine
+  from rag_knowledge.exceptions import IngestionError, IngestionFileError
+  from rag_knowledge.models import IngestResult
+  from rag_knowledge.vectorstore import VectorStore
+
+  logger = logging.getLogger(__name__)
+
+  DOC_TYPE_MAP: dict[str, str] = {
+      "rbi_policy": {".pdf"},
+      "sebi_circular": {".pdf"},
+      "trade_journal": {".md", ".txt"},
+      "strategy_notes": {".txt", ".md"},
+      "research": {".pdf", ".docx"},
+  }
+
+
+  class DocumentIngester:
+      def __init__(
+          self,
+          config: RAGConfig | None = None,
+          embedding_engine: EmbeddingEngine | None = None,
+          vector_store: VectorStore | None = None,
+      ) -> None:
+          self._config = config or get_config()
+          self._embedding_engine = embedding_engine or get_embedding_engine(config=self._config)
+          self._vector_store = vector_store or VectorStore(config=self._config)
+
+      def ingest_directory(self, directory: Path) -> IngestResult:
+          if not directory.exists():
+              msg = f"Ingestion directory does not exist: {directory}"
+              raise IngestionError(msg)
+          start = time.monotonic()
+          total_chunks = 0
+          total_sources = 0
+          errors: list[str] = []
+
+          supported_extensions = {".pdf", ".docx", ".txt", ".md"}
+          files = [
+              f
+              for f in directory.rglob("*")
+              if f.is_file() and f.suffix.lower() in supported_extensions
+          ]
+
+          if not files:
+              logger.warning("No supported documents found in: %s", directory)
+              return IngestResult(
+                  documents_ingested=0,
+                  sources_processed=0,
+                  errors=["No supported documents found"],
+                  duration_seconds=0.0,
+              )
+
+          for file_path in files:
+              try:
+                  chunks = self._load_and_chunk(file_path)
+                  if not chunks:
+                      errors.append(f"No text extracted from: {file_path.name}")
+                      continue
+                  doc_type = self._infer_doc_type(file_path)
+                  chunk_ids = [self._generate_chunk_id(file_path, i) for i in range(len(chunks))]
+                  metadatas = [
+                      {
+                          "source_path": str(file_path),
+                          "doc_type": doc_type,
+                          "chunk_index": str(i),
+                          "file_name": file_path.name,
+                          "file_hash": self._file_hash(file_path),
+                      }
+                      for i in range(len(chunks))
+                  ]
+                  embeddings = self._embedding_engine.embed_documents(chunks)
+                  self._vector_store.add_documents(
+                      ids=chunk_ids,
+                      documents=chunks,
+                      embeddings=embeddings,
+                      metadatas=metadatas,
+                  )
+                  total_chunks += len(chunks)
+                  total_sources += 1
+                  logger.info("Ingested: %s → %d chunks", file_path.name, len(chunks))
+              except Exception as e:
+                  error_msg = f"Failed to ingest {file_path.name}: {e}"
+                  logger.error(error_msg)
+                  errors.append(error_msg)
+
+          duration = time.monotonic() - start
+          return IngestResult(
+              documents_ingested=total_chunks,
+              sources_processed=total_sources,
+              errors=errors,
+              duration_seconds=round(duration, 3),
+          )
+
+      def _load_and_chunk(self, file_path: Path) -> list[str]:
+          raw_text = self._extract_text(file_path)
+          if not raw_text or not raw_text.strip():
+              return []
+          from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+          splitter = RecursiveCharacterTextSplitter(
+              chunk_size=self._config.chunk_size,
+              chunk_overlap=self._config.chunk_overlap,
+              separators=["\n\n", "\n", ". ", " ", ""],
+              length_function=len,
+          )
+          chunks = splitter.split_text(raw_text)
+          return [c.strip() for c in chunks if c.strip()]
+
+      def _extract_text(self, file_path: Path) -> str:
+          suffix = file_path.suffix.lower()
+          try:
+              if suffix == ".pdf":
+                  return self._extract_pdf(file_path)
+              elif suffix == ".docx":
+                  return self._extract_docx(file_path)
+              elif suffix in {".txt", ".md"}:
+                  return file_path.read_text(encoding="utf-8", errors="replace")
+              else:
+                  msg = f"Unsupported file format: {suffix}"
+                  raise IngestionFileError(msg)
+          except IngestionFileError:
+              raise
+          except Exception as e:
+              msg = f"Text extraction failed for {file_path.name}: {e}"
+              raise IngestionFileError(msg) from e
+
+      def _extract_pdf(self, file_path: Path) -> str:
+          try:
+              from pypdf import PdfReader
+
+              reader = PdfReader(str(file_path))
+              pages = []
+              for page in reader.pages:
+                  text = page.extract_text()
+                  if text:
+                      pages.append(text)
+              return "\n\n".join(pages)
+          except Exception as e:
+              msg = f"PDF extraction failed for {file_path.name}: {e}"
+              raise IngestionFileError(msg) from e
+
+      def _extract_docx(self, file_path: Path) -> str:
+          try:
+              import docx
+
+              doc = docx.Document(str(file_path))
+              paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+              return "\n\n".join(paragraphs)
+          except Exception as e:
+              msg = f"DOCX extraction failed for {file_path.name}: {e}"
+              raise IngestionFileError(msg) from e
+
+      def _infer_doc_type(self, file_path: Path) -> str:
+          name_lower = file_path.name.lower()
+          if any(kw in name_lower for kw in ["rbi", "monetary_policy", "repo_rate"]):
+              return "rbi_policy"
+          if any(kw in name_lower for kw in ["sebi", "circular", "regulation"]):
+              return "sebi_circular"
+          if any(kw in name_lower for kw in ["journal", "trade_log", "diary"]):
+              return "trade_journal"
+          if any(kw in name_lower for kw in ["strategy", "notes", "playbook"]):
+              return "strategy_notes"
+          if any(kw in name_lower for kw in ["research", "analysis", "report"]):
+              return "research"
+          return "unknown"
+
+      @staticmethod
+      def _generate_chunk_id(file_path: Path, chunk_index: int) -> str:
+          raw = f"{file_path.name}:{chunk_index}"
+          return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+      @staticmethod
+      def _file_hash(file_path: Path) -> str:
+          h = hashlib.sha256()
+          with open(file_path, "rb") as f:
+              for chunk in iter(lambda: f.read(8192), b""):
+                  h.update(chunk)
+          return h.hexdigest()[:16]
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 13: RETRIEVER MODULE (retriever.py)
+================================================================================
+
+INSTRUCTION 13.1 — Implement document retriever with guardrail validation:
+
+  File: G:\OC\02June26\src\rag_knowledge\retriever.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Document Retriever.
+
+  Handles:
+  - Query validation (trade prediction detection per SEBI compliance)
+  - Query sanitization (SI-10 input validation)
+  - Embedding-based retrieval from ChromaDB
+  - Source document construction with metadata
+  """
+
+  from __future__ import annotations
+
+  import logging
+  import re
+
+  from rag_knowledge.config import RAGConfig, get_config
+  from rag_knowledge.embeddings import EmbeddingEngine, get_embedding_engine
+  from rag_knowledge.exceptions import QueryValidationError, RetrievalError
+  from rag_knowledge.models import QueryValidation, SourceDocument
+  from rag_knowledge.vectorstore import VectorStore
+
+  logger = logging.getLogger(__name__)
+
+
+  class DocumentRetriever:
+      def __init__(
+          self,
+          config: RAGConfig | None = None,
+          embedding_engine: EmbeddingEngine | None = None,
+          vector_store: VectorStore | None = None,
+      ) -> None:
+          self._config = config or get_config()
+          self._embedding_engine = embedding_engine or get_embedding_engine(config=self._config)
+          self._vector_store = vector_store or VectorStore(config=self._config)
+          self._disallowed_patterns = [re.compile(p, re.IGNORECASE) for p in self._config.disallowed_patterns]
+
+      def validate_query(self, query: str) -> QueryValidation:
+          if not query or not query.strip():
+              return QueryValidation(
+                  is_valid=False,
+                  sanitized_query="",
+                  is_trade_prediction=False,
+                  rejection_reason="Query is empty or whitespace-only",
+              )
+          if len(query) > self._config.max_query_length:
+              return QueryValidation(
+                  is_valid=False,
+                  sanitized_query="",
+                  is_trade_prediction=False,
+                  rejection_reason=f"Query exceeds maximum length of {self._config.max_query_length} characters",
+              )
+          sanitized = self._sanitize(query)
+          for pattern in self._disallowed_patterns:
+              if pattern.search(sanitized):
+                  return QueryValidation(
+                      is_valid=False,
+                      sanitized_query=sanitized,
+                      is_trade_prediction=True,
+                      rejection_reason=(
+                          "Query requests trade prediction or investment advice. "
+                          "This RAG system answers historical-context questions only, "
+                          "per SEBI compliance requirements."
+                      ),
+                  )
+          return QueryValidation(
+              is_valid=True,
+              sanitized_query=sanitized,
+              is_trade_prediction=False,
+              rejection_reason=None,
+          )
+
+      def retrieve(self, query: str, top_k: int | None = None) -> list[SourceDocument]:
+          validation = self.validate_query(query)
+          if not validation.is_valid:
+              if validation.is_trade_prediction:
+                  raise QueryValidationError(validation.rejection_reason or "Trade prediction query")
+              raise QueryValidationError(validation.rejection_reason or "Invalid query")
+
+          try:
+              query_embedding = self._embedding_engine.embed_query(validation.sanitized_query)
+          except Exception as e:
+              msg = f"Query embedding failed: {e}"
+              raise RetrievalError(msg) from e
+
+          try:
+              if self._config.retrieval_search_type == "mmr":
+                  results = self._vector_store.mmr_search(query_embedding, top_k)
+              else:
+                  results = self._vector_store.similarity_search(query_embedding, top_k)
+          except Exception as e:
+              msg = f"Vector store retrieval failed: {e}"
+              raise RetrievalError(msg) from e
+
+          return self._build_source_documents(results)
+
+      def _build_source_documents(self, results: dict[str, Any]) -> list[SourceDocument]:
+          if not results.get("documents") or not results["documents"][0]:
+              return []
+          docs = results["documents"][0]
+          metas = results.get("metadatas", [[]])[0]
+          distances = results.get("distances", [[]])[0]
+          source_docs: list[SourceDocument] = []
+          for i, doc_text in enumerate(docs):
+              meta = metas[i] if i < len(metas) else {}
+              distance = distances[i] if i < len(distances) else 1.0
+              relevance = max(0.0, min(1.0, 1.0 - distance))
+              source_docs.append(
+                  SourceDocument(
+                      content=doc_text,
+                      source_path=meta.get("source_path", "unknown"),
+                      page_number=int(meta.get("page_number", -1)) if meta.get("page_number") else None,
+                      relevance_score=relevance,
+                      chunk_index=int(meta.get("chunk_index", 0)),
+                      doc_type=meta.get("doc_type", "unknown"),
+                      metadata={k: str(v) for k, v in meta.items() if k not in {"source_path", "doc_type", "chunk_index"}},
+                  )
+              )
+          return source_docs
+
+      @staticmethod
+      def _sanitize(query: str) -> str:
+          sanitized = query.strip()
+          sanitized = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", sanitized)
+          return sanitized
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 14: LLM GENERATOR MODULE (generator.py)
+================================================================================
+
+INSTRUCTION 14.1 — Implement Ollama/Qwen generation with RAG prompt:
+
+  File: G:\OC\02June26\src\rag_knowledge\generator.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — LLM Generator (Ollama + Qwen 2.5 7B).
+
+  Generates answers from retrieved context using local Ollama inference.
+  System prompt enforces:
+  - Historical context ONLY (no trade predictions)
+  - Source citation requirement
+  - Fallback when context is insufficient
+  - Per ISO A.8.28: no eval/exec on retrieved content
+  """
+
+  from __future__ import annotations
+
+  import logging
+
+  from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+  from rag_knowledge.config import RAGConfig, get_config
+  from rag_knowledge.exceptions import OllamaConnectionError, OllamaGenerationError
+  from rag_knowledge.models import SourceDocument
+
+  logger = logging.getLogger(__name__)
+
+  SYSTEM_PROMPT = """You are a RAG Knowledge Engine for Indian financial markets (NIFTY, BANKNIFTY, F&O, options, RBI policy, SEBI regulations).
+
+STRICT RULES — VIOLATION IS UNACCEPTABLE:
+1. Answer ONLY with historical-context information from the provided sources.
+2. NEVER predict future prices, recommend trades, or give buy/sell/hold advice.
+3. NEVER say "you should buy", "you should sell", or "I recommend trading".
+4. If the sources do not contain relevant information, respond: "I don't have sufficient historical data to answer this question."
+5. Always cite which source document(s) your answer is based on.
+6. Distinguish between what is stated in sources vs. general knowledge.
+7. Format your answer clearly with sections when appropriate.
+8. Use precise dates, numbers, and figures from the sources when available.
+
+QUERY CONTEXT:
+{context}
+
+SOURCE DOCUMENTS:
+{sources}
+
+Answer the following question based ONLY on the provided source documents.
+If the sources are insufficient, state so explicitly."""
+
+
+  class LLMGenerator:
+      def __init__(self, config: RAGConfig | None = None) -> None:
+          self._config = config or get_config()
+          self._llm: object | None = None
+
+      def _get_llm(self) -> Any:
+          if self._llm is not None:
+              return self._llm
+          try:
+              from langchain_ollama import OllamaLLM
+
+              self._llm = OllamaLLM(
+                  model=self._config.ollama_model,
+                  base_url=self._config.ollama_base_url,
+                  temperature=self._config.ollama_temperature,
+                  num_ctx=self._config.ollama_num_ctx,
+                  timeout=self._config.ollama_timeout_seconds,
+              )
+              return self._llm
+          except Exception as e:
+              msg = f"Failed to initialize Ollama LLM: {e}"
+              raise OllamaConnectionError(msg) from e
+
+      @retry(
+          stop=stop_after_attempt(3),
+          wait=wait_exponential(multiplier=1, min=2, max=30),
+          retry=retry_if_exception_type(OllamaConnectionError),
+          reraise=True,
+      )
+      def generate(self, query: str, sources: list[SourceDocument]) -> str:
+          if not sources:
+              return (
+                  "I don't have sufficient historical data to answer this question. "
+                  "No relevant source documents were found in the knowledge base."
+              )
+          context_block = query
+          sources_block = self._format_sources(sources)
+          prompt = SYSTEM_PROMPT.format(
+              context=context_block,
+              sources=sources_block,
+          )
+          full_prompt = f"{prompt}\n\nQUESTION: {query}\n\nANSWER:"
+          try:
+              llm = self._get_llm()
+              response = llm.invoke(full_prompt)
+              answer = str(response).strip()
+              if not answer:
+                  return "The language model returned an empty response. Please retry."
+              return answer
+          except OllamaConnectionError:
+              raise
+          except Exception as e:
+              msg = f"Ollama generation failed: {e}"
+              raise OllamaGenerationError(msg) from e
+
+      def health_check(self) -> bool:
+          try:
+              import httpx
+
+              response = httpx.get(
+                  f"{self._config.ollama_base_url}/api/tags",
+                  timeout=10.0,
+              )
+              return response.status_code == 200
+          except Exception:
+              return False
+
+      @staticmethod
+      def _format_sources(sources: list[SourceDocument]) -> str:
+          formatted: list[str] = []
+          for i, src in enumerate(sources, 1):
+              source_line = f"[Source {i}] {src.source_path} (type={src.doc_type}, relevance={src.relevance_score:.3f})"
+              content_line = src.content[:500]
+              if len(src.content) > 500:
+                  content_line += "..."
+              formatted.append(f"{source_line}\n{content_line}")
+          return "\n\n".join(formatted)
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 15: CONFIDENCE SCORING MODULE (confidence.py)
+================================================================================
+
+INSTRUCTION 15.1 — Implement multi-factor confidence scoring:
+
+  File: G:\OC\02June26\src\rag_knowledge\confidence.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Confidence Scoring.
+
+  Multi-factor confidence assessment based on:
+  1. Source relevance scores (vector similarity)
+  2. Source count (more sources = higher confidence)
+  3. Source diversity (multiple doc_types = higher confidence)
+  4. Answer length heuristic (very short answers = lower confidence)
+
+  Outputs: ConfidenceLevel enum + numerical score.
+  Per "Evaluating RAG Systems" (Es et al., 2024) — faithfulness + relevance.
+  """
+
+  from __future__ import annotations
+
+  import logging
+
+  from rag_knowledge.config import RAGConfig, get_config
+  from rag_knowledge.exceptions import ConfidenceScoringError
+  from rag_knowledge.models import ConfidenceLevel, SourceDocument
+
+  logger = logging.getLogger(__name__)
+
+
+  class ConfidenceScorer:
+      def __init__(self, config: RAGConfig | None = None) -> None:
+          self._config = config or get_config()
+
+      def score(self, sources: list[SourceDocument], answer: str) -> tuple[ConfidenceLevel, float]:
+          if not sources:
+              return ConfidenceLevel.INSUFFICIENT, 0.0
+          try:
+              relevance_factor = self._relevance_factor(sources)
+              count_factor = self._count_factor(sources)
+              diversity_factor = self._diversity_factor(sources)
+              length_factor = self._length_factor(answer)
+
+              raw_score = (
+                  relevance_factor * 0.40
+                  + count_factor * 0.25
+                  + diversity_factor * 0.20
+                  + length_factor * 0.15
+              )
+              final_score = max(0.0, min(1.0, raw_score))
+              level = self._score_to_level(final_score)
+              return level, round(final_score, 4)
+          except Exception as e:
+              msg = f"Confidence scoring failed: {e}"
+              raise ConfidenceScoringError(msg) from e
+
+      def _relevance_factor(self, sources: list[SourceDocument]) -> float:
+          if not sources:
+              return 0.0
+          scores = [s.relevance_score for s in sources]
+          avg = sum(scores) / len(scores)
+          max_score = max(scores)
+          return (avg * 0.6 + max_score * 0.4)
+
+      def _count_factor(self, sources: list[SourceDocument]) -> float:
+          n = len(sources)
+          min_sources = self._config.confidence_min_sources
+          if n >= min_sources:
+              return min(1.0, n / (min_sources * 2))
+          return n / min_sources
+
+      def _diversity_factor(self, sources: list[SourceDocument]) -> float:
+          doc_types = {s.doc_type for s in sources if s.doc_type != "unknown"}
+          source_paths = {s.source_path for s in sources}
+          type_diversity = min(1.0, len(doc_types) / 3.0)
+          source_diversity = min(1.0, len(source_paths) / 3.0)
+          return (type_diversity * 0.5 + source_diversity * 0.5)
+
+      @staticmethod
+      def _length_factor(answer: str) -> float:
+          word_count = len(answer.split())
+          if word_count < 10:
+              return 0.2
+          if word_count < 30:
+              return 0.5
+          if word_count < 100:
+              return 0.7
+          return 1.0
+
+      def _score_to_level(self, score: float) -> ConfidenceLevel:
+          if score >= self._config.confidence_high_threshold:
+              return ConfidenceLevel.HIGH
+          if score >= self._config.confidence_medium_threshold:
+              return ConfidenceLevel.MEDIUM
+          if score > 0.0:
+              return ConfidenceLevel.LOW
+          return ConfidenceLevel.INSUFFICIENT
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 16: AUDIT LOGGER MODULE (audit_logger.py)
+================================================================================
+
+INSTRUCTION 16.1 — Implement NIST AU-12 compliant structured audit logging:
+
+  File: G:\OC\02June26\src\rag_knowledge\audit_logger.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Structured Audit Logger.
+
+  NIST AU-12 / ISO A.8.15 compliant:
+  - Append-only JSONL format
+  - Every query logged with timestamp, query, sources, confidence, latency
+  - Tamper-evident: each log entry includes SHA-256 hash of previous entry
+  - Non-blocking: audit failures are logged but never block RAG pipeline
+  - Retention: per SEBI, trade-related logs retained 5+ years
+  """
+
+  from __future__ import annotations
+
+  import hashlib
+  import json
+  import logging
+  from datetime import datetime
+  from pathlib import Path
+
+  from rag_knowledge.config import RAGConfig, get_config
+  from rag_knowledge.exceptions import AuditLoggingError
+  from rag_knowledge.models import RAGResponse
+
+  logger = logging.getLogger(__name__)
+
+
+  class AuditLogger:
+      def __init__(self, config: RAGConfig | None = None) -> None:
+          self._config = config or get_config()
+          self._last_hash = "GENESIS"
+
+      def log_query(self, response: RAGResponse) -> None:
+          if not self._config.audit_log_enabled:
+              return
+          try:
+              log_path = self._config.audit_log_path
+              log_path.parent.mkdir(parents=True, exist_ok=True)
+              entry = {
+                  "timestamp": response.timestamp.isoformat(),
+                  "query": response.query,
+                  "answer_preview": response.answer[:200],
+                  "confidence": response.confidence.value,
+                  "confidence_score": response.confidence_score,
+                  "source_count": len(response.sources),
+                  "source_paths": [s.source_path for s in response.sources],
+                  "is_trade_prediction": response.is_trade_prediction,
+                  "rejection_reason": response.rejection_reason,
+                  "latency_ms": response.latency_ms,
+                  "model_used": response.model_used,
+                  "previous_hash": self._last_hash,
+              }
+              entry_str = json.dumps(entry, default=str, ensure_ascii=True)
+              current_hash = hashlib.sha256(entry_str.encode()).hexdigest()
+              entry["entry_hash"] = current_hash
+              self._last_hash = current_hash
+              final_entry = json.dumps(entry, default=str, ensure_ascii=True)
+              with open(log_path, "a", encoding="utf-8") as f:
+                  f.write(final_entry + "\n")
+          except Exception as e:
+              logger.error("Audit logging failed (non-blocking): %s", e)
+
+      def log_ingestion(self, result: dict[str, object]) -> None:
+          if not self._config.audit_log_enabled:
+              return
+          try:
+              log_path = self._config.audit_log_path
+              log_path.parent.mkdir(parents=True, exist_ok=True)
+              entry = {
+                  "timestamp": datetime.now().isoformat(),
+                  "event_type": "ingestion",
+                  **result,
+                  "previous_hash": self._last_hash,
+              }
+              entry_str = json.dumps(entry, default=str, ensure_ascii=True)
+              current_hash = hashlib.sha256(entry_str.encode()).hexdigest()
+              entry["entry_hash"] = current_hash
+              self._last_hash = current_hash
+              final_entry = json.dumps(entry, default=str, ensure_ascii=True)
+              with open(log_path, "a", encoding="utf-8") as f:
+                  f.write(final_entry + "\n")
+          except Exception as e:
+              logger.error("Ingestion audit logging failed (non-blocking): %s", e)
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 17: PIPELINE ORCHESTRATOR (pipeline.py) — THE DELIVERABLE
+================================================================================
+
+INSTRUCTION 17.1 — Implement the query_rag() function (PRIMARY DELIVERABLE):
+
+  File: G:\OC\02June26\src\rag_knowledge\pipeline.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Pipeline Orchestrator.
+
+  DELIVERABLE: query_rag(question) -> RAGResponse(answer, sources, confidence)
+
+  Orchestrates: validation → retrieval → generation → confidence → audit
+  Enforces: historical-context ONLY, no trade predictions (SEBI compliance)
+  """
+
+  from __future__ import annotations
+
+  import logging
+  import time
+
+  from rag_knowledge.audit_logger import AuditLogger
+  from rag_knowledge.config import RAGConfig, get_config
+  from rag_knowledge.confidence import ConfidenceScorer
+  from rag_knowledge.exceptions import QueryValidationError, RAGError
+  from rag_knowledge.generator import LLMGenerator
+  from rag_knowledge.models import ConfidenceLevel, RAGResponse, SourceDocument
+  from rag_knowledge.retriever import DocumentRetriever
+
+  logger = logging.getLogger(__name__)
+
+
+  class RAGPipeline:
+      def __init__(self, config: RAGConfig | None = None) -> None:
+          self._config = config or get_config()
+          self._retriever = DocumentRetriever(config=self._config)
+          self._generator = LLMGenerator(config=self._config)
+          self._scorer = ConfidenceScorer(config=self._config)
+          self._audit_logger = AuditLogger(config=self._config)
+
+      def query_rag(self, question: str) -> RAGResponse:
+          start = time.monotonic()
+          validation = self._retriever.validate_query(question)
+
+          if not validation.is_valid:
+              latency = (time.monotonic() - start) * 1000
+              response = RAGResponse(
+                  answer=(
+                      "I cannot answer this question. "
+                      + (validation.rejection_reason or "Query validation failed.")
+                  ),
+                  sources=[],
+                  confidence=ConfidenceLevel.INSUFFICIENT,
+                  confidence_score=0.0,
+                  query=question,
+                  is_trade_prediction=validation.is_trade_prediction,
+                  rejection_reason=validation.rejection_reason,
+                  latency_ms=round(latency, 2),
+                  model_used=self._config.ollama_model,
+              )
+              self._audit_logger.log_query(response)
+              return response
+
+          try:
+              sources = self._retriever.retrieve(question)
+          except QueryValidationError:
+              raise
+          except RAGError as e:
+              latency = (time.monotonic() - start) * 1000
+              logger.error("Retrieval failed: %s", e)
+              response = RAGResponse(
+                  answer=f"Retrieval error occurred: {e}",
+                  sources=[],
+                  confidence=ConfidenceLevel.INSUFFICIENT,
+                  confidence_score=0.0,
+                  query=question,
+                  latency_ms=round(latency, 2),
+                  model_used=self._config.ollama_model,
+              )
+              self._audit_logger.log_query(response)
+              return response
+
+          try:
+              answer = self._generator.generate(question, sources)
+          except RAGError as e:
+              latency = (time.monotonic() - start) * 1000
+              logger.error("Generation failed: %s", e)
+              response = RAGResponse(
+                  answer=f"Generation error occurred: {e}",
+                  sources=sources,
+                  confidence=ConfidenceLevel.INSUFFICIENT,
+                  confidence_score=0.0,
+                  query=question,
+                  latency_ms=round(latency, 2),
+                  model_used=self._config.ollama_model,
+              )
+              self._audit_logger.log_query(response)
+              return response
+
+          confidence_level, confidence_score = self._scorer.score(sources, answer)
+          latency = (time.monotonic() - start) * 1000
+
+          response = RAGResponse(
+              answer=answer,
+              sources=sources,
+              confidence=confidence_level,
+              confidence_score=confidence_score,
+              query=question,
+              latency_ms=round(latency, 2),
+              model_used=self._config.ollama_model,
+          )
+
+          self._audit_logger.log_query(response)
+          logger.info(
+              "RAG query completed: confidence=%s score=%.3f latency=%.0fms sources=%d",
+              confidence_level.value,
+              confidence_score,
+              latency,
+              len(sources),
+          )
+          return response
+
+
+  _pipeline: RAGPipeline | None = None
+
+
+  def query_rag(question: str) -> RAGResponse:
+      """Production API: query_rag(question) -> RAGResponse(answer, sources, confidence).
+
+      This is the primary deliverable function.
+      Answers historical-context questions ONLY. Does NOT predict trades.
+      """
+      global _pipeline
+      if _pipeline is None:
+          _pipeline = RAGPipeline()
+      return _pipeline.query_rag(question)
+
+
+  def init_pipeline(config: RAGConfig | None = None) -> RAGPipeline:
+      global _pipeline
+      _pipeline = RAGPipeline(config=config)
+      return _pipeline
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 18: PACKAGE __init__.py
+================================================================================
+
+INSTRUCTION 18.1 — Write package init with public API exports:
+
+  File: G:\OC\02June26\src\rag_knowledge\__init__.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Historical context Q&A for Indian financial markets.
+
+  Public API:
+      query_rag(question) -> RAGResponse
+      init_pipeline(config) -> RAGPipeline
+  """
+
+  from rag_knowledge.models import RAGResponse, SourceDocument, ConfidenceLevel
+  from rag_knowledge.pipeline import init_pipeline, query_rag
+
+  __all__ = [
+      "query_rag",
+      "init_pipeline",
+      "RAGResponse",
+      "SourceDocument",
+      "ConfidenceLevel",
+  ]
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 19: TEST FIXTURES (conftest.py + fixture files)
+================================================================================
+
+INSTRUCTION 19.1 — Write shared test fixtures:
+
+  File: G:\OC\02June26\tests\conftest.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Shared Test Fixtures.
+
+  - Mock Ollama responses (no real LLM needed for unit tests)
+  - Temporary ChromaDB instances (isolated per test)
+  - Sample documents for ingestion tests
+  - Config overrides for test environments
+  """
+
+  from __future__ import annotations
+
+  import json
+  from pathlib import Path
+  from unittest.mock import MagicMock, patch
+
+  import pytest
+
+  from rag_knowledge.config import RAGConfig
+  from rag_knowledge.models import SourceDocument
+
+
+  @pytest.fixture
+  def test_config(tmp_path: Path) -> RAGConfig:
+      return RAGConfig(
+          ollama_base_url="http://localhost:11434",
+          ollama_model="qwen2.5:7b-instruct",
+          chroma_persist_directory=tmp_path / "test_chroma",
+          chroma_collection_name="test_collection",
+          audit_log_enabled=True,
+          audit_log_path=tmp_path / "test_audit.jsonl",
+          max_query_length=500,
+      )
+
+
+  @pytest.fixture
+  def sample_sources() -> list[SourceDocument]:
+      return [
+          SourceDocument(
+              content="RBI increased repo rate by 25 bps in February 2023. NIFTY options saw increased IV in the following week.",
+              source_path="data/rag_corpus/rbi_policy_2023.pdf",
+              relevance_score=0.85,
+              chunk_index=0,
+              doc_type="rbi_policy",
+          ),
+          SourceDocument(
+              content="Historical analysis shows BANKNIFTY IV typically rises 15-20% in the week before quarterly expiry.",
+              source_path="data/rag_corpus/trade_journal_q1.md",
+              relevance_score=0.78,
+              chunk_index=3,
+              doc_type="trade_journal",
+          ),
+          SourceDocument(
+              content="When India VIX exceeded 20, OI buildup concentrated in ATM strikes with significant call writing.",
+              source_path="data/rag_corpus/research_oi_patterns.pdf",
+              relevance_score=0.72,
+              chunk_index=1,
+              doc_type="research",
+          ),
+      ]
+
+
+  @pytest.fixture
+  def mock_ollama_response() -> str:
+      return (
+          "Based on the provided sources:\n\n"
+          "After the RBI repo rate hike in February 2023, NIFTY options experienced "
+          "increased implied volatility in the following week [Source 1]. "
+          "This is consistent with historical patterns where monetary policy changes "
+          "create short-term volatility spikes in index options."
+      )
+
+
+  @pytest.fixture
+  def mock_chromadb_results() -> dict:
+      return {
+          "documents": [[
+              "RBI increased repo rate by 25 bps. NIFTY options saw increased IV.",
+              "BANKNIFTY IV typically rises before quarterly expiry.",
+              "India VIX above 20 showed concentrated OI buildup in ATM strikes.",
+          ]],
+          "metadatas": [[
+              {"source_path": "rbi_policy.pdf", "doc_type": "rbi_policy", "chunk_index": "0"},
+              {"source_path": "journal.md", "doc_type": "trade_journal", "chunk_index": "3"},
+              {"source_path": "research.pdf", "doc_type": "research", "chunk_index": "1"},
+          ]],
+          "distances": [[0.15, 0.22, 0.28]],
+      }
+
+
+  @pytest.fixture
+  def fixture_dir() -> Path:
+      return Path(__file__).parent / "fixtures"
+
+
+  @pytest.fixture
+  def sample_markdown_file(tmp_path: Path) -> Path:
+      content = """# RBI Policy Impact on NIFTY Options
+
+## February 2023 Rate Hike
+
+The RBI increased the repo rate by 25 basis points in February 2023.
+This was the sixth consecutive rate hike in the tightening cycle.
+
+### NIFTY Options Behavior Post-Hike
+
+- Implied volatility increased by 12-15% in the week following the hike
+- Put-call ratio shifted towards puts, indicating bearish sentiment
+- ATM options saw maximum OI buildup
+- Weekly expiry options were more volatile than monthly expiry options
+
+## Historical Pattern
+
+Historically, RBI rate hikes have led to:
+1. Short-term bearish reaction in NIFTY (2-5 days)
+2. Increased IV across all strikes
+3. Higher put writing at support levels
+4. Mean reversion within 2-3 weeks
+"""
+      file_path = tmp_path / "rbi_nifty_analysis.md"
+      file_path.write_text(content, encoding="utf-8")
+      return file_path
+
+
+  @pytest.fixture
+  def sample_text_file(tmp_path: Path) -> Path:
+      content = """BANKNIFTY IV Before Quarterly Expiry - Trade Journal
+
+Observation Period: Q1 2023-Q4 2023
+
+Week before quarterly expiry consistently shows:
+- IV increase of 15-20% from baseline
+- Maximum pain shift towards current spot
+- Increased straddle writing by institutional participants
+- Gamma risk elevated for short option sellers
+
+Key dates:
+- Jan 2023: IV rose from 14.2 to 17.1
+- Apr 2023: IV rose from 13.8 to 16.5
+- Jul 2023: IV rose from 15.1 to 18.3
+- Oct 2023: IV rose from 14.5 to 17.8
+
+Strategy note: Selling straddles 5 days before expiry has been profitable
+in 7 out of 8 quarters observed, but requires strict stop loss due to
+tail risk events.
+"""
+      file_path = tmp_path / "banknifty_iv_journal.txt"
+      file_path.write_text(content, encoding="utf-8")
+      return file_path
+  ─────────────────────────────────────────────
+
+INSTRUCTION 19.2 — Create sample fixture files in tests/fixtures/:
+
+  # tests/fixtures/sample_rbi_policy.txt (placeholder — real PDFs added at runtime)
+  # tests/fixtures/sample_sebi_circular.txt
+  # tests/fixtures/sample_trade_journal.md
+  # tests/fixtures/sample_strategy_notes.txt
+
+  Create a minimal sample for testing:
+  New-Item -ItemType File -Path "G:\OC\02June26\tests\fixtures\sample_trade_journal.md" -Force
+
+  Content:
+  ─────────────────────────────────────────────
+  # Trade Journal: NIFTY Options Observations
+
+  ## RBI Rate Hike Impact (2023)
+
+  After the February 2023 RBI repo rate hike of 25 bps:
+  - NIFTY spot dropped 1.2% on the announcement day
+  - ATM straddle premium increased by 18%
+  - IV percentile moved from 45th to 72nd percentile
+  - Put writing increased at 17500 strike (support level)
+
+  ## Quarterly Expiry Patterns
+
+  In the week before quarterly expiry:
+  - BANKNIFTY IV consistently rises 15-20%
+  - Maximum pain converges towards current spot
+  - Institutional straddle writing increases
+
+  ## India VIX Above 20 Observations
+
+  When India VIX exceeded 20:
+  - OI buildup concentrated in ATM strikes
+  - Call writing dominated at resistance levels
+  - Put writing at support levels provided floor
+  - Short covering rallies were sharp but brief
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 20: UNIT TESTS (test_rag_pipeline.py)
+================================================================================
+
+INSTRUCTION 20.1 — Write comprehensive unit tests:
+
+  File: G:\OC\02June26\tests\unit\test_rag_pipeline.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Unit Tests.
+
+  Run: pytest tests/unit/test_rag_pipeline.py -v
+  Tests cover: config, models, embeddings (mocked), vectorstore (mocked),
+  ingestion, retriever, generator (mocked), confidence, audit logger, pipeline.
+  """
+
+  from __future__ import annotations
+
+  import json
+  from pathlib import Path
+  from unittest.mock import MagicMock, patch
+
+  import pytest
+
+  from rag_knowledge.config import RAGConfig, get_config
+  from rag_knowledge.models import ConfidenceLevel, IngestResult, RAGResponse, SourceDocument
+  from rag_knowledge.exceptions import (
+      ChromaDBError,
+      EmbeddingModelError,
+      OllamaConnectionError,
+      OllamaGenerationError,
+      QueryValidationError,
+      RAGError,
+  )
+  from rag_knowledge.confidence import ConfidenceScorer
+  from rag_knowledge.audit_logger import AuditLogger
+
+
+  # ── Config Tests ──
+
+  class TestRAGConfig:
+      def test_default_config_loads(self):
+          config = RAGConfig()
+          assert config.ollama_model == "qwen2.5:7b-instruct"
+          assert config.embedding_model_name == "sentence-transformers/all-MiniLM-L6-v2"
+          assert config.retrieval_top_k == 5
+          assert config.chroma_distance_function == "cosine"
+
+      def test_invalid_distance_function_raises(self):
+          with pytest.raises(ValueError, match="chroma_distance_function"):
+              RAGConfig(chroma_distance_function="invalid")
+
+      def test_invalid_search_type_raises(self):
+          with pytest.raises(ValueError, match="retrieval_search_type"):
+              RAGConfig(retrieval_search_type="invalid")
+
+      def test_invalid_device_raises(self):
+          with pytest.raises(ValueError, match="embedding_device"):
+              RAGConfig(embedding_device="tpu")
+
+      def test_disallowed_patterns_are_valid_regex(self):
+          config = RAGConfig()
+          import re
+          for pattern in config.disallowed_patterns:
+              re.compile(pattern)
+
+      def test_config_frozen(self):
+          config = RAGConfig()
+          with pytest.raises(Exception):
+              config.ollama_model = "different"
+
+      def test_get_config_returns_instance(self):
+          config = get_config()
+          assert isinstance(config, RAGConfig)
+
+
+  # ── Models Tests ──
+
+  class TestModels:
+      def test_source_document_valid(self):
+          doc = SourceDocument(
+              content="Test content",
+              source_path="test.pdf",
+              relevance_score=0.85,
+          )
+          assert doc.content == "Test content"
+          assert doc.doc_type == "unknown"
+
+      def test_source_document_empty_content_raises(self):
+          with pytest.raises(Exception):
+              SourceDocument(content="", source_path="test.pdf", relevance_score=0.5)
+
+      def test_rag_response_valid(self):
+          resp = RAGResponse(answer="Historical data shows...", query="How did NIFTY behave?")
+          assert resp.confidence == ConfidenceLevel.INSUFFICIENT
+          assert resp.is_trade_prediction is False
+
+      def test_rag_response_trade_advice_rejected(self):
+          with pytest.raises(Exception, match="prohibited trade advice"):
+              RAGResponse(answer="You should buy NIFTY calls now", query="What to buy?")
+
+      def test_confidence_level_enum(self):
+          assert ConfidenceLevel.HIGH.value == "HIGH"
+          assert ConfidenceLevel.MEDIUM.value == "MEDIUM"
+          assert ConfidenceLevel.LOW.value == "LOW"
+          assert ConfidenceLevel.INSUFFICIENT.value == "INSUFFICIENT"
+
+      def test_ingest_result_valid(self):
+          result = IngestResult(documents_ingested=100, sources_processed=5, duration_seconds=12.5)
+          assert result.documents_ingested == 100
+          assert result.errors == []
+
+
+  # ── Exception Hierarchy Tests ──
+
+  class TestExceptions:
+      def test_all_exceptions_inherit_rag_error(self):
+          assert issubclass(OllamaConnectionError, RAGError)
+          assert issubclass(OllamaGenerationError, RAGError)
+          assert issubclass(EmbeddingModelError, RAGError)
+          assert issubclass(ChromaDBError, RAGError)
+          assert issubclass(QueryValidationError, RAGError)
+
+      def test_exception_messages(self):
+          err = OllamaConnectionError("Connection refused")
+          assert str(err) == "Connection refused"
+
+
+  # ── Query Validation Tests ──
+
+  class TestQueryValidation:
+      def test_valid_query_passes(self, test_config):
+          from rag_knowledge.retriever import DocumentRetriever
+          retriever = DocumentRetriever(config=test_config)
+          result = retriever.validate_query("How did NIFTY options behave after RBI rate hikes?")
+          assert result.is_valid is True
+          assert result.is_trade_prediction is False
+
+      def test_empty_query_rejected(self, test_config):
+          from rag_knowledge.retriever import DocumentRetriever
+          retriever = DocumentRetriever(config=test_config)
+          result = retriever.validate_query("")
+          assert result.is_valid is False
+
+      def test_trade_prediction_query_rejected(self, test_config):
+          from rag_knowledge.retriever import DocumentRetriever
+          retriever = DocumentRetriever(config=test_config)
+          result = retriever.validate_query("Predict the price of NIFTY tomorrow")
+          assert result.is_valid is False
+          assert result.is_trade_prediction is True
+
+      def test_buy_signal_query_rejected(self, test_config):
+          from rag_knowledge.retriever import DocumentRetriever
+          retriever = DocumentRetriever(config=test_config)
+          result = retriever.validate_query("Give me a buy signal for BANKNIFTY")
+          assert result.is_valid is False
+          assert result.is_trade_prediction is True
+
+      def test_guaranteed_return_query_rejected(self, test_config):
+          from rag_knowledge.retriever import DocumentRetriever
+          retriever = DocumentRetriever(config=test_config)
+          result = retriever.validate_query("What is the guaranteed return on this strategy?")
+          assert result.is_valid is False
+          assert result.is_trade_prediction is True
+
+      def test_oversized_query_rejected(self, test_config):
+          from rag_knowledge.retriever import DocumentRetriever
+          retriever = DocumentRetriever(config=test_config)
+          long_query = "x" * 501
+          result = retriever.validate_query(long_query)
+          assert result.is_valid is False
+          assert "maximum length" in (result.rejection_reason or "").lower()
+
+      def test_sanitization_removes_control_chars(self, test_config):
+          from rag_knowledge.retriever import DocumentRetriever
+          retriever = DocumentRetriever(config=test_config)
+          result = retriever.validate_query("How did NIFTY\x00behave?")
+          assert result.is_valid is True
+          assert "\x00" not in result.sanitized_query
+
+
+  # ── Confidence Scorer Tests ──
+
+  class TestConfidenceScorer:
+      def test_no_sources_returns_insufficient(self, test_config):
+          scorer = ConfidenceScorer(config=test_config)
+          level, score = scorer.score([], "Some answer")
+          assert level == ConfidenceLevel.INSUFFICIENT
+          assert score == 0.0
+
+      def test_high_relevance_multiple_sources(self, test_config, sample_sources):
+          scorer = ConfidenceScorer(config=test_config)
+          level, score = scorer.score(sample_sources, "A detailed answer with citations from multiple sources.")
+          assert score > 0.0
+          assert level in {ConfidenceLevel.HIGH, ConfidenceLevel.MEDIUM, ConfidenceLevel.LOW}
+
+      def test_single_low_relevance_source(self, test_config):
+          scorer = ConfidenceScorer(config=test_config)
+          sources = [SourceDocument(
+              content="Minor mention",
+              source_path="tangential.pdf",
+              relevance_score=0.2,
+              doc_type="unknown",
+          )]
+          level, score = scorer.score(sources, "Brief answer.")
+          assert score < 0.5
+
+      def test_diverse_sources_score_higher(self, test_config):
+          scorer = ConfidenceScorer(config=test_config)
+          homogeneous = [
+              SourceDocument(content="A", source_path="same.pdf", relevance_score=0.7, doc_type="rbi_policy"),
+              SourceDocument(content="B", source_path="same.pdf", relevance_score=0.7, doc_type="rbi_policy"),
+          ]
+          diverse = [
+              SourceDocument(content="A", source_path="rbi.pdf", relevance_score=0.7, doc_type="rbi_policy"),
+              SourceDocument(content="B", source_path="journal.md", relevance_score=0.7, doc_type="trade_journal"),
+              SourceDocument(content="C", source_path="research.pdf", relevance_score=0.7, doc_type="research"),
+          ]
+          _, score_homo = scorer.score(homogeneous, "Answer about RBI policy effects on markets.")
+          _, score_diverse = scorer.score(diverse, "Answer about RBI policy effects on markets with cross-reference.")
+          assert score_diverse >= score_homo
+
+
+  # ── Audit Logger Tests ──
+
+  class TestAuditLogger:
+      def test_audit_log_creates_file(self, test_config):
+          logger = AuditLogger(config=test_config)
+          response = RAGResponse(
+              answer="Historical data shows...",
+              query="Test query",
+              confidence=ConfidenceLevel.MEDIUM,
+              confidence_score=0.6,
+          )
+          logger.log_query(response)
+          log_path = test_config.audit_log_path
+          assert log_path.exists()
+
+      def test_audit_log_entry_is_valid_json(self, test_config):
+          logger = AuditLogger(config=test_config)
+          response = RAGResponse(
+              answer="Test answer",
+              query="Test query",
+              confidence=ConfidenceLevel.HIGH,
+              confidence_score=0.8,
+          )
+          logger.log_query(response)
+          log_path = test_config.audit_log_path
+          lines = log_path.read_text(encoding="utf-8").strip().split("\n")
+          entry = json.loads(lines[0])
+          assert "timestamp" in entry
+          assert "query" in entry
+          assert "entry_hash" in entry
+          assert "previous_hash" in entry
+
+      def test_audit_log_chain_integrity(self, test_config):
+          logger = AuditLogger(config=test_config)
+          for i in range(3):
+              response = RAGResponse(
+                  answer=f"Answer {i}",
+                  query=f"Query {i}",
+                  confidence=ConfidenceLevel.MEDIUM,
+                  confidence_score=0.5,
+              )
+              logger.log_query(response)
+          log_path = test_config.audit_log_path
+          lines = log_path.read_text(encoding="utf-8").strip().split("\n")
+          assert len(lines) == 3
+          entry_0 = json.loads(lines[0])
+          assert entry_0["previous_hash"] == "GENESIS"
+          entry_1 = json.loads(lines[1])
+          assert entry_1["previous_hash"] == entry_0["entry_hash"]
+
+      def test_audit_disabled_no_file(self, tmp_path):
+          config = RAGConfig(
+              audit_log_enabled=False,
+              audit_log_path=tmp_path / "should_not_exist.jsonl",
+              chroma_persist_directory=tmp_path / "chroma",
+          )
+          logger = AuditLogger(config=config)
+          response = RAGResponse(answer="X", query="Y")
+          logger.log_query(response)
+          assert not config.audit_log_path.exists()
+
+
+  # ── Embedding Engine Tests (with mock) ──
+
+  class TestEmbeddingEngine:
+      def test_embed_query_returns_list(self, test_config):
+          from rag_knowledge.embeddings import EmbeddingEngine
+          engine = EmbeddingEngine(config=test_config)
+          mock_model = MagicMock()
+          mock_model.encode.return_value = MagicMock(tolist=lambda: [0.1] * 384)
+          mock_model.get_sentence_embedding_dimension.return_value = 384
+          engine._model = mock_model
+          result = engine.embed_query("test query")
+          assert len(result) == 384
+
+      def test_embed_empty_query_raises(self, test_config):
+          from rag_knowledge.embeddings import EmbeddingEngine
+          engine = EmbeddingEngine(config=test_config)
+          with pytest.raises(EmbeddingModelError, match="empty"):
+              engine.embed_query("")
+
+      def test_embed_documents_batch(self, test_config):
+          from rag_knowledge.embeddings import EmbeddingEngine
+          engine = EmbeddingEngine(config=test_config)
+          mock_model = MagicMock()
+          mock_model.encode.return_value = MagicMock(tolist=lambda: [[0.1] * 384, [0.2] * 384])
+          mock_model.get_sentence_embedding_dimension.return_value = 384
+          engine._model = mock_model
+          result = engine.embed_documents(["text1", "text2"])
+          assert len(result) == 2
+
+      def test_embed_empty_list_returns_empty(self, test_config):
+          from rag_knowledge.embeddings import EmbeddingEngine
+          engine = EmbeddingEngine(config=test_config)
+          result = engine.embed_documents([])
+          assert result == []
+
+
+  # ── Ingestion Tests ──
+
+  class TestIngestion:
+      def test_ingest_nonexistent_directory_raises(self, test_config):
+          from rag_knowledge.ingest import DocumentIngester
+          ingester = DocumentIngester(config=test_config)
+          with pytest.raises(Exception):
+              ingester.ingest_directory(Path("/nonexistent/path"))
+
+      def test_ingest_empty_directory(self, test_config, tmp_path):
+          from rag_knowledge.ingest import DocumentIngester
+          ingester = DocumentIngester(config=test_config)
+          result = ingester.ingest_directory(tmp_path / "empty")
+          (tmp_path / "empty").mkdir(exist_ok=True)
+          result = ingester.ingest_directory(tmp_path / "empty")
+          assert result.documents_ingested == 0
+
+      def test_chunk_id_deterministic(self):
+          from rag_knowledge.ingest import DocumentIngester
+          id1 = DocumentIngester._generate_chunk_id(Path("test.pdf"), 0)
+          id2 = DocumentIngester._generate_chunk_id(Path("test.pdf"), 0)
+          assert id1 == id2
+
+      def test_doc_type_inference(self):
+          from rag_knowledge.ingest import DocumentIngester
+          assert DocumentIngester(config=None)._infer_doc_type(Path("rbi_policy_2023.pdf")) == "rbi_policy"
+          assert DocumentIngester(config=None)._infer_doc_type(Path("sebi_circular_algo.pdf")) == "sebi_circular"
+
+      def test_extract_text_markdown(self, test_config, sample_markdown_file):
+          from rag_knowledge.ingest import DocumentIngester
+          ingester = DocumentIngester(config=test_config)
+          text = ingester._extract_text(sample_markdown_file)
+          assert "RBI" in text
+          assert len(text) > 100
+
+
+  # ── Pipeline Integration Tests (mocked) ──
+
+  class TestRAGPipelineMocked:
+      def test_query_rag_returns_rag_response(self, test_config, sample_sources, mock_ollama_response):
+          with patch("rag_knowledge.retriever.DocumentRetriever.retrieve", return_value=sample_sources), \
+               patch("rag_knowledge.generator.LLMGenerator.generate", return_value=mock_ollama_response):
+              from rag_knowledge.pipeline import RAGPipeline
+              pipeline = RAGPipeline(config=test_config)
+              result = pipeline.query_rag("How did NIFTY options behave after RBI rate hikes?")
+              assert isinstance(result, RAGResponse)
+              assert len(result.sources) == 3
+              assert result.latency_ms > 0
+
+      def test_query_rag_rejects_trade_prediction(self, test_config):
+          from rag_knowledge.pipeline import RAGPipeline
+          pipeline = RAGPipeline(config=test_config)
+          result = pipeline.query_rag("Predict NIFTY price for tomorrow")
+          assert result.is_trade_prediction is True
+          assert result.confidence == ConfidenceLevel.INSUFFICIENT
+
+      def test_query_rag_empty_query_handled(self, test_config):
+          from rag_knowledge.pipeline import RAGPipeline
+          pipeline = RAGPipeline(config=test_config)
+          result = pipeline.query_rag("")
+          assert result.confidence == ConfidenceLevel.INSUFFICIENT
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 21: INTEGRATION TESTS (test_rag_query.py)
+================================================================================
+
+INSTRUCTION 21.1 — Write end-to-end integration tests (require Ollama running):
+
+  File: G:\OC\02June26\tests\integration\test_rag_query.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Integration Tests.
+
+  Run: pytest tests/integration/test_rag_query.py -v
+  Requires: Ollama service running with qwen2.5:7b-instruct pulled.
+  Uses real ChromaDB (temp directory) + real Ollama inference.
+  Marked as @pytest.mark.integration for selective execution.
+  """
+
+  from __future__ import annotations
+
+  from pathlib import Path
+
+  import pytest
+
+  from rag_knowledge.config import RAGConfig
+  from rag_knowledge.models import ConfidenceLevel, RAGResponse
+  from rag_knowledge.pipeline import RAGPipeline
+
+
+  @pytest.fixture
+  def integration_config(tmp_path: Path) -> RAGConfig:
+      return RAGConfig(
+          ollama_base_url="http://localhost:11434",
+          ollama_model="qwen2.5:7b-instruct",
+          ollama_timeout_seconds=120,
+          chroma_persist_directory=tmp_path / "int_chroma",
+          chroma_collection_name="int_test_collection",
+          audit_log_path=tmp_path / "int_audit.jsonl",
+          retrieval_top_k=3,
+      )
+
+
+  @pytest.fixture
+  def seeded_pipeline(integration_config: RAGConfig, sample_text_file: Path) -> RAGPipeline:
+      pipeline = RAGPipeline(config=integration_config)
+      from rag_knowledge.ingest import DocumentIngester
+      ingester = DocumentIngester(config=integration_config)
+      corpus_dir = sample_text_file.parent
+      ingester.ingest_directory(corpus_dir)
+      return pipeline
+
+
+  @pytest.mark.integration
+      def test_ollama_health_check(self, integration_config):
+      from rag_knowledge.generator import LLMGenerator
+      gen = LLMGenerator(config=integration_config)
+      assert gen.health_check() is True, "Ollama service must be running for integration tests"
+
+
+  @pytest.mark.integration
+      def test_full_rag_query_returns_answer(self, seeded_pipeline):
+      result = seeded_pipeline.query_rag(
+          "How did BANKNIFTY IV behave before quarterly expiry?"
+      )
+      assert isinstance(result, RAGResponse)
+      assert len(result.answer) > 20
+      assert result.confidence != ConfidenceLevel.INSUFFICIENT or len(result.sources) == 0
+
+
+  @pytest.mark.integration
+      def test_rag_query_with_historical_context(self, seeded_pipeline):
+      result = seeded_pipeline.query_rag(
+          "What happened to NIFTY options after RBI rate hikes historically?"
+      )
+      assert isinstance(result, RAGResponse)
+      assert "predict" not in result.answer.lower() or "cannot" in result.answer.lower()
+
+
+  @pytest.mark.integration
+      def test_rag_query_rejects_prediction(self, seeded_pipeline):
+      result = seeded_pipeline.query_rag("What will NIFTY do tomorrow? Predict the price.")
+      assert result.is_trade_prediction is True
+      assert result.confidence == ConfidenceLevel.INSUFFICIENT
+
+
+  @pytest.mark.integration
+      def test_rag_query_no_sources_graceful(self, integration_config):
+      pipeline = RAGPipeline(config=integration_config)
+      result = pipeline.query_rag("What is the capital of France?")
+      assert isinstance(result, RAGResponse)
+      if len(result.sources) == 0:
+          assert "insufficient" in result.answer.lower() or "don't have" in result.answer.lower()
+
+
+  @pytest.mark.integration
+      def test_audit_log_written_after_query(self, seeded_pipeline, integration_config):
+      seeded_pipeline.query_rag("How did VIX patterns look historically?")
+      assert integration_config.audit_log_path.exists()
+      content = integration_config.audit_log_path.read_text(encoding="utf-8")
+      assert len(content) > 0
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 22: BENCHMARK TESTS (test_rag_latency.py)
+================================================================================
+
+INSTRUCTION 22.1 — Write latency benchmark tests (<2s per query SLA):
+
+  File: G:\OC\02June26\tests\bench\test_rag_latency.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Latency Benchmark Tests.
+
+  Run: pytest tests/bench/test_rag_latency.py --benchmark-only -v
+  SLA: <2s per query (end-to-end: validation + retrieval + generation + confidence)
+  Uses mocked Ollama for consistent benchmarks (real Ollama latency varies).
+  For real Ollama benchmarks: remove the mock and use @pytest.mark.integration.
+  """
+
+  from __future__ import annotations
+
+  from pathlib import Path
+  from unittest.mock import MagicMock, patch
+
+  import pytest
+
+  from rag_knowledge.config import RAGConfig
+  from rag_knowledge.models import ConfidenceLevel, RAGResponse, SourceDocument
+
+
+  @pytest.fixture
+  def bench_config(tmp_path: Path) -> RAGConfig:
+      return RAGConfig(
+          chroma_persist_directory=tmp_path / "bench_chroma",
+          chroma_collection_name="bench_collection",
+          audit_log_path=tmp_path / "bench_audit.jsonl",
+          retrieval_top_k=5,
+      )
+
+
+  @pytest.fixture
+  def bench_sources() -> list[SourceDocument]:
+      return [
+          SourceDocument(
+              content=f"Source document content {i} about Indian financial markets.",
+              source_path=f"source_{i}.pdf",
+              relevance_score=0.8 - i * 0.05,
+              doc_type=["rbi_policy", "sebi_circular", "trade_journal", "research"][i % 4],
+          )
+          for i in range(5)
+      ]
+
+
+  BENCHMARK_QUERIES = [
+      "How did NIFTY options behave after previous RBI repo rate hikes?",
+      "What happened to BANKNIFTY IV in the week before quarterly expiry?",
+      "Historical OI buildup patterns when India VIX was above 20",
+      "RBI monetary policy impact on F&O segment historical analysis",
+      "SEBI circular effects on options trading volumes historically",
+  ]
+
+
+  @pytest.mark.benchmark(group="rag-query")
+  def test_benchmark_query_validation(benchmark, bench_config):
+      from rag_knowledge.retriever import DocumentRetriever
+      retriever = DocumentRetriever(config=bench_config)
+      result = benchmark(
+          retriever.validate_query,
+          "How did NIFTY options behave after RBI rate hikes?",
+      )
+      assert result.is_valid is True
+
+
+  @pytest.mark.benchmark(group="rag-query")
+  @pytest.mark.parametrize("query", BENCHMARK_QUERIES)
+  def test_benchmark_query_validation_parametrized(benchmark, bench_config, query):
+      from rag_knowledge.retriever import DocumentRetriever
+      retriever = DocumentRetriever(config=bench_config)
+      result = benchmark(retriever.validate_query, query)
+      assert result.is_valid is True
+
+
+  @pytest.mark.benchmark(group="confidence")
+  def test_benchmark_confidence_scoring(benchmark, bench_config, bench_sources):
+      from rag_knowledge.confidence import ConfidenceScorer
+      scorer = ConfidenceScorer(config=bench_config)
+      level, score = benchmark(
+          scorer.score,
+          bench_sources,
+          "Based on the sources, NIFTY options showed increased IV after rate hikes.",
+      )
+      assert score > 0.0
+
+
+  @pytest.mark.benchmark(group="full-pipeline")
+  def test_benchmark_full_pipeline_mocked(benchmark, bench_config, bench_sources):
+      mock_answer = "Historical data shows NIFTY options IV increased after RBI rate hikes."
+      with patch("rag_knowledge.retriever.DocumentRetriever.retrieve", return_value=bench_sources), \
+           patch("rag_knowledge.generator.LLMGenerator.generate", return_value=mock_answer):
+          from rag_knowledge.pipeline import RAGPipeline
+          pipeline = RAGPipeline(config=bench_config)
+          result = benchmark(
+              pipeline.query_rag,
+              "How did NIFTY options behave after RBI rate hikes?",
+          )
+          assert isinstance(result, RAGResponse)
+          assert result.latency_ms < 2000
+
+
+  @pytest.mark.benchmark(group="embedding")
+  def test_benchmark_embedding_query(benchmark, bench_config):
+      mock_model = MagicMock()
+      mock_model.encode.return_value = MagicMock(tolist=lambda: [0.1] * 384)
+      mock_model.get_sentence_embedding_dimension.return_value = 384
+      with patch("rag_knowledge.embeddings.SentenceTransformer", return_value=mock_model):
+          from rag_knowledge.embeddings import EmbeddingEngine
+          engine = EmbeddingEngine(config=bench_config)
+          engine._model = mock_model
+          result = benchmark(engine.embed_query, "NIFTY options behavior after rate hikes")
+          assert len(result) == 384
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 23: HYPOTHESIS PROPERTY-BASED TESTS
+================================================================================
+
+INSTRUCTION 23.1 — Add hypothesis tests to test_rag_pipeline.py (append):
+
+  Append to: G:\OC\02June26\tests\unit\test_rag_pipeline.py
+  ─────────────────────────────────────────────
+  # ── Hypothesis Property-Based Tests ──
+
+  from hypothesis import given, settings, assume, HealthCheck
+  from hypothesis import strategies as st
+
+
+  class TestHypothesisProperties:
+
+      @given(query=st.text(min_size=1, max_size=500, alphabet=st.characters(whitelist_categories=("L", "N", "P", "Z"))))
+      @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
+      def test_validate_query_never_crashes(self, test_config, query):
+          from rag_knowledge.retriever import DocumentRetriever
+          retriever = DocumentRetriever(config=test_config)
+          result = retriever.validate_query(query)
+          assert isinstance(result.is_valid, bool)
+          assert isinstance(result.is_trade_prediction, bool)
+
+      @given(
+          relevance=st.floats(min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False),
+          content=st.text(min_size=1, max_size=200, alphabet=st.characters(whitelist_categories=("L", "N"))),
+      )
+      @settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+      def test_confidence_scorer_always_returns_valid(self, test_config, relevance, content):
+          from rag_knowledge.confidence import ConfidenceScorer
+          scorer = ConfidenceScorer(config=test_config)
+          sources = [SourceDocument(
+              content=content,
+              source_path="test.pdf",
+              relevance_score=relevance,
+          )]
+          level, score = scorer.score(sources, "Answer text with sufficient detail for scoring.")
+          assert 0.0 <= score <= 1.0
+          assert isinstance(level, ConfidenceLevel)
+
+      @given(
+          n_sources=st.integers(min_value=0, max_value=20),
+          avg_relevance=st.floats(min_value=0.1, max_value=0.99, allow_nan=False),
+      )
+      @settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
+      def test_confidence_monotonic_with_sources(self, test_config, n_sources, avg_relevance):
+          from rag_knowledge.confidence import ConfidenceScorer
+          scorer = ConfidenceScorer(config=test_config)
+          sources = [
+              SourceDocument(
+                  content=f"Source {i}",
+                  source_path=f"doc_{i % 3}.pdf",
+                  relevance_score=avg_relevance,
+                  doc_type=["rbi_policy", "sebi_circular", "research"][i % 3],
+              )
+              for i in range(n_sources)
+          ]
+          level, score = scorer.score(sources, "Detailed answer text for the test scenario.")
+          if n_sources == 0:
+              assert score == 0.0
+              assert level == ConfidenceLevel.INSUFFICIENT
+          else:
+              assert score > 0.0
+
+      @given(
+          score=st.floats(min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False),
+      )
+      @settings(max_examples=100)
+      def test_confidence_score_bounded(self, test_config, score):
+          from rag_knowledge.confidence import ConfidenceScorer
+          scorer = ConfidenceScorer(config=test_config)
+          sources = [SourceDocument(
+              content="Test",
+              source_path="t.pdf",
+              relevance_score=score,
+          )]
+          _, final_score = scorer.score(sources, "Test answer text.")
+          assert 0.0 <= final_score <= 1.0
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 24: LOCUST LOAD TEST CONFIGURATION
+================================================================================
+
+INSTRUCTION 24.1 — Write Locust load test for RAG API (future FastAPI wrapper):
+
+  File: G:\OC\02June26\locustfile_rag.py
+  ─────────────────────────────────────────────
+  """RAG Knowledge Engine — Locust Load Test.
+
+  Run (when FastAPI endpoint is available):
+    locust -f locustfile_rag.py --host http://localhost:8000 --headless --users 10 --spawn-rate 2 --run-time 3m
+
+  Currently tests the function directly via subprocess call.
+  For API-based load testing, wrap query_rag() in a FastAPI endpoint first.
+  """
+
+  import json
+  import random
+  from locust import HttpUser, task, between, tag, events
+
+  RAG_QUERIES = [
+      "How did NIFTY options behave after previous RBI repo rate hikes?",
+      "What happened to BANKNIFTY IV in the week before quarterly expiry?",
+      "Historical OI buildup patterns when India VIX was above 20",
+      "RBI monetary policy impact on F&O segment",
+      "SEBI circular effects on options trading volumes",
+      "What was the NIFTY option chain structure during 2020 crash?",
+      "How did FII DII data correlate with BANKNIFTY movement in 2023?",
+      "Historical gamma risk patterns during India VIX spikes",
+      "RBI rate cut vs rate hike: differential impact on NIFTY IV",
+      "Weekly vs monthly expiry: historical OI patterns comparison",
+  ]
+
+  PREDICTION_QUERIES = [
+      "Predict NIFTY price tomorrow",
+      "What should I buy today?",
+      "Give me a guaranteed return strategy",
+      "What will BANKNIFTY do next week?",
+  ]
+
+
+  class RAGQueryUser(HttpUser):
+      wait_time = between(1, 5)
+      host = "http://localhost:8000"
+
+      def on_start(self):
+          self.headers = {"Content-Type": "application/json"}
+
+      @task(8)
+      @tag("historical-query")
+      def query_historical(self):
+          query = random.choice(RAG_QUERIES)
+          with self.client.post(
+              "/api/v1/rag/query",
+              json={"question": query},
+              headers=self.headers,
+              catch_response=True,
+          ) as response:
+              if response.status_code == 200:
+                  data = response.json()
+                  if data.get("confidence") in ["HIGH", "MEDIUM", "LOW", "INSUFFICIENT"]:
+                      response.success()
+                  else:
+                      response.failure(f"Invalid confidence: {data.get('confidence')}")
+              else:
+                  response.failure(f"HTTP {response.status_code}")
+
+      @task(2)
+      @tag("prediction-rejection")
+      def query_prediction_rejection(self):
+          query = random.choice(PREDICTION_QUERIES)
+          with self.client.post(
+              "/api/v1/rag/query",
+              json={"question": query},
+              headers=self.headers,
+              catch_response=True,
+          ) as response:
+              if response.status_code == 200:
+                  data = response.json()
+                  if data.get("is_trade_prediction") is True:
+                      response.success()
+                  else:
+                      response.failure("Prediction query should be rejected")
+              else:
+                  response.failure(f"HTTP {response.status_code}")
+
+
+  @events.test_start.add_listener
+  def on_test_start(environment, **kwargs):
+      print("RAG Knowledge Engine load test starting...")
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 25: TRIVY + CYCLONEDX SBOM GENERATION
+================================================================================
+
+INSTRUCTION 25.1 — Generate CycloneDX SBOM and scan with Trivy:
+
+  # Generate SBOM from lockfile
+  cyclonedx-bom -r -i "G:\OC\02June26\requirements-rag-lock.txt" -o "G:\OC\02June26\bom.json"
+
+  # Scan SBOM with Trivy (install Trivy first: https://trivy.io/latest/getting-started/installation/)
+  # On Windows: choco install trivy
+  trivy sbom "G:\OC\02June26\bom.json" --severity HIGH,CRITICAL
+
+  # Scan project filesystem
+  trivy fs "G:\OC\02June26" --scanners vuln,license --severity HIGH,CRITICAL
+
+  # .trivy.yaml configuration:
+  File: G:\OC\02June26\.trivy.yaml
+  ─────────────────────────────────────────────
+  severity:
+    - HIGH
+    - CRITICAL
+  skip_dirs:
+    - "data/"
+    - "chroma_db/"
+    - ".venv/"
+    - "model_cache/"
+  skip_files:
+    - "*.safetensors"
+    - "*.bin"
+    - "*.onnx"
+  scanners:
+    - vuln
+    - license
+    - misconfig
+  license:
+    full: true
+  timeout: 300s
+  ─────────────────────────────────────────────
+
+================================================================================
+STEP 26: FULL VERIFICATION SEQUENCE (execute in order)
+================================================================================
+
+INSTRUCTION 26.1 — Run ALL verification checks sequentially:
+
+  & "G:\OC\02June26\.venv\Scripts\Activate.ps1"
+  cd G:\OC\02June26
+
+  # ── Step 26.1.1: Lint with ruff ──
+  ruff check src/rag_knowledge/ --config pyproject.toml
+  # MUST exit 0 (no errors). Fix any findings before proceeding.
+
+  # ── Step 26.1.2: Format check with ruff ──
+  ruff format --check src/rag_knowledge/ --config pyproject.toml
+  # MUST exit 0. If not: ruff format src/rag_knowledge/ --config pyproject.toml
+
+  # ── Step 26.1.3: Type check with mypy ──
+  mypy src/rag_knowledge/ --config-file pyproject.toml
+  # MUST exit 0. Fix all type errors.
+
+  # ── Step 26.1.4: Security scan with bandit ──
+  bandit -c pyproject.toml -r src/rag_knowledge/
+  # MUST exit 0. Address all HIGH/MEDIUM findings.
+
+  # ── Step 26.1.5: Dependency vulnerability audit ──
+  pip-audit --strict
+  # MUST exit 0.
+
+  # ── Step 26.1.6: Secret leak detection ──
+  gitleaks detect --no-git --source . --config .gitleaks.toml
+  # MUST exit 0 (no leaks).
+
+  # ── Step 26.1.7: Unit tests with coverage ──
+  pytest tests/unit/test_rag_pipeline.py -v --cov=rag_knowledge --cov-report=term-missing
+  # MUST: all tests pass, coverage >= 80%
+
+  # ── Step 26.1.8: Integration tests (requires Ollama) ──
+  pytest tests/integration/test_rag_query.py -v -m integration
+  # MUST: all tests pass.
+
+  # ── Step 26.1.9: Benchmark tests ──
+  pytest tests/bench/test_rag_latency.py --benchmark-only -v
+  # MUST: all benchmarks complete, mocked pipeline <2s per query.
+
+  # ── Step 26.1.10: Full test suite with xdist ──
+  pytest tests/ -v -n auto --dist=worksteal --cov=rag_knowledge --cov-report=term-missing --cov-report=html
+  # MUST: all pass, coverage >= 80%.
+
+  # ── Step 26.1.11: SBOM generation ──
+  cyclonedx-bom -r -i requirements-rag-lock.txt -o bom.json
+  # Verify bom.json is valid JSON.
+
+  # ── Step 26.1.12: Trivy scan ──
+  trivy sbom bom.json --severity HIGH,CRITICAL
+  # MUST: no HIGH/CRITICAL vulnerabilities.
+
+================================================================================
+STEP 27: SAMPLE CORPUS INGESTION (real documents)
+================================================================================
+
+INSTRUCTION 27.1 — Ingest the actual knowledge base documents:
+
+  # Place real documents in data/rag_corpus/:
+  #   - RBI monetary policy statements (PDF)
+  #   - SEBI circulars on algo trading (PDF)
+  #   - Historical trade journals (MD/TXT)
+  #   - Strategy notes and playbooks (TXT/MD)
+  #   - Research reports on Indian markets (PDF/DOCX)
+
+  # Run ingestion via Python:
+  python -c "
+  from pathlib import Path
+  from rag_knowledge.config import RAGConfig
+  from rag_knowledge.ingest import DocumentIngester
+
+  config = RAGConfig(chroma_persist_directory=Path('data/chroma_db'))
+  ingester = DocumentIngester(config=config)
+  result = ingester.ingest_directory(Path('data/rag_corpus'))
+  print(f'Ingested: {result.documents_ingested} chunks from {result.sources_processed} sources')
+  print(f'Duration: {result.duration_seconds}s')
+  if result.errors:
+      print(f'Errors: {result.errors}')
+  "
+
+INSTRUCTION 27.2 — Test real queries against ingested corpus:
+
+  python -c "
+  from rag_knowledge.pipeline import init_pipeline, query_rag
+
+  pipeline = init_pipeline()
+
+  queries = [
+      'How did NIFTY options behave after previous RBI repo rate hikes?',
+      'What happened to BANKNIFTY IV in the week before quarterly expiry?',
+      'Historical OI buildup patterns when India VIX was above 20',
+  ]
+
+  for q in queries:
+      result = query_rag(q)
+      print(f'Q: {q}')
+      print(f'A: {result.answer[:200]}...')
+      print(f'Confidence: {result.confidence.value} ({result.confidence_score:.3f})')
+      print(f'Sources: {len(result.sources)} | Latency: {result.latency_ms:.0f}ms')
+      print('---')
+  "
+
+================================================================================
+STEP 28: PRODUCTION DEPLOYMENT CHECKLIST
+================================================================================
+
+INSTRUCTION 28.1 — Verify all production readiness criteria:
+
+  [ ] All unit tests pass:                    pytest tests/unit/ -v
+  [ ] All integration tests pass:             pytest tests/integration/ -v -m integration
+  [ ] All benchmark tests pass (<2s SLA):     pytest tests/bench/ --benchmark-only
+  [ ] Coverage >= 80%:                        pytest --cov=rag_knowledge --cov-report=term
+  [ ] ruff lint clean:                        ruff check src/rag_knowledge/
+  [ ] ruff format clean:                      ruff format --check src/rag_knowledge/
+  [ ] mypy strict type check clean:           mypy src/rag_knowledge/ --strict
+  [ ] bandit security scan clean:             bandit -c pyproject.toml -r src/rag_knowledge/
+  [ ] pip-audit vulnerability scan clean:     pip-audit --strict
+  [ ] gitleaks secret detection clean:        gitleaks detect --no-git --source .
+  [ ] SBOM generated:                         cyclonedx-bom -r -i requirements-rag-lock.txt -o bom.json
+  [ ] Trivy SBOM scan clean:                  trivy sbom bom.json --severity HIGH,CRITICAL
+  [ ] Ollama service running:                 curl http://localhost:11434/api/tags
+  [ ] Qwen 2.5 7B model available:           ollama list | findstr qwen2.5
+  [ ] ChromaDB persistent storage exists:     dir data\chroma_db
+  [ ] Audit log directory exists:             dir logs
+  [ ] query_rag() function returns RAGResponse with (answer, sources, confidence)
+  [ ] Trade prediction queries are REJECTED (SEBI compliance)
+  [ ] No hardcoded secrets in codebase
+  [ ] All Pydantic models validated on construction
+  [ ] All exceptions typed (no bare Exception)
+  [ ] Audit log chain integrity verified
+
+================================================================================
+STEP 29: COMPLETE FILE MANIFEST (creation order)
+================================================================================
+
+  Files to create in this exact sequence:
+
+  1.  G:\OC\02June26\requirements-rag.txt              (Step 3)
+  2.  G:\OC\02June26\pyproject.toml                     (Step 5)
+  3.  G:\OC\02June26\.gitleaks.toml                     (Step 6)
+  4.  G:\OC\02June26\.trivy.yaml                        (Step 25)
+  5.  G:\OC\02June26\src\rag_knowledge\__init__.py      (Step 18)
+  6.  G:\OC\02June26\src\rag_knowledge\config.py        (Step 7)
+  7.  G:\OC\02June26\src\rag_knowledge\models.py        (Step 8)
+  8.  G:\OC\02June26\src\rag_knowledge\exceptions.py    (Step 9)
+  9.  G:\OC\02June26\src\rag_knowledge\embeddings.py    (Step 10)
+  10. G:\OC\02June26\src\rag_knowledge\vectorstore.py   (Step 11)
+  11. G:\OC\02June26\src\rag_knowledge\ingest.py        (Step 12)
+  12. G:\OC\02June26\src\rag_knowledge\retriever.py     (Step 13)
+  13. G:\OC\02June26\src\rag_knowledge\generator.py     (Step 14)
+  14. G:\OC\02June26\src\rag_knowledge\confidence.py    (Step 15)
+  15. G:\OC\02June26\src\rag_knowledge\audit_logger.py  (Step 16)
+  16. G:\OC\02June26\src\rag_knowledge\pipeline.py      (Step 17)
+  17. G:\OC\02June26\tests\conftest.py                  (Step 19)
+  18. G:\OC\02June26\tests\unit\test_rag_pipeline.py    (Step 20 + 23)
+  19. G:\OC\02June26\tests\integration\test_rag_query.py (Step 21)
+  20. G:\OC\02June26\tests\bench\test_rag_latency.py    (Step 22)
+  21. G:\OC\02June26\locustfile_rag.py                   (Step 24)
+  22. G:\OC\02June26\tests\fixtures\sample_trade_journal.md (Step 19)
+
+================================================================================
+STEP 30: ARCHITECTURE DIAGRAM (textual)
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    query_rag(question)                          │
+  │                         [pipeline.py]                           │
+  └──────────┬──────────────────────────────────────────────────────┘
+             │
+     ┌───────▼───────┐
+     │  VALIDATE      │  DocumentRetriever.validate_query()
+     │  (SI-10)       │  - Reject trade predictions (SEBI)
+     │                │  - Enforce max length
+     │                │  - Sanitize control chars
+     └───────┬───────┘
+             │ valid
+     ┌───────▼───────┐
+     │  RETRIEVE      │  DocumentRetriever.retrieve()
+     │                │  - Embed query (all-MiniLM-L6-v2)
+     │                │  - MMR search ChromaDB
+     │                │  - Build SourceDocument list
+     └───────┬───────┘
+             │ sources
+     ┌───────▼───────┐
+     │  GENERATE      │  LLMGenerator.generate()
+     │                │  - Construct RAG prompt
+     │                │  - Invoke Ollama Qwen 2.5 7B
+     │                │  - Retry on connection failure
+     └───────┬───────┘
+             │ answer
+     ┌───────▼───────┐
+     │  SCORE         │  ConfidenceScorer.score()
+     │                │  - Relevance factor (40%)
+     │                │  - Count factor (25%)
+     │                │  - Diversity factor (20%)
+     │                │  - Length factor (15%)
+     └───────┬───────┘
+             │ confidence
+     ┌───────▼───────┐
+     │  AUDIT         │  AuditLogger.log_query()
+     │  (AU-12)       │  - Append-only JSONL
+     │                │  - SHA-256 hash chain
+     │                │  - Non-blocking
+     └───────┬───────┘
+             │
+     ┌───────▼───────┐
+     │  RETURN        │  RAGResponse(
+     │  RAGResponse   │    answer, sources, confidence,
+     │                │    confidence_score, latency_ms,
+     │                │    is_trade_prediction, timestamp
+     │                │  )
+     └────────────────┘
+
+  INGESTION PIPELINE (separate, runs before queries):
+
+  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+  │ LOAD         │───▶│ CHUNK        │───▶│ EMBED        │───▶│ STORE        │
+  │ (PDF/DOCX/   │    │ (Recursive   │    │ (all-MiniLM  │    │ (ChromaDB    │
+  │  TXT/MD)     │    │  512+64 ov)  │    │  L6-v2,384d) │    │  cosine)     │
+  └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+
+================================================================================
+REFERENCE BOOKS & STANDARDS USED IN THIS PLAN
+================================================================================
+
+1. "Designing Machine Learning Systems" — Huyen (2022), Ch.4: Data Engineering
+   → Chunking strategies, embedding selection, data pipeline design
+
+2. "Building LLM Apps" — Biswas (2024), Ch.6: RAG Architecture Patterns
+   → RAG pipeline architecture, retrieval strategies, prompt engineering
+
+3. "Generative AI on AWS" — Perrone et al. (2024), Ch.5: RAG with Vector Stores
+   → ChromaDB integration patterns, MMR retrieval, confidence scoring
+
+4. "Retrieval-Augmented Generation for AI-Generated Content"
+   — Lewis et al. (2020) — Foundational RAG paper
+   → Retrieve-then-generate paradigm, dense retrieval
+
+5. "Evaluating RAG Systems" — Es et al. (2024) — RAGAS framework
+   → Faithfulness, answer relevance, context precision metrics
+
+6. NIST SP 800-53: AU-12 (Audit Generation), SI-10 (Input Validation),
+   SC-8 (Transmission Confidentiality), SC-28 (Protection at Rest)
+   → Audit logging, query validation, data security
+
+7. ISO 27001:2022 Annex A: A.8.15 (Logging), A.8.24 (Cryptography),
+   A.8.28 (Secure Coding), A.8.26 (Application Security)
+   → Secure coding, cryptographic hash chain for audit, structured logging
+
+8. SEBI Cyber Security Framework for Stock Brokers
+   → Data retention, trade data audit, access controls
+
+9. LangChain Production Documentation
+   → https://python.langchain.com/docs/productionization/
+
+10. ChromaDB Documentation v0.5.x
+    → https://docs.trychroma.com/ — PersistentClient, MMR, metadata filtering
+
+================================================================================
+END OF PLAN — Phase 9: RAG Knowledge Engine
+================================================================================

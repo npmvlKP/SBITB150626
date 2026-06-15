@@ -1,0 +1,2070 @@
+# Phase 12: Paper Trading — Sequential AI-Agent Implementation PLAN
+
+> **Duration:** Weeks 26-32 (6 weeks minimum) | **Output:** `src/paper_trading/` with PaperTradingEngine, FillSimulator, SlippageModel, PaperOrderManager, DailyChecklistRunner, SixWeekReportGenerator, ReplayValidator — runs on real market data with zero real capital, all orders logged but NOT sent to broker
+> **Environment:** Windows 11 + Python 3.12.7 + .venv at `G:\OC\02June26\indian-trading-bot\.venv`
+> **Reference Books:** López de Prado "Advances in Financial Machine Learning" Ch.1 (DSR verification out-of-sample), Ch.11-12 (backtest-to-production gap, CPCV alignment), Ch.14 (production deployment sanity checks); Kaufman "Trading Systems and Methods" Ch.12 (system robustness, real-world execution vs backtest, slippage estimation, paper trading validation protocol); Davey "Building Algorithmic Trading Systems" Ch.7 (walk-forward to live transition, paper trading as final verification gate, 30-trade minimum before live); Aronson "Evidence-Based Technical Analysis" Ch.1-2 (out-of-sample validation, avoiding data snooping in production); Natenberg "Option Volatility and Pricing" Ch.19 (execution reality vs theoretical pricing, fill assumptions, slippage in options markets)
+> **Reference Docs:** `SEBI_Algo_Trading_Regulation_Research.md` + `COMPLIANCE_SECURITY_MAPPING.md` + `tooling-reference.md`
+> **Extends:** Phase 0-11 scaffolding — does NOT overwrite existing files
+> **CRITICAL:** This is a PLAN ONLY — no implementation, no other activity
+
+---
+
+## Critical Corrections & Findings (Pre-Implementation)
+
+| # | Issue | Original Assumption | Corrected Truth | Source |
+|---|-------|---------------------|-----------------|--------|
+| 1 | Paper trading duration | "6 weeks minimum" from Plan.txt | 6 calendar weeks = minimum 30 trading sessions. Per Davey Ch.7: require minimum 30 completed trades AND 30 trading sessions before live go/no-go. Both conditions must be met independently | Davey "Building Algorithmic Trading Systems" Ch.7 |
+| 2 | Zerodha paper trading | "Paper trading mode" as broker feature | Zerodha has NO sandbox/paper trading API (Correction #4 from Ph11). Paper trading = intercept ALL broker calls in bot code, log to local DB, NEVER call kite.place_order(). The KiteConnect session is established for data access ONLY | KiteConnect API docs; Ph11 Correction #4 |
+| 3 | Fill simulation | Assume fill at signal price | Options fills are simulated with realistic slippage: default 0.05% NIFTY, 0.10% BANKNIFTY/illiquid. Fill assumption = midpoint of bid-ask at signal time + slippage. Natenberg Ch.19: theoretical price ≠ execution price; wider spread for OTM options near expiry | Natenberg Ch.19; Kaufman Ch.12 |
+| 4 | Uptime measurement | "> 99.5%" | 99.5% over 6 weeks (30 trading days × 6.25 hrs/day = 187.5 hrs) = max 56.25 min total downtime. Measured from 9:15 AM IST market open to 15:30 IST close. Exclude planned maintenance windows (recorded in maintenance_log table). Use heartbeat table in TimescaleDB with 30-second intervals | Kaufman Ch.12 (system reliability); SRE industry standard (SLO measurement) |
+| 5 | Kill switch test | "Works in <3 seconds" | Kill switch activation measured from user trigger to ALL order generation ceasing. <3 seconds end-to-end including: (a) signal to KillSwitch.activate(), (b) SessionManager detects KILL level, (c) orchestrator stops evaluate() calls, (d) audit log entry written. Tested daily at random times during session | Ph0 kill_switch.py design; Kaufman Ch.12 (emergency controls) |
+| 6 | Estimated Sharpe | "> 0.8 Go / < 0.3 No-Go" | Sharpe computed on DAILY estimated P&L returns (not trade returns). Annualized: Sharpe = mean(daily_returns) / std(daily_returns) × sqrt(252). Must use same risk-free rate as Phase 6 backtest for direct comparison. Sharpe bar adjusted: Go ≥ 0.8, Caution 0.3-0.8, No-Go < 0.3 | López de Prado Ch.1 (Sharpe computation); Phase 6 BacktestSettings |
+| 7 | Max drawdown | "< 25% Go / > 35% No-Go" | Drawdown computed from equity high-water mark on daily estimated P&L. Must include unrealized P&L (mark-to-market open positions at EOD). DD% = (peak_equity - current_equity) / peak_equity. Caution zone: 25-35%. Include cost drag from Phase 6 cost_model | Kaufman Ch.12 (drawdown measurement); Phase 6 cost model |
+| 8 | Risk limit breaches | "0 Go / Any unexplained No-Go" | Risk limits from Phase 10 RiskManager: max position size, max daily loss, max OPS rate, self-trade prevention, exposure limits. Each breach must be logged with root cause. "Unexplained" = any breach where audit trail cannot identify the trigger. EXPLAINED breaches (e.g., intentional kill switch test) are tracked but not a No-Go trigger | Ph10 RiskManager; SEBI risk management requirements |
+| 9 | Daily checklist timing | Implicit | Checklist runs at 15:35 IST (5 min after market close) automatically via SessionManager POST_CLOSE phase. Also generates mid-session snapshot at 12:15 IST for early detection. Checklist results stored in TimescaleDB for weekly/monthly aggregation | Kaufman Ch.12 (post-session review protocol) |
+| 10 | 6-week review | Single review at end | THREE reviews: (a) End-of-Week review every Friday 15:40 IST, (b) Mid-Point review at end of Week 3 (comprehensive), (c) Final review at end of Week 6 (go/no-go decision). Each review has specific metrics gates. Early stop allowed: if 2 consecutive weeks have No-Go metrics, halt paper trading and return to Phase 6 for strategy revision | Davey Ch.7 (staged validation); Kaufman Ch.12 (progressive confidence) |
+| 11 | Sentiment + RAG time budget | Not quantified | Sentiment pipeline must complete within 60 seconds per eval cycle. RAG pipeline within 90 seconds. Total signal fetch for all 5 sources must complete within 180 seconds (3 min). If any source exceeds its budget, circuit breaker opens and stub is used (Ph11 Correction #18). Time budget violations are logged daily | Ph11 SignalFetcher timeout design; Kleppmann Ch.7 (timeout budgets) |
+| 12 | Trailing stop verification | "Did trailing stops trigger correctly?" | Trailing stop correctness = compare actual trigger price against IDEAL trigger price (if no slippage). Deviation = (actual_trigger - ideal_trigger) / ideal_trigger. Acceptable deviation: < 0.5% for NIFTY, < 1.0% for BANKNIFTY. Daily audit of all trailing stop events | Ph11 TrailingStopMonitor; Kaufman Ch.10 (stop execution quality) |
+| 13 | WebSocket reconnection | Not specified | WebSocket (KiteConnect ticker) reconnection: max 3 retry attempts with exponential backoff (1s, 2s, 4s). If all 3 fail, log CRITICAL error and switch to REST polling fallback (5-second interval). Total disconnection time must not exceed 30 seconds per incident. Log all reconnection events with timestamps | KiteConnect reconnection docs; Kleppmann Ch.7 (failure handling) |
+| 14 | Paper trading vs backtest alignment | Not specified | Paper trading must use IDENTICAL strategy logic, risk parameters, and cost model as Phase 6 backtest. Any divergence is a CRITICAL finding. Daily comparison: paper trading estimated P&L vs backtest P&L for same market conditions. Divergence > 5% requires investigation. This is the "backtest-to-production gap" (López de Prado Ch.11) | López de Prado Ch.11-12 (backtest vs production); Kaufman Ch.12 |
+| 15 | Order logging granularity | Not specified | Every order intent logged with 14 fields: timestamp, symbol, direction, action, strike, lots, premium, estimated_fill_price, slippage_estimate, cost_breakdown, risk_check_result, kill_switch_status, session_phase, signal_sources. Immutable append-only log (SHA-256 chain from Ph0 AuditLogger) | Ph0 audit.py; SEBI audit trail requirements |
+| 16 | Capital tracking | Not specified | Virtual capital starts at 5,00,000 INR (same as Phase 6 INITIAL_CAPITAL). Tracked with full cost model deductions: brokerage, STT, stamp duty, SEBI fees, exchange charges, GST, slippage. Margin tracking for option selling positions. Capital must NEVER go negative (risk limit breach) | Phase 6 BacktestSettings; Zerodha margin calculator |
+| 17 | Market data quality | Not specified | Daily data quality checks: (a) WebSocket tick count vs expected (based on NSE tick rate), (b) bid-ask spread reasonableness (< 5% of midpoint for ATM options), (c) no stale data detection (last tick > 60 seconds old), (d) VIX range check (8-40). Data quality score logged daily | Kaufman Ch.12 (data integrity); NSE data quality standards |
+| 18 | Weekend/holiday handling | Not specified | Bot must NOT attempt trading on NSE holidays or weekends. Use Phase 2 QuantLibCalendar for trading day detection. Bot starts PRE_OPEN warmup only on valid trading days. Holiday calendar checked at startup and cached | Phase 2 QuantLibCalendar; NSE holiday list |
+| 19 | Crash recovery | Not specified | On crash/restart: (a) reload last known state from TimescaleDB (positions, capital, trailing stops), (b) skip signals generated during downtime, (c) log crash event with stack trace, (d) resume from current market state (never backfill missed signals). Recovery target: < 60 seconds from process restart to signal evaluation | Kaufman Ch.12 (fault tolerance); SRE crash recovery patterns |
+| 20 | Docker Compose services | Listed but not specified | TimescaleDB (port 5432, 4GB RAM), Redis (port 6379, 512MB), Prometheus (port 9090, scrape every 15s), Grafana (port 3000, dashboard provisioned), Ollama (port 11434, GPU optional). All services must start BEFORE bot process. Health check script verifies all 5 services before market open | Docker Compose health checks; Ph2 Docker setup |
+
+---
+
+## Book Extractions Applied to Phase 12
+
+### López de Prado "Advances in Financial Machine Learning"
+
+| # | Chapter | Extraction | Phase 12 Application |
+|---|---------|-----------|---------------------|
+| 1 | Ch.1 | "Most backtests published are false — the only true test is out-of-sample performance on data never seen by the researcher" | Paper trading IS the out-of-sample test. All 6 weeks must use real-time data not in the Phase 6 backtest training window |
+| 2 | Ch.1 | "The Deflated Sharpe Ratio corrects for multiple testing — paper trading must verify DSR holds in production" | Compute DSR on paper trading results. If DSR < 0.95 (Phase 6 gate), this is a No-Go even if nominal Sharpe > 0.8 |
+| 3 | Ch.11 | "The backtest-to-production gap: real-world execution differs from backtest in timing, fills, and costs" | Daily comparison module: paper trading P&L vs backtest P&L on identical dates. Divergence > 5% = investigation required |
+| 4 | Ch.11 | "Paper trading does not eliminate all biases — simulator bias makes traders overconfident" | Paper trading report MUST include explicit disclaimer section on known simulator biases (no real capital at risk, no emotional pressure, no real liquidity impact) |
+| 5 | Ch.12 | "CPCV alignment: out-of-sample results should fall within the distribution of CPCV paths from backtesting" | Compare paper trading Sharpe against the 15 CPCV path Sharpe distribution from Phase 6. Paper Sharpe should be within the CPCV 95% CI |
+| 6 | Ch.14 | "Production deployment sanity checks: verify data pipeline, risk controls, audit trail before going live" | Daily checklist = production sanity checks. Kill switch test = emergency control verification. Risk limit breach tracking = control validation |
+
+### Kaufman "Trading Systems and Methods"
+
+| # | Chapter | Extraction | Phase 12 Application |
+|---|---------|-----------|---------------------|
+| 1 | Ch.10 | "Trailing stops must be tested in real-time — backtest stop assumptions often diverge from live execution" | Trailing stop deviation audit: compare actual trigger vs ideal trigger. Acceptable: < 0.5% NIFTY, < 1.0% BANKNIFTY |
+| 2 | Ch.12 | "Paper trading protocol: run for minimum 30 trading sessions, track every signal, compare to backtest, document all deviations" | 30 trading session minimum enforced. Every signal logged with full metadata. Daily comparison to backtest. Deviation report per session |
+| 3 | Ch.12 | "System robustness is proven when the system handles unexpected market conditions without crashing or producing irrational signals" | Track unhandled errors, crashes, and irrational signals (e.g., trade suggestion > 10 lots when risk limit is 3). Daily error audit |
+| 4 | Ch.12 | "Slippage estimation: real slippage depends on market depth, volatility, and time of day. Paper trading uses conservative estimates" | Slippage model: base 0.05% NIFTY / 0.10% BANKNIFTY, x1.5 multiplier during first/last 15 min of session, x2.0 for OTM options within 3 days of expiry |
+| 5 | Ch.12 | "Post-session review protocol: check all signals, all fills, all risk controls, all errors — every day without exception" | Daily checklist automated in POST_CLOSE phase. 8-point checklist stored in TimescaleDB. Weekly aggregation every Friday |
+
+### Davey "Building Algorithmic Trading Systems"
+
+| # | Chapter | Extraction | Phase 12 Application |
+|---|---------|-----------|---------------------|
+| 1 | Ch.7 | "Walk-forward to live transition: paper trading is the FINAL verification gate. If it fails here, do NOT go live" | Paper trading is final gate before Phase 13 (live deployment). No-Go in paper trading = return to Phase 6 for strategy revision |
+| 2 | Ch.7 | "Require minimum 30 trades before considering live deployment — statistical significance requires sufficient sample" | 30 completed trades minimum (in addition to 30 trading sessions). Both conditions must be met. Trade count tracked in SixWeekReportGenerator |
+| 3 | Ch.7 | "Compare paper trading performance to walk-forward out-of-sample results — they should be in the same ballpark" | Weekly comparison: paper trading Sharpe vs walk-forward OOS Sharpe from Phase 6. If paper Sharpe < 50% of OOS Sharpe, flag as WARNING |
+| 4 | Ch.7 | "Track the difference between paper trading fills and what backtest assumed — this gap IS your real-world cost estimate" | Fill gap analysis: average difference between estimated fill (signal price + slippage) and backtest fill (EOD close). This gap quantifies the backtest-to-production cost |
+| 5 | Ch.7 | "If two consecutive weeks have No-Go metrics, stop paper trading and re-evaluate the strategy" | Early stop rule: 2 consecutive weekly No-Go results → halt paper trading → return to Phase 6. Saves 4 weeks of wasted paper trading |
+
+### Natenberg "Option Volatility and Pricing"
+
+| # | Chapter | Extraction | Phase 12 Application |
+|---|---------|-----------|---------------------|
+| 1 | Ch.19 | "Theoretical price assumes perfect fill — real fills depend on bid-ask spread, market depth, and order urgency" | Fill simulator uses bid-ask midpoint + configurable slippage. Never assume fill at theoretical price. Illiquid strikes get higher slippage |
+| 2 | Ch.19 | "Options slippage is asymmetric: buying pressure widens the ask, selling pressure widens the bid" | Directional slippage model: buying options = fill closer to ask (slippage = 60% of spread), selling options = fill closer to bid (slippage = 40% of spread). Reflects market maker behavior |
+| 3 | Ch.19 | "Near-expiry options have wider effective spreads due to gamma risk — market makers demand more premium for providing liquidity" | Near-expiry slippage multiplier: x2.0 for options within 3 DTE, x1.5 for 4-7 DTE. Applied on top of base slippage |
+
+---
+
+## Phase 0-11 Scaffolding Already Built (DO NOT recreate — EXTEND only)
+
+### Existing Files Consumed by Phase 12:
+- `src/orchestrator/signal_orchestrator.py` — SignalOrchestrator (per-symbol eval, three decision gates, TradeDecision DTOs)
+- `src/orchestrator/session_manager.py` — SessionManager (PRE_OPEN/REGULAR/POST_CLOSE lifecycle)
+- `src/orchestrator/signal_fetcher.py` — SignalFetcher (parallel fetch with circuit breakers)
+- `src/orchestrator/confidence_combiner.py` — ConfidenceCombiner (weighted average, opposition gate)
+- `src/orchestrator/trailing_stop_monitor.py` — TrailingStopMonitor (ratchet mechanism)
+- `src/orchestrator/models.py` — TradeDecision, SignalPayload, CombinedScore, SignalSource
+- `src/risk/manager.py` — RiskManager, PreTradeCheckResult (PASS/FAIL/THROTTLED/KILLED)
+- `src/risk/kill_switch.py` — KillSwitch, KillSwitchLevel (INACTIVE/THROTTLE/PAUSE/KILL)
+- `src/risk/compliance.py` — TradingSession, get_trading_session(), is_order_allowed()
+- `src/risk/audit.py` — AuditLogger, AuditEvent (SHA-256 chain)
+- `src/brokers/base.py` — BrokerInterface (authenticate, place_order, cancel_order, etc.)
+- `src/data/providers.py` — MarketDataProvider (get_quote, get_historical, subscribe)
+- `src/backtest/cost_model.py` — compute_entry_cost, compute_exit_cost, TradeCost
+- `src/backtest/engine.py` — BacktestEngine (equity curve, trade log)
+- `src/backtest/metrics.py` — Sharpe, max DD, DSR computation
+- `config/settings.py` — OrchestrationSettings, BacktestSettings, RiskSettings, ComplianceSettings
+
+### What Phase 12 Adds (NEW files/classes):
+- `src/paper_trading/__init__.py` — Package init with public exports
+- `src/paper_trading/models.py` — PaperOrder, PaperFill, PaperPosition, DailyChecklistResult, WeeklyReviewResult, SixWeekReport dataclasses
+- `src/paper_trading/fill_simulator.py` — FillSimulator (bid-ask midpoint + directional slippage + near-expiry multiplier, Natenberg Ch.19)
+- `src/paper_trading/slippage_model.py` — SlippageModel (base slippage + session time multiplier + near-expiry multiplier + illiquidity multiplier)
+- `src/paper_trading/paper_order_manager.py` — PaperOrderManager (intercepts broker calls, logs to DB, NEVER sends real orders, virtual capital tracking)
+- `src/paper_trading/paper_trading_engine.py` — PaperTradingEngine (main engine: orchestrator eval -> risk check -> paper order -> fill sim -> P&L update -> daily checklist)
+- `src/paper_trading/daily_checklist.py` — DailyChecklistRunner (8-point checklist, automated at 15:35 IST)
+- `src/paper_trading/crash_recovery.py` — CrashRecoveryManager (state reload from DB, position reconstruction, signal gap handling)
+- `src/paper_trading/data_quality_monitor.py` — DataQualityMonitor (WebSocket tick count, bid-ask spread check, stale data detection, VIX range check)
+- `src/paper_trading/weekly_review.py` — WeeklyReviewRunner (weekly metrics aggregation, paper-vs-backtest comparison, early stop evaluation)
+- `src/paper_trading/six_week_report.py` — SixWeekReportGenerator (final go/no-go report with all metrics, DSR verification, documented decision)
+- `src/paper_trading/websocket_health.py` — WebSocketHealthMonitor (reconnection tracking, retry counting, fallback detection)
+- `config/settings.py` — ADD PaperTradingSettings (extend, don't overwrite)
+- `deployment/init_phase12.sql` — TimescaleDB schema for paper trading tables
+- `deployment/docker-compose-paper.yml` — Docker Compose overrides for paper trading monitoring
+- `deployment/grafana/paper_trading_dashboard.json` — Grafana dashboard for real-time paper trading monitoring
+- `scripts/start_paper_trading.ps1` — Windows PowerShell startup script
+- `scripts/register_scheduled_task.ps1` — Windows Task Scheduler registration
+- `scripts/test_kill_switch.ps1` — Manual kill switch test script
+- `src/paper_trading/main.py` — Main entry point for paper trading
+- New test files: `tests/paper_trading/test_models.py`, `tests/paper_trading/test_fill_simulator.py`, `tests/paper_trading/test_slippage_model.py`, `tests/paper_trading/test_paper_order_manager.py`, `tests/paper_trading/test_paper_trading_engine.py`, `tests/paper_trading/test_daily_checklist.py`, `tests/paper_trading/test_crash_recovery.py`, `tests/paper_trading/test_data_quality_monitor.py`, `tests/paper_trading/test_weekly_review.py`, `tests/paper_trading/test_six_week_report.py`, `tests/paper_trading/test_websocket_health.py`
+- New replay test: `tests/replay/test_paper_trading_replay.py` — Replay entire paper trading period for verification
+
+---
+
+## New Dependencies
+
+```
+# No new RUNTIME dependencies required for Phase 12.
+# All computation uses existing Phase 0-11 infrastructure:
+# "numpy>=1.26" — calculations (already from Phase 0)
+# "pandas>=2.1" — data manipulation (already from Phase 0)
+# "pydantic>=2.5" — models (already from Phase 0)
+# "pydantic-settings>=2.1" — config (already from Phase 1)
+# "structlog>=23.2" — logging (already from Phase 0)
+# "psycopg[binary]>=3.1" — TimescaleDB (already from Phase 2)
+# "redis>=5.0" — caching (already from Phase 2)
+# "prometheus-client>=0.19" — metrics (already from Phase 0)
+# "kiteconnect>=4.1" — market data only (already from Phase 1)
+
+# Phase 12 specific dev dependencies (ADD to [project.optional-dependencies.dev]):
+# "locust>=2.20" — load testing for WebSocket/REST polling fallback
+```
+
+---
+
+## Instruction 1 — Add `PaperTradingSettings` to `config/settings.py`
+
+**Action:** EXTEND `config/settings.py` — add one new Pydantic BaseSettings class AFTER existing `OrchestrationSettings` class. Do NOT modify any existing class.
+
+### 1.1 PaperTradingSettings
+
+```python
+class PaperTradingSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="PAPER_", env_file=".env", extra="ignore")
+
+    PAPER_TRADING_ENABLED: bool = Field(
+        default=True,
+        description="MUST be True during Phase 12. False = live mode (Phase 13+). Hard gate."
+    )
+
+    INITIAL_VIRTUAL_CAPITAL: float = Field(
+        default=500000.0, ge=100000.0,
+        description="Virtual capital in INR — matches Phase 6 INITIAL_CAPITAL (Correction #16)"
+    )
+
+    MIN_TRADING_SESSIONS: int = Field(
+        default=30, ge=20, le=60,
+        description="Minimum trading sessions before go/no-go (Correction #1, Davey Ch.7)"
+    )
+    MIN_COMPLETED_TRADES: int = Field(
+        default=30, ge=15, le=100,
+        description="Minimum completed trades before go/no-go (Correction #1, Davey Ch.7)"
+    )
+    PAPER_TRADING_WEEKS: int = Field(
+        default=6, ge=4, le=12,
+        description="Paper trading duration in calendar weeks"
+    )
+
+    BASE_SLIPPAGE_NIFTY_PCT: float = Field(
+        default=0.0005, ge=0.0001, le=0.005,
+        description="Base slippage 0.05% for NIFTY options (Correction #3, Natenberg Ch.19)"
+    )
+    BASE_SLIPPAGE_BANKNIFTY_PCT: float = Field(
+        default=0.001, ge=0.0002, le=0.01,
+        description="Base slippage 0.10% for BANKNIFTY options (Correction #3)"
+    )
+    SESSION_OPEN_CLOSE_MULTIPLIER: float = Field(
+        default=1.5, ge=1.0, le=3.0,
+        description="Slippage x1.5 during first/last 15 min (Kaufman Ch.12)"
+    )
+    NEAR_EXPIRY_3DTE_MULTIPLIER: float = Field(
+        default=2.0, ge=1.0, le=4.0,
+        description="Slippage x2.0 for options within 3 DTE (Natenberg Ch.19)"
+    )
+    NEAR_EXPIRY_7DTE_MULTIPLIER: float = Field(
+        default=1.5, ge=1.0, le=3.0,
+        description="Slippage x1.5 for options 4-7 DTE (Natenberg Ch.19)"
+    )
+    ILLIQUID_STRIKE_MULTIPLIER: float = Field(
+        default=2.0, ge=1.0, le=5.0,
+        description="Slippage x2.0 for illiquid strikes (low OI, wide spread)"
+    )
+    ILLIQUID_SPREAD_THRESHOLD_PCT: float = Field(
+        default=0.05, ge=0.01, le=0.20,
+        description="Bid-ask spread > 5% of midpoint = illiquid"
+    )
+
+    BUY_SLIPPAGE_SPREAD_FRACTION: float = Field(
+        default=0.60, ge=0.50, le=0.80,
+        description="Buy fills at 60% of bid-ask spread from midpoint (Natenberg Ch.19)"
+    )
+    SELL_SLIPPAGE_SPREAD_FRACTION: float = Field(
+        default=0.40, ge=0.20, le=0.50,
+        description="Sell fills at 40% of bid-ask spread from midpoint (Natenberg Ch.19)"
+    )
+
+    SENTIMENT_TIME_BUDGET_SECONDS: float = Field(
+        default=60.0, ge=10.0, le=300.0,
+        description="Sentiment pipeline time budget (Correction #11)"
+    )
+    RAG_TIME_BUDGET_SECONDS: float = Field(
+        default=90.0, ge=15.0, le=600.0,
+        description="RAG pipeline time budget (Correction #11)"
+    )
+    TOTAL_SIGNAL_FETCH_BUDGET_SECONDS: float = Field(
+        default=180.0, ge=30.0, le=600.0,
+        description="Total signal fetch time budget for all 5 sources (Correction #11)"
+    )
+
+    WS_MAX_RECONNECT_ATTEMPTS: int = Field(
+        default=3, ge=1, le=10,
+        description="Max WebSocket reconnection attempts (Correction #13)"
+    )
+    WS_RECONNECT_BASE_DELAY_SECONDS: float = Field(
+        default=1.0, ge=0.5, le=5.0,
+        description="Base delay for exponential backoff reconnection (1s, 2s, 4s)"
+    )
+    WS_MAX_DISCONNECTION_SECONDS: float = Field(
+        default=30.0, ge=5.0, le=120.0,
+        description="Max total disconnection time before CRITICAL alert (Correction #13)"
+    )
+    WS_REST_POLLING_FALLBACK_INTERVAL_SECONDS: float = Field(
+        default=5.0, ge=1.0, le=30.0,
+        description="REST API polling interval when WebSocket is down (Correction #13)"
+    )
+
+    CRASH_RECOVERY_TARGET_SECONDS: float = Field(
+        default=60.0, ge=10.0, le=300.0,
+        description="Target: process restart to signal evaluation within 60s (Correction #19)"
+    )
+    HEARTBEAT_INTERVAL_SECONDS: float = Field(
+        default=30.0, ge=5.0, le=120.0,
+        description="Heartbeat interval for uptime measurement (Correction #4)"
+    )
+
+    MAX_STALE_DATA_SECONDS: float = Field(
+        default=60.0, ge=10.0, le=300.0,
+        description="Max seconds since last tick before flagging stale data (Correction #17)"
+    )
+    VIX_MIN_REASONABLE: float = Field(default=8.0, ge=5.0, le=12.0)
+    VIX_MAX_REASONABLE: float = Field(default=40.0, ge=25.0, le=60.0)
+    MAX_BID_ASK_SPREAD_PCT: float = Field(
+        default=0.05, ge=0.01, le=0.20,
+        description="Max bid-ask spread as % of midpoint for ATM options (Correction #17)"
+    )
+
+    TRAILING_STOP_MAX_DEVIATION_NIFTY_PCT: float = Field(
+        default=0.005, ge=0.001, le=0.02,
+        description="Max trailing stop deviation 0.5% for NIFTY (Correction #12)"
+    )
+    TRAILING_STOP_MAX_DEVIATION_BANKNIFTY_PCT: float = Field(
+        default=0.01, ge=0.002, le=0.03,
+        description="Max trailing stop deviation 1.0% for BANKNIFTY (Correction #12)"
+    )
+
+    PAPER_VS_BACKTEST_MAX_DIVERGENCE_PCT: float = Field(
+        default=0.05, ge=0.01, le=0.20,
+        description="Max 5% divergence between paper P&L and backtest P&L (Correction #14)"
+    )
+
+    GO_UPTIME_PCT: float = Field(default=99.5, ge=95.0)
+    NOGO_UPTIME_PCT: float = Field(default=98.0, ge=90.0)
+    GO_SHARPE: float = Field(default=0.8, ge=0.0)
+    CAUTION_SHARPE: float = Field(default=0.3, ge=0.0)
+    GO_MAX_DD_PCT: float = Field(default=25.0, ge=5.0)
+    NOGO_MAX_DD_PCT: float = Field(default=35.0, ge=15.0)
+    MAX_RISK_LIMIT_BREACHES_UNEXPLAINED: int = Field(default=0, ge=0)
+    KILL_SWITCH_MAX_RESPONSE_SECONDS: float = Field(default=3.0, ge=1.0, le=10.0)
+    DSR_MIN_THRESHOLD: float = Field(default=0.95, ge=0.90, le=0.99)
+    EARLY_STOP_CONSECUTIVE_NOGO_WEEKS: int = Field(default=2, ge=1, le=4)
+    FILL_SIMULATION_USE_MIDPOINT: bool = Field(default=True)
+    KILL_SWITCH_TEST_ENABLED: bool = Field(default=True)
+    KILL_SWITCH_TEST_MIN_INTERVAL_MINUTES: int = Field(default=60, ge=30, le=240)
+    MAINTENANCE_WINDOW_TRACKING: bool = Field(default=True)
+
+    @model_validator(mode="after")
+    def validate_paper_trading_settings(self) -> "PaperTradingSettings":
+        if self.CAUTION_SHARPE > self.GO_SHARPE:
+            raise ValueError(f"CAUTION_SHARPE ({self.CAUTION_SHARPE}) must be <= GO_SHARPE ({self.GO_SHARPE})")
+        if self.NOGO_MAX_DD_PCT <= self.GO_MAX_DD_PCT:
+            raise ValueError(f"NOGO_MAX_DD_PCT ({self.NOGO_MAX_DD_PCT}) must be > GO_MAX_DD_PCT ({self.GO_MAX_DD_PCT})")
+        if self.NOGO_UPTIME_PCT >= self.GO_UPTIME_PCT:
+            raise ValueError(f"NOGO_UPTIME_PCT ({self.NOGO_UPTIME_PCT}) must be < GO_UPTIME_PCT ({self.GO_UPTIME_PCT})")
+        if self.SENTIMENT_TIME_BUDGET_SECONDS + self.RAG_TIME_BUDGET_SECONDS > self.TOTAL_SIGNAL_FETCH_BUDGET_SECONDS:
+            raise ValueError("SENTIMENT + RAG time budgets exceed TOTAL_SIGNAL_FETCH_BUDGET")
+        if not self.PAPER_TRADING_ENABLED:
+            import warnings
+            warnings.warn("PAPER_TRADING_ENABLED=False — Phase 12 requires paper trading.", stacklevel=2)
+        return self
+```
+
+### 1.2 Verification Gate:
+- `python -c "from config.settings import PaperTradingSettings; s = PaperTradingSettings(); assert s.PAPER_TRADING_ENABLED == True; assert s.INITIAL_VIRTUAL_CAPITAL == 500000.0; print('PaperTradingSettings OK')"`
+- Must pass without error
+
+---
+
+## Instruction 2 — Create `src/paper_trading/models.py` — Data Models
+
+**Action:** Create new file `src/paper_trading/models.py`. All models are frozen dataclasses (value objects, consistent with Phase 5/11 pattern).
+
+### 2.1 Enums
+
+```python
+class PaperOrderStatus(Enum):
+    INTENDED = "INTENDED"
+    RISK_CHECKED = "RISK_CHECKED"
+    SUBMITTED = "SUBMITTED"
+    FILLED = "FILLED"
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+    KILLED = "KILLED"
+
+class PaperTradingPhase(Enum):
+    WEEK_1 = "WEEK_1"
+    WEEK_2 = "WEEK_2"
+    WEEK_3 = "WEEK_3"
+    WEEK_4 = "WEEK_4"
+    WEEK_5 = "WEEK_5"
+    WEEK_6 = "WEEK_6"
+
+class GoNoGoVerdict(Enum):
+    GO = "GO"
+    CAUTION = "CAUTION"
+    NO_GO = "NO_GO"
+    PENDING = "PENDING"
+    EARLY_STOP = "EARLY_STOP"
+```
+
+### 2.2 PaperOrder (14 fields, Correction #15)
+
+```python
+@dataclass(frozen=True)
+class PaperOrder:
+    order_id: str
+    timestamp: float
+    symbol: str
+    direction: str
+    action: str
+    strike: float | None
+    option_type: str | None
+    lots: int
+    signal_price: float
+    estimated_fill_price: float
+    slippage_estimate: float
+    cost_breakdown: str
+    risk_check_result: str
+    kill_switch_status: str
+    session_phase: str
+    signal_sources: str
+    status: PaperOrderStatus
+
+    def __post_init__(self):
+        if self.lots <= 0:
+            raise ValueError(f"lots must be > 0, got {self.lots}")
+```
+
+### 2.3 PaperFill (Natenberg Ch.19)
+
+```python
+@dataclass(frozen=True)
+class PaperFill:
+    fill_id: str
+    order_id: str
+    fill_timestamp: float
+    fill_price: float
+    slippage_actual: float
+    slippage_components: str
+    bid_at_signal: float
+    ask_at_signal: float
+    midpoint: float
+    spread_pct: float
+    dte: int
+    session_time_category: str
+
+    def __post_init__(self):
+        if self.fill_price <= 0:
+            raise ValueError(f"fill_price must be > 0, got {self.fill_price}")
+```
+
+### 2.4 PaperPosition (mutable)
+
+```python
+@dataclass
+class PaperPosition:
+    position_id: str
+    symbol: str
+    direction: str
+    entry_order_id: str
+    entry_fill: PaperFill | None
+    entry_price: float
+    lots: int
+    lot_size: int
+    entry_cost: float
+    current_stop_price: float
+    best_price: float
+    entry_timestamp: float
+    exit_order_id: str | None = None
+    exit_fill: PaperFill | None = None
+    exit_price: float = 0.0
+    exit_cost: float = 0.0
+    exit_reason: str | None = None
+    unrealized_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    margin_used: float = 0.0
+    holding_days: int = 0
+
+    def __post_init__(self):
+        if self.entry_price <= 0:
+            raise ValueError(f"entry_price must be > 0, got {self.entry_price}")
+```
+
+### 2.5 DailyChecklistResult (8-point, Correction #9)
+
+```python
+@dataclass(frozen=True)
+class DailyChecklistResult:
+    checklist_date: date
+    session_start_on_time: bool
+    all_signals_generated: bool
+    risk_limits_triggered: int
+    risk_limit_reasons: str
+    unhandled_errors: int
+    unhandled_error_details: str
+    ws_disconnections: int
+    ws_reconnection_successful: bool
+    sentiment_rag_within_budget: bool
+    trailing_stops_correct: bool
+    estimated_pnl: float
+    backtest_expected_pnl: float
+    pnl_vs_backtest_divergence_pct: float
+    uptime_pct: float
+    data_quality_score: float
+    kill_switch_test_result: str
+    overall_status: str
+    metadata: str
+
+    def __post_init__(self):
+        if not 0.0 <= self.data_quality_score <= 1.0:
+            raise ValueError(f"data_quality_score must be in [0.0, 1.0], got {self.data_quality_score}")
+        if not 0.0 <= self.uptime_pct <= 100.0:
+            raise ValueError(f"uptime_pct must be in [0.0, 100.0], got {self.uptime_pct}")
+```
+
+### 2.6 WeeklyReviewResult (Correction #10)
+
+```python
+@dataclass(frozen=True)
+class WeeklyReviewResult:
+    week_number: int
+    trading_sessions: int
+    completed_trades: int
+    weekly_sharpe: float
+    cumulative_sharpe: float
+    weekly_max_dd_pct: float
+    cumulative_max_dd_pct: float
+    uptime_pct: float
+    risk_limit_breaches: int
+    unexplained_breaches: int
+    avg_pnl_vs_backtest_divergence: float
+    dsr: float
+    trailing_stop_avg_deviation: float
+    verdict: GoNoGoVerdict
+    early_stop_triggered: bool
+    cpcv_comparison: str
+```
+
+### 2.7 SixWeekReport (deliverable)
+
+```python
+@dataclass(frozen=True)
+class SixWeekReport:
+    report_id: str
+    start_date: date
+    end_date: date
+    total_trading_sessions: int
+    total_completed_trades: int
+    final_sharpe: float
+    final_max_dd_pct: float
+    final_dsr: float
+    final_pbo: float
+    final_uptime_pct: float
+    total_unhandled_errors: int
+    total_risk_limit_breaches: int
+    total_unexplained_breaches: int
+    kill_switch_test_pass_rate: float
+    avg_trailing_stop_deviation_pct: float
+    avg_pnl_vs_backtest_divergence_pct: float
+    total_ws_disconnections: int
+    ws_recovery_rate_pct: float
+    data_quality_avg_score: float
+    cost_drag_pct: float
+    final_verdict: GoNoGoVerdict
+    verdict_reasons: str
+    known_simulator_biases: str
+    recommendation: str
+    weekly_reviews: str
+    generated_at: float
+```
+
+---
+
+## Instruction 3 — Create `src/paper_trading/slippage_model.py` — Slippage Estimation
+
+**Action:** Create new file `src/paper_trading/slippage_model.py`.
+**Reference:** Natenberg Ch.19 (execution reality); Kaufman Ch.12 (slippage estimation)
+
+### 3.1 Dataclass SlippageResult
+
+```python
+@dataclass(frozen=True)
+class SlippageResult:
+    base_slippage: float
+    session_multiplier: float
+    near_expiry_multiplier: float
+    illiquidity_multiplier: float
+    total_slippage_inr: float
+    directional_adjustment_inr: float
+    final_fill_price: float
+    midpoint: float
+    spread_pct: float
+    is_illiquid: bool
+    session_time_category: str
+```
+
+### 3.2 Class SlippageModel
+
+```python
+class SlippageModel:
+    """Multi-factor slippage model for options fill simulation.
+
+    Slippage = base_slippage x session_multiplier x near_expiry_multiplier x illiquidity_multiplier
+
+    Reference: Natenberg Ch.19 (execution vs theoretical pricing)
+    Reference: Kaufman Ch.12 (realistic slippage in trading systems)
+    """
+
+    def __init__(self, settings: PaperTradingSettings):
+        self._settings = settings
+
+    def compute_slippage(
+        self,
+        symbol: str,
+        option_type: str,
+        signal_price: float,
+        bid: float,
+        ask: float,
+        dte: int,
+        timestamp: float,
+        is_buy: bool,
+    ) -> SlippageResult:
+        """Compute total slippage for a simulated fill.
+
+        Steps:
+        1. Determine base slippage: NIFTY = BASE_SLIPPAGE_NIFTY_PCT, BANKNIFTY = BASE_SLIPPAGE_BANKNIFTY_PCT
+        2. Compute session time multiplier:
+           - First 15 min (9:15-9:30 IST): SESSION_OPEN_CLOSE_MULTIPLIER
+           - Last 15 min (15:15-15:30 IST): SESSION_OPEN_CLOSE_MULTIPLIER
+           - Core hours (9:30-15:15 IST): 1.0
+        3. Compute near-expiry multiplier:
+           - dte <= 3: NEAR_EXPIRY_3DTE_MULTIPLIER
+           - dte 4-7: NEAR_EXPIRY_7DTE_MULTIPLIER
+           - dte > 7: 1.0
+        4. Compute illiquidity multiplier:
+           - spread_pct = (ask - bid) / midpoint > ILLIQUID_SPREAD_THRESHOLD_PCT: ILLIQUID_STRIKE_MULTIPLIER
+           - Otherwise: 1.0
+        5. Total slippage = base x session_mult x near_expiry_mult x illiquidity_mult x signal_price
+        6. Apply directional adjustment (Natenberg Ch.19):
+           - Buy: fill = midpoint + (spread x BUY_SLIPPAGE_SPREAD_FRACTION) + total_slippage
+           - Sell: fill = midpoint - (spread x SELL_SLIPPAGE_SPREAD_FRACTION) - total_slippage
+        7. Return SlippageResult with all components for audit
+
+        CRITICAL: slippage is ALWAYS unfavorable to the trader.
+        """
+```
+
+### 3.3 Key Implementation Rules:
+- Slippage is ALWAYS unfavorable — never reduces the trader's cost
+- `compute_slippage()` must NEVER raise an exception — if inputs are invalid (price <= 0, bid > ask), return default slippage of 0.10% of signal_price and log a warning
+- All multipliers are multiplicative (not additive): total = base x session x expiry x illiquidity
+- If bid=0 or ask=0 (no market data), use conservative estimate: midpoint = signal_price, spread = 2x base slippage
+- Session time is converted from UTC epoch to IST (UTC+5:30) for session category determination
+- All slippage components are returned in SlippageResult for full audit trail
+
+---
+
+## Instruction 4 — Create `src/paper_trading/fill_simulator.py` — Fill Simulation Engine
+
+**Action:** Create new file `src/paper_trading/fill_simulator.py`.
+**Reference:** Natenberg Ch.19 (options execution reality); Kaufman Ch.12 (fill simulation)
+
+### 4.1 Class FillSimulator
+
+```python
+class FillSimulator:
+    """Simulate order fills for paper trading with realistic slippage.
+
+    Per Natenberg Ch.19: real fills differ from theoretical prices due to
+    bid-ask spread, market depth, and order urgency. This simulator
+    applies the SlippageModel to generate realistic fill prices.
+
+    Per Kaufman Ch.12: fill simulation must be conservative — assume
+    the worst reasonable execution to avoid overestimating P&L.
+    """
+
+    def __init__(self, slippage_model: SlippageModel, settings: PaperTradingSettings):
+        self._slippage_model = slippage_model
+        self._settings = settings
+
+    def simulate_fill(
+        self,
+        order: PaperOrder,
+        bid: float,
+        ask: float,
+        dte: int,
+    ) -> PaperFill:
+        """Simulate a fill for a paper order.
+
+        Steps:
+        1. Validate order is in SUBMITTED status (ready for fill)
+        2. Get signal price from order
+        3. If FILL_SIMULATION_USE_MIDPOINT and bid/ask available:
+           a. midpoint = (bid + ask) / 2
+           b. Use midpoint as base price
+        4. Else: use signal_price as base price
+        5. Compute slippage via SlippageModel.compute_slippage()
+        6. Determine is_buy from order.direction
+        7. Create PaperFill with all components
+        8. Return PaperFill with status FILLED
+
+        CRITICAL: If bid=0 and ask=0 (no market data available):
+        - Use signal_price as both bid and ask
+        - Apply maximum slippage (ILLIQUID_STRIKE_MULTIPLIER)
+        - Log WARNING: "Fill simulated without market data"
+        """
+
+    def simulate_exit_fill(
+        self,
+        position: PaperPosition,
+        exit_order: PaperOrder,
+        bid: float,
+        ask: float,
+        dte: int,
+    ) -> PaperFill:
+        """Simulate a fill for an exit order (closing a position).
+
+        Exit-specific adjustments:
+        - Kill switch exits: assume market order = worst case slippage x1.5
+        - Trailing stop exits: fill at stop price (or slightly worse)
+        """
+```
+
+### 4.2 Key Implementation Rules:
+- `simulate_fill()` must NEVER raise an exception — missing market data = conservative fill
+- Kill switch exit fills use x1.5 slippage multiplier (urgent exit = worse execution)
+- Trailing stop exit fills: fill_price = stop_price + small negative slippage (always slightly worse than stop)
+- All fills are recorded with full SlippageResult breakdown for audit
+- Fill timestamps use monotonic clock for ordering, UTC for display
+- If `order.lots` > 3 (risk limit), still simulate the fill but flag as RISK_BREACH in metadata
+
+---
+
+## Instruction 5 — Create `src/paper_trading/paper_order_manager.py` — Order Interception Layer
+
+**Action:** Create new file `src/paper_trading/paper_order_manager.py`.
+**Reference:** Correction #2 (no Zerodha sandbox, intercept broker calls); SEBI audit trail requirements
+
+### 5.1 Class PaperOrderManager
+
+```python
+class PaperOrderManager:
+    """Intercept ALL broker calls — log to DB, NEVER send real orders.
+
+    CRITICAL safety layer (Correction #2): Zerodha has NO sandbox/paper
+    trading API. The bot must NEVER call kite.place_order() during paper
+    trading. This manager replaces the broker interface.
+
+    Data access (quotes, historical) still goes through real Kite API
+    for live market data — only ORDER PLACEMENT is intercepted.
+    """
+
+    def __init__(
+        self,
+        settings: PaperTradingSettings,
+        fill_simulator: FillSimulator,
+        risk_manager: RiskManager | None = None,
+        kill_switch: KillSwitch | None = None,
+        audit_logger: AuditLogger | None = None,
+        db_store: object | None = None,
+    ):
+        self._settings = settings
+        self._fill_simulator = fill_simulator
+        self._risk_manager = risk_manager
+        self._kill_switch = kill_switch
+        self._audit_logger = audit_logger
+        self._db_store = db_store
+        self._virtual_capital = settings.INITIAL_VIRTUAL_CAPITAL
+        self._open_positions: dict[str, PaperPosition] = {}
+        self._closed_positions: list[PaperPosition] = []
+        self._order_counter = 0
+
+    async def place_order(self, trade_decision: TradeDecision) -> PaperOrder:
+        """Process a trade decision as a paper order.
+
+        CRITICAL SAFETY: This method NEVER calls kite.place_order().
+        It only logs the order intent and simulates a fill.
+
+        Steps:
+        1. HARD GATE: assert PAPER_TRADING_ENABLED is True. If False, raise RuntimeError.
+        2. Check kill switch: if KILL/PAUSE, return PaperOrder with status=KILLED
+        3. Run risk check via risk_manager.pre_trade_check() if available
+        4. If risk check FAIL/THROTTLED/KILLED: return PaperOrder with status=REJECTED
+        5. Create PaperOrder with all 14 fields (Correction #15)
+        6. Simulate fill via FillSimulator
+        7. Create PaperFill and link to order
+        8. Update virtual capital: deduct entry cost + margin
+        9. Create/update PaperPosition
+        10. Persist to TimescaleDB
+        11. Log to audit trail
+        12. Return PaperOrder
+        """
+
+    async def cancel_order(self, order_id: str) -> PaperOrder | None:
+        """Cancel a paper order (log only, no real cancellation needed)."""
+
+    async def cancel_all_orders(self, symbol: str | None = None) -> list[PaperOrder]:
+        """Cancel all open paper orders (used by kill switch)."""
+
+    def get_virtual_capital(self) -> float:
+        """Get current virtual capital including unrealized P&L."""
+
+    def get_equity(self) -> float:
+        """Get total equity = virtual_capital + unrealized_pnl."""
+
+    def get_open_positions(self) -> list[PaperPosition]:
+        """Get all open positions."""
+
+    def get_closed_positions(self) -> list[PaperPosition]:
+        """Get all closed positions."""
+
+    def get_daily_pnl(self) -> float:
+        """Get today's realized + unrealized P&L."""
+
+    def mark_to_market(self, current_prices: dict[str, float]) -> None:
+        """Update unrealized P&L for all open positions using current prices."""
+
+    def _ensure_capital_not_negative(self) -> None:
+        """If virtual capital goes negative, trigger risk limit breach alert (Correction #16)."""
+```
+
+### 5.2 Key Implementation Rules:
+- `place_order()` FIRST line: `assert self._settings.PAPER_TRADING_ENABLED, "SAFETY: Paper trading disabled"`
+- The HARD GATE assertion is intentional — it crashes the bot rather than placing a real order. This is the correct behavior (Kaufman Ch.12: fail-safe design)
+- Virtual capital is updated on every fill: entry costs deducted, exit costs deducted, P&L added/subtracted
+- Paper positions track entry/exit fills, costs, P&L with full Phase 6 cost model
+- All paper orders are persisted to TimescaleDB within the same transaction as the fill
+- `mark_to_market()` is called at end of each eval cycle and at EOD for daily P&L
+- If risk_manager is None, skip risk check but log a WARNING
+- If audit_logger is None, skip audit logging but log to structlog
+
+---
+
+## Instruction 6 — Create `src/paper_trading/paper_trading_engine.py` — Main Engine
+
+**Action:** Create new file `src/paper_trading/paper_trading_engine.py`.
+**Reference:** All previous instructions; Phase 11 SessionManager integration
+
+### 6.1 Class PaperTradingEngine
+
+```python
+class PaperTradingEngine:
+    """Main paper trading engine — orchestrates the full paper trading lifecycle.
+
+    Integrates Phase 11 SessionManager with paper trading order management.
+    Runs during REGULAR session (9:15-15:30 IST) on every orchestrator eval cycle.
+
+    Flow per eval cycle:
+    1. SessionManager calls SignalOrchestrator.evaluate() for each symbol
+    2. If evaluate() returns a TradeDecision with action != HOLD:
+       a. Pass TradeDecision to PaperOrderManager.place_order()
+       b. PaperOrderManager runs risk check, simulates fill, updates capital
+    3. Check exit signals via SignalOrchestrator.check_exit_signals()
+    4. If exit signal: pass to PaperOrderManager for exit fill simulation
+    5. Update trailing stops via TrailingStopMonitor
+    6. Run data quality checks via DataQualityMonitor
+    7. Check WebSocket health via WebSocketHealthMonitor
+    8. Mark-to-market open positions
+    9. Push metrics to Prometheus
+    10. Log eval cycle summary
+
+    Daily lifecycle:
+    - PRE_OPEN (9:00 IST): warmup, load cached state, verify all services
+    - REGULAR (9:15-15:30 IST): eval loop every SIGNAL_EVAL_INTERVAL_SECONDS
+    - POST_CLOSE (15:30-15:40 IST): daily checklist, mark-to-market, persist state
+    """
+
+    def __init__(
+        self,
+        session_manager: SessionManager,
+        order_manager: PaperOrderManager,
+        settings: PaperTradingSettings,
+        data_quality_monitor: DataQualityMonitor | None = None,
+        ws_health_monitor: WebSocketHealthMonitor | None = None,
+        daily_checklist: DailyChecklistRunner | None = None,
+    ):
+        self._session_manager = session_manager
+        self._order_manager = order_manager
+        self._settings = settings
+        self._data_quality = data_quality_monitor
+        self._ws_health = ws_health_monitor
+        self._daily_checklist = daily_checklist
+        self._is_running = False
+        self._eval_count = 0
+        self._start_time: float | None = None
+
+    async def run(self) -> None:
+        """Run the full paper trading session.
+
+        Wraps SessionManager.run_session() with paper trading extensions:
+        1. Pre-session: verify PAPER_TRADING_ENABLED=True, load cached state
+        2. During session: intercept TradeDecisions, route to PaperOrderManager
+        3. Post-session: run DailyChecklistRunner, persist state, push metrics
+
+        CRITICAL: This method must NEVER call kite.place_order() directly.
+        All order routing goes through PaperOrderManager.place_order().
+        """
+
+    async def _process_trade_decision(self, decision: TradeDecision) -> PaperOrder | None:
+        """Process a TradeDecision from the orchestrator.
+
+        Steps:
+        1. If decision.action == "HOLD": log and return None
+        2. If decision.action == "EXIT": process as exit order
+        3. If decision.action in ("BUY_LONG", "SELL_SHORT"): process as entry order
+        4. Log decision with all metadata
+        5. Return PaperOrder (or None if HOLD)
+        """
+
+    def get_engine_stats(self) -> dict:
+        """Get engine statistics for monitoring dashboards."""
+```
+
+### 6.2 Key Implementation Rules:
+- `run()` method first checks PAPER_TRADING_ENABLED before ANY market data connection
+- The engine wraps SessionManager — it does NOT replace it
+- TradeDecision processing is SYNCHRONOUS within the eval loop — no concurrent order placement
+- Kill switch activation immediately stops all TradeDecision processing
+- Virtual capital is checked after every fill — if negative, pause trading and alert
+- All engine stats are exposed via Prometheus for Grafana dashboards
+- Engine state (capital, positions, P&L) is persisted to TimescaleDB every eval cycle for crash recovery
+
+---
+
+## Instruction 7 — Create `src/paper_trading/daily_checklist.py` — Automated Daily Checklist
+
+**Action:** Create new file `src/paper_trading/daily_checklist.py`.
+**Reference:** Correction #9 (automated at 15:35 IST); Kaufman Ch.12 (post-session review)
+
+### 7.1 Class DailyChecklistRunner
+
+```python
+class DailyChecklistRunner:
+    """Automated 8-point daily checklist (Kaufman Ch.12 post-session review).
+
+    Runs at 15:35 IST (5 min after market close) during POST_CLOSE phase.
+    Also generates mid-session snapshot at 12:15 IST for early detection.
+
+    8-Point Checklist:
+    1. Session start: Did the bot start on time by 9:15 AM IST?
+    2. Signal generation: Were all 5 expected signals generated?
+    3. Risk limits: Were any risk limits triggered? Why?
+    4. Errors: Any unhandled errors or crashes?
+    5. WebSocket: Disconnections? Reconnection successful?
+    6. Time budget: Did sentiment + RAG pipeline complete within budget?
+    7. Trailing stops: Did trailing stops trigger correctly?
+    8. P&L comparison: Estimated P&L vs backtest expectations?
+    """
+
+    def __init__(
+        self,
+        order_manager: PaperOrderManager,
+        ws_health_monitor: WebSocketHealthMonitor | None = None,
+        data_quality_monitor: DataQualityMonitor | None = None,
+        settings: PaperTradingSettings | None = None,
+    ):
+        self._order_manager = order_manager
+        self._ws_health = ws_health_monitor
+        self._data_quality = data_quality_monitor
+        self._settings = settings or PaperTradingSettings()
+        self._session_start_time: float | None = None
+        self._signals_generated: dict[str, bool] = {}
+        self._risk_limit_events: list[dict] = []
+        self._error_events: list[dict] = []
+        self._sentiment_rag_timings: list[dict] = []
+
+    def record_session_start(self, start_time: float) -> None:
+        """Record when the bot session started (for checklist point 1)."""
+
+    def record_signal_generation(self, source: str, success: bool) -> None:
+        """Record signal generation result (for checklist point 2)."""
+
+    def record_risk_limit_event(self, event: dict) -> None:
+        """Record a risk limit event (for checklist point 3)."""
+
+    def record_error(self, error: dict) -> None:
+        """Record an unhandled error (for checklist point 4)."""
+
+    def record_sentiment_rag_timing(self, timing: dict) -> None:
+        """Record sentiment/RAG pipeline timing (for checklist point 6)."""
+
+    async def run_daily_checklist(self, checklist_date: date) -> DailyChecklistResult:
+        """Run the 8-point daily checklist.
+
+        Steps:
+        1. Check session start time: session_start_on_time = (actual_start <= 9:15 AM IST + 30s tolerance)
+        2. Check all 5 signal sources were generated
+        3. Check risk limits: count events, classify explained vs unexplained
+        4. Check errors: count unhandled errors, get details
+        5. Check WebSocket: disconnections count, reconnection success rate
+        6. Check time budget: sentiment < 60s, RAG < 90s, total < 180s
+        7. Check trailing stops: deviation < max allowed
+        8. Compute P&L: estimated P&L vs backtest expectation
+        9. Compute overall status: PASS only if all 8 points PASS
+        10. Persist result to TimescaleDB
+        11. Return DailyChecklistResult
+        """
+
+    def _compute_overall_status(self, result_checks: dict[str, bool]) -> str:
+        """Compute overall status: All PASS = PASS, Any FAIL = FAIL, Any WARNING but no FAIL = WARNING"""
+```
+
+### 7.2 Key Implementation Rules:
+- Checklist runs automatically — no manual intervention required
+- Mid-session snapshot (12:15 IST) runs a subset: points 3, 4, 5, 6 only
+- All checklist results are persisted to TimescaleDB for weekly aggregation
+- If DailyChecklistRunner cannot connect to DB, log CRITICAL and write to local file as backup
+- Kill switch test is a separate scheduled task, not part of the 8-point checklist
+- P&L comparison requires backtest engine access — if Phase 6 results unavailable, mark as WARNING
+
+---
+
+## Instruction 8 — Create `src/paper_trading/crash_recovery.py` — Crash Recovery Manager
+
+**Action:** Create new file `src/paper_trading/crash_recovery.py`.
+**Reference:** Correction #19 (crash recovery target < 60 seconds); Kaufman Ch.12 (fault tolerance)
+
+### 8.1 Dataclass RecoveryResult
+
+```python
+@dataclass(frozen=True)
+class RecoveryResult:
+    recovered: bool
+    capital_restored: float
+    positions_restored: int
+    state_consistent: bool
+    downtime_seconds: float
+    signals_skipped: int
+    recovery_time_seconds: float
+    within_target: bool
+    errors: list[str]
+```
+
+### 8.2 Class CrashRecoveryManager
+
+```python
+class CrashRecoveryManager:
+    """Recover paper trading state after crash or restart.
+
+    Per Kaufman Ch.12: trading systems must handle crashes gracefully.
+    Per Correction #19: recovery target < 60 seconds from process restart.
+
+    Recovery steps:
+    1. Load last known state from TimescaleDB
+    2. Verify state consistency
+    3. Skip signals generated during downtime (NEVER backfill)
+    4. Resume from current market state
+    5. Log crash event with stack trace if available
+    """
+
+    def __init__(
+        self,
+        settings: PaperTradingSettings,
+        db_store: object | None = None,
+        order_manager: PaperOrderManager | None = None,
+    ):
+        self._settings = settings
+        self._db_store = db_store
+        self._order_manager = order_manager
+
+    async def recover_state(self) -> RecoveryResult:
+        """Recover paper trading state from database.
+
+        If no state found (first run): return empty state with initial capital.
+        If state is inconsistent: log CRITICAL, use conservative values.
+        """
+
+    def save_state(self, order_manager: PaperOrderManager) -> None:
+        """Persist current state to TimescaleDB. Called every eval cycle."""
+```
+
+### 8.3 Key Implementation Rules:
+- State is persisted every eval cycle (5 min default) — max data loss = 1 eval cycle
+- Recovery NEVER backfills missed signals — this would introduce look-ahead bias
+- Heartbeat table: insert row every HEARTBEAT_INTERVAL_SECONDS (30s) — used for downtime calculation
+- On inconsistent state: use CONSERVATIVE values (lower capital, wider stops)
+- Recovery target: < 60 seconds from process restart to first signal evaluation
+- If recovery fails completely: start fresh with initial capital, log CRITICAL, and alert operator
+
+---
+
+## Instruction 9 — Create `src/paper_trading/data_quality_monitor.py` — Data Quality Monitoring
+
+**Action:** Create new file `src/paper_trading/data_quality_monitor.py`.
+**Reference:** Correction #17 (data quality checks); Kaufman Ch.12 (data integrity)
+
+### 9.1 Class DataQualityMonitor
+
+```python
+class DataQualityMonitor:
+    """Monitor market data quality during paper trading.
+
+    Per Correction #17, 4 daily data quality checks:
+    1. WebSocket tick count vs expected (based on NSE tick rate)
+    2. Bid-ask spread reasonableness (< MAX_BID_ASK_SPREAD_PCT for ATM options)
+    3. Stale data detection (last tick > MAX_STALE_DATA_SECONDS old)
+    4. VIX range check (VIX_MIN_REASONABLE <= VIX <= VIX_MAX_REASONABLE)
+
+    Data quality score = weighted average of 4 checks [0.0, 1.0]:
+    - Tick count: 30% weight
+    - Spread reasonableness: 30% weight
+    - Staleness: 25% weight
+    - VIX range: 15% weight
+    """
+
+    def __init__(self, settings: PaperTradingSettings):
+        self._settings = settings
+        self._tick_count: int = 0
+        self._expected_tick_count: int = 0
+        self._last_tick_time: float = 0.0
+        self._spread_violations: int = 0
+        self._spread_checks: int = 0
+        self._stale_events: int = 0
+        self._vix_range_violations: int = 0
+        self._vix_checks: int = 0
+
+    def record_tick(self, timestamp: float) -> None:
+        """Record a WebSocket tick for tick count monitoring."""
+
+    def check_spread(self, bid: float, ask: float, symbol: str) -> bool:
+        """Check bid-ask spread reasonableness. Returns True if acceptable."""
+
+    def check_staleness(self, current_time: float) -> bool:
+        """Check if data is stale. Returns True if data is fresh."""
+
+    def check_vix_range(self, vix: float) -> bool:
+        """Check if VIX is within reasonable range. Returns True if reasonable."""
+
+    def compute_quality_score(self) -> float:
+        """Compute overall data quality score [0.0, 1.0]."""
+
+    def reset_daily(self) -> None:
+        """Reset daily counters at start of new session."""
+```
+
+### 9.2 Key Implementation Rules:
+- Tick count expected: ~1000 ticks/hour for NIFTY options (approximation from NSE data)
+- Spread check: skip if bid=0 or ask=0 (no data available = not a violation)
+- Staleness: checked every eval cycle, not every tick (for efficiency)
+- VIX range: only checked once per eval cycle (VIX doesn't change rapidly)
+- Quality score < 0.5 = WARNING in daily checklist
+- Quality score < 0.3 = FAIL in daily checklist
+
+---
+
+## Instruction 10 — Create `src/paper_trading/websocket_health.py` — WebSocket Health Monitor
+
+**Action:** Create new file `src/paper_trading/websocket_health.py`.
+**Reference:** Correction #13 (reconnection protocol); Kleppmann Ch.7 (failure handling)
+
+### 10.1 Class WebSocketHealthMonitor
+
+```python
+class WebSocketHealthMonitor:
+    """Monitor WebSocket connection health and manage reconnection.
+
+    Per Correction #13:
+    - Max 3 reconnect attempts with exponential backoff (1s, 2s, 4s)
+    - If all 3 fail: switch to REST polling fallback (5s interval)
+    - Max total disconnection time: 30 seconds per incident
+    - Log all reconnection events with timestamps
+    """
+
+    def __init__(self, settings: PaperTradingSettings):
+        self._settings = settings
+        self._is_connected: bool = False
+        self._last_connected_time: float = 0.0
+        self._last_disconnected_time: float = 0.0
+        self._reconnect_attempts: int = 0
+        self._total_disconnections: int = 0
+        self._successful_reconnections: int = 0
+        self._failed_reconnections: int = 0
+        self._total_disconnection_time: float = 0.0
+        self._is_rest_fallback: bool = False
+
+    def record_connected(self, timestamp: float) -> None:
+        """Record WebSocket connection established."""
+
+    def record_disconnected(self, timestamp: float, reason: str) -> None:
+        """Record WebSocket disconnection. Starts reconnection timer."""
+
+    def should_attempt_reconnect(self) -> bool:
+        """Check if reconnection should be attempted."""
+
+    def get_backoff_delay(self) -> float:
+        """Get exponential backoff delay: 1s, 2s, 4s."""
+
+    def switch_to_rest_fallback(self) -> None:
+        """Switch to REST API polling fallback after max reconnect attempts."""
+
+    def get_health_stats(self) -> dict:
+        """Get WebSocket health statistics."""
+```
+
+### 10.2 Key Implementation Rules:
+- Reconnection attempts use exponential backoff: 1s, 2s, 4s (base x 2^attempt)
+- After 3 failed attempts, immediately switch to REST polling at 5-second intervals
+- REST polling uses kite.quote() (already available from Phase 1 KiteConnect)
+- All disconnection/reconnection events are logged with UTC timestamps
+- Total disconnection time is accumulated across all incidents for the session
+- If REST fallback is also failing, log CRITICAL and continue with stale data
+
+---
+
+## Instruction 11 — Create `src/paper_trading/weekly_review.py` — Weekly Review Runner
+
+**Action:** Create new file `src/paper_trading/weekly_review.py`.
+**Reference:** Correction #10 (3 reviews: weekly, mid-point, final); Davey Ch.7 (weekly validation)
+
+### 11.1 Class WeeklyReviewRunner
+
+```python
+class WeeklyReviewRunner:
+    """Weekly Friday review of paper trading performance.
+
+    Per Correction #10: THREE reviews during 6-week paper trading:
+    1. End-of-Week review every Friday 15:40 IST
+    2. Mid-Point review at end of Week 3 (comprehensive)
+    3. Final review at end of Week 6 (go/no-go decision)
+    """
+
+    def __init__(
+        self,
+        order_manager: PaperOrderManager,
+        settings: PaperTradingSettings,
+        daily_checklist_results: list[DailyChecklistResult] | None = None,
+        backtest_results: object | None = None,
+    ):
+        self._order_manager = order_manager
+        self._settings = settings
+        self._daily_results = daily_checklist_results or []
+        self._backtest_results = backtest_results
+        self._weekly_reviews: list[WeeklyReviewResult] = []
+
+    async def run_weekly_review(self, week_number: int) -> WeeklyReviewResult:
+        """Run weekly review and compute go/no-go verdict.
+
+        Steps:
+        1. Aggregate daily checklist results for this week
+        2. Compute weekly/cumulative Sharpe from daily P&L returns
+        3. Compute weekly/cumulative max drawdown
+        4. Compute uptime from heartbeat data
+        5. Count risk limit breaches (explained vs unexplained)
+        6. Compute average paper vs backtest divergence
+        7. Compute DSR on cumulative data (Lopez de Prado Ch.1)
+        8. Compare paper Sharpe to CPCV distribution from Phase 6
+        9. Evaluate early stop condition (Davey Ch.7)
+        10. Determine verdict: GO/CAUTION/NO_GO
+        11. Persist to TimescaleDB
+        12. Return WeeklyReviewResult
+        """
+
+    def _compute_sharpe(self, daily_returns: list[float]) -> float:
+        """Sharpe = mean(daily_returns) / std(daily_returns) x sqrt(252). Same as Phase 6 (Correction #6)."""
+
+    def _compute_max_drawdown(self, equity_curve: list[float]) -> float:
+        """DD% = (peak - trough) / peak x 100. Same as Phase 6 (Correction #7)."""
+
+    def _compute_dsr(self, observed_sharpe: float, n_trials: int, skew: float, kurtosis: float, t: int) -> float:
+        """DSR = Prob(Sharpe* > observed | N trials, skew, kurtosis, T). Same as Phase 6."""
+
+    def _evaluate_early_stop(self) -> bool:
+        """If last 2 weekly reviews both have verdict=NO_GO, return True (Davey Ch.7, Correction #10)."""
+
+    def _determine_verdict(self, metrics: dict) -> GoNoGoVerdict:
+        """Determine go/no-go verdict from weekly metrics.
+
+        - uptime < NOGO_UPTIME_PCT: NO_GO
+        - sharpe < CAUTION_SHARPE: NO_GO
+        - max_dd > NOGO_MAX_DD_PCT: NO_GO
+        - unexplained_breaches > 0: NO_GO
+        - uptime < GO_UPTIME_PCT: CAUTION
+        - sharpe < GO_SHARPE: CAUTION
+        - max_dd > GO_MAX_DD_PCT: CAUTION
+        - Otherwise: GO
+        """
+```
+
+---
+
+## Instruction 12 — Create `src/paper_trading/six_week_report.py` — Final Go/No-Go Report
+
+**Action:** Create new file `src/paper_trading/six_week_report.py`.
+**Reference:** Davey Ch.7 (final verification gate); Lopez de Prado Ch.11 (simulator bias disclosure)
+
+### 12.1 Class SixWeekReportGenerator
+
+```python
+class SixWeekReportGenerator:
+    """Generate the final 6-week paper trading report with go/no-go decision.
+
+    This is the deliverable for Phase 12. The report contains:
+    1. All 6 weekly reviews
+    2. Cumulative metrics across all 6 weeks
+    3. Go/No-Go decision with documented reasons
+    4. Known simulator biases (Lopez de Prado Ch.11)
+    5. Recommendation: proceed to Phase 13 (live) or return to Phase 6
+    """
+
+    def __init__(
+        self,
+        weekly_reviews: list[WeeklyReviewResult],
+        order_manager: PaperOrderManager,
+        daily_checklist_results: list[DailyChecklistResult],
+        settings: PaperTradingSettings,
+    ):
+        self._weekly_reviews = weekly_reviews
+        self._order_manager = order_manager
+        self._daily_results = daily_checklist_results
+        self._settings = settings
+
+    def generate_report(self) -> SixWeekReport:
+        """Generate the final 6-week paper trading report.
+
+        Steps:
+        1. Aggregate all weekly reviews
+        2. Compute cumulative metrics (Sharpe, DD, DSR, uptime, etc.)
+        3. Determine final verdict with documented reasons
+        4. Document known simulator biases (Lopez de Prado Ch.11)
+        5. Write recommendation:
+           - GO -> proceed to Phase 13 (live deployment with minimal capital)
+           - CAUTION -> extend paper trading by 2-4 weeks OR reduce position size
+           - NO_GO -> return to Phase 6 for strategy revision
+        6. Persist report to TimescaleDB
+        7. Write report to file: reports/paper_trading/six_week_report_YYYYMMDD.json
+        8. Return SixWeekReport
+        """
+
+    def _document_simulator_biases(self) -> list[str]:
+        """Document known simulator biases per Lopez de Prado Ch.11.
+
+        Returns list of 6 known biases:
+        1. Simulator bias: overconfidence from risk-free environment
+        2. Liquidity illusion: fills assume available counterparties
+        3. Slippage estimation: may underestimate real market impact
+        4. No emotional factor: real trading induces stress-based errors
+        5. Market impact: large orders don't move simulated prices
+        6. Timing assumption: fills at signal time, not order book time
+        """
+
+    def _determine_final_verdict(self, metrics: dict) -> tuple[GoNoGoVerdict, list[str]]:
+        """Determine final go/no-go verdict with documented reasons.
+
+        Go conditions (ALL must be met):
+        - total_trading_sessions >= MIN_TRADING_SESSIONS
+        - total_completed_trades >= MIN_COMPLETED_TRADES
+        - final_sharpe >= GO_SHARPE (0.8)
+        - final_max_dd < GO_MAX_DD_PCT (25%)
+        - final_dsr >= DSR_MIN_THRESHOLD (0.95)
+        - final_uptime >= GO_UPTIME_PCT (99.5%)
+        - total_unexplained_breaches == 0
+        - kill_switch_test_pass_rate == 100%
+
+        No-Go conditions (ANY triggers NO_GO):
+        - final_sharpe < CAUTION_SHARPE (0.3)
+        - final_max_dd > NOGO_MAX_DD_PCT (35%)
+        - final_uptime < NOGO_UPTIME_PCT (98%)
+        - total_unexplained_breaches > 0
+        - kill_switch tests failing
+        - Any critical unhandled errors
+        """
+
+    def write_report_to_file(self, report: SixWeekReport) -> str:
+        """Write report to JSON file in reports/paper_trading/ directory."""
+```
+
+### 12.2 Key Implementation Rules:
+- Report generation is idempotent — running multiple times produces same result
+- Report file is JSON with full schema (human readable, no pickle/binary)
+- Known simulator biases MUST be included in every report (Lopez de Prado Ch.11 requirement)
+- The go/no-go decision must be DOCUMENTED with specific reasons
+- Report file path: `reports/paper_trading/six_week_report_{end_date}.json`
+- The report is the Phase 12 deliverable — must be reviewable by a human operator
+
+---
+
+## Instruction 13 — Create `deployment/init_phase12.sql` — TimescaleDB Schema
+
+**Action:** Create new file `deployment/init_phase12.sql`. Extends Phase 2/6 schema.
+
+### 13.1 Paper Orders Table
+
+```sql
+CREATE TABLE IF NOT EXISTS paper_orders (
+    order_id VARCHAR(36) PRIMARY KEY,
+    timestamp DOUBLE PRECISION NOT NULL,
+    symbol VARCHAR(20) NOT NULL,
+    direction VARCHAR(10) NOT NULL,
+    action VARCHAR(15) NOT NULL,
+    strike NUMERIC(12,2),
+    option_type VARCHAR(5),
+    lots INTEGER NOT NULL,
+    signal_price NUMERIC(12,4) NOT NULL,
+    estimated_fill_price NUMERIC(12,4) NOT NULL,
+    slippage_estimate NUMERIC(12,4) NOT NULL,
+    cost_breakdown JSONB NOT NULL DEFAULT '{}',
+    risk_check_result VARCHAR(15) NOT NULL,
+    kill_switch_status VARCHAR(15) NOT NULL,
+    session_phase VARCHAR(15) NOT NULL,
+    signal_sources JSONB NOT NULL DEFAULT '{}',
+    status VARCHAR(15) NOT NULL DEFAULT 'INTENDED',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_paper_orders_date ON paper_orders (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_paper_orders_symbol ON paper_orders (symbol, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_paper_orders_status ON paper_orders (status);
+```
+
+### 13.2 Paper Fills Table
+
+```sql
+CREATE TABLE IF NOT EXISTS paper_fills (
+    fill_id VARCHAR(36) PRIMARY KEY,
+    order_id VARCHAR(36) NOT NULL REFERENCES paper_orders(order_id),
+    fill_timestamp DOUBLE PRECISION NOT NULL,
+    fill_price NUMERIC(12,4) NOT NULL,
+    slippage_actual NUMERIC(12,4) NOT NULL,
+    slippage_components JSONB NOT NULL DEFAULT '{}',
+    bid_at_signal NUMERIC(12,4),
+    ask_at_signal NUMERIC(12,4),
+    midpoint NUMERIC(12,4),
+    spread_pct NUMERIC(8,6),
+    dte INTEGER,
+    session_time_category VARCHAR(10),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_paper_fills_order ON paper_fills (order_id);
+CREATE INDEX IF NOT EXISTS idx_paper_fills_date ON paper_fills (fill_timestamp DESC);
+```
+
+### 13.3 Paper Positions Table
+
+```sql
+CREATE TABLE IF NOT EXISTS paper_positions (
+    position_id VARCHAR(36) PRIMARY KEY,
+    symbol VARCHAR(20) NOT NULL,
+    direction VARCHAR(10) NOT NULL,
+    entry_order_id VARCHAR(36) NOT NULL REFERENCES paper_orders(order_id),
+    entry_price NUMERIC(12,4) NOT NULL,
+    lots INTEGER NOT NULL,
+    lot_size INTEGER NOT NULL,
+    entry_cost NUMERIC(12,4) NOT NULL,
+    current_stop_price NUMERIC(12,4),
+    best_price NUMERIC(12,4),
+    entry_timestamp DOUBLE PRECISION NOT NULL,
+    exit_order_id VARCHAR(36),
+    exit_price NUMERIC(12,4),
+    exit_cost NUMERIC(12,4),
+    exit_reason VARCHAR(30),
+    unrealized_pnl NUMERIC(12,4) DEFAULT 0,
+    realized_pnl NUMERIC(12,4) DEFAULT 0,
+    margin_used NUMERIC(12,4) DEFAULT 0,
+    holding_days INTEGER DEFAULT 0,
+    is_open BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_paper_positions_symbol ON paper_positions (symbol, is_open);
+CREATE INDEX IF NOT EXISTS idx_paper_positions_open ON paper_positions (is_open) WHERE is_open = TRUE;
+```
+
+### 13.4 Daily Checklist Table
+
+```sql
+CREATE TABLE IF NOT EXISTS daily_checklist_results (
+    checklist_date DATE PRIMARY KEY,
+    session_start_on_time BOOLEAN NOT NULL,
+    all_signals_generated BOOLEAN NOT NULL,
+    risk_limits_triggered INTEGER NOT NULL DEFAULT 0,
+    risk_limit_reasons JSONB DEFAULT '[]',
+    unhandled_errors INTEGER NOT NULL DEFAULT 0,
+    unhandled_error_details JSONB DEFAULT '[]',
+    ws_disconnections INTEGER NOT NULL DEFAULT 0,
+    ws_reconnection_successful BOOLEAN NOT NULL,
+    sentiment_rag_within_budget BOOLEAN NOT NULL,
+    trailing_stops_correct BOOLEAN NOT NULL,
+    estimated_pnl NUMERIC(12,4),
+    backtest_expected_pnl NUMERIC(12,4),
+    pnl_vs_backtest_divergence_pct NUMERIC(8,4),
+    uptime_pct NUMERIC(8,4),
+    data_quality_score NUMERIC(8,6),
+    kill_switch_test_result VARCHAR(10),
+    overall_status VARCHAR(10) NOT NULL,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_daily_checklist_status ON daily_checklist_results (overall_status, checklist_date DESC);
+```
+
+### 13.5 Weekly Reviews Table
+
+```sql
+CREATE TABLE IF NOT EXISTS weekly_review_results (
+    week_number INTEGER PRIMARY KEY,
+    trading_sessions INTEGER NOT NULL,
+    completed_trades INTEGER NOT NULL,
+    weekly_sharpe DOUBLE PRECISION,
+    cumulative_sharpe DOUBLE PRECISION,
+    weekly_max_dd_pct NUMERIC(8,4),
+    cumulative_max_dd_pct NUMERIC(8,4),
+    uptime_pct NUMERIC(8,4),
+    risk_limit_breaches INTEGER NOT NULL DEFAULT 0,
+    unexplained_breaches INTEGER NOT NULL DEFAULT 0,
+    avg_pnl_vs_backtest_divergence NUMERIC(8,4),
+    dsr DOUBLE PRECISION,
+    trailing_stop_avg_deviation NUMERIC(8,4),
+    verdict VARCHAR(15) NOT NULL,
+    early_stop_triggered BOOLEAN NOT NULL DEFAULT FALSE,
+    cpcv_comparison JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+### 13.6 Heartbeat Table (TimescaleDB hypertable)
+
+```sql
+CREATE TABLE IF NOT EXISTS paper_trading_heartbeat (
+    heartbeat_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_healthy BOOLEAN NOT NULL DEFAULT TRUE,
+    component VARCHAR(30) NOT NULL DEFAULT 'main_engine'
+);
+SELECT create_hypertable('paper_trading_heartbeat', 'heartbeat_time', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS idx_heartbeat_time ON paper_trading_heartbeat (heartbeat_time DESC);
+```
+
+### 13.7 Crash Recovery State Table
+
+```sql
+CREATE TABLE IF NOT EXISTS paper_trading_state (
+    state_id SERIAL PRIMARY KEY,
+    virtual_capital NUMERIC(12,4) NOT NULL,
+    daily_pnl NUMERIC(12,4) DEFAULT 0,
+    open_positions JSONB NOT NULL DEFAULT '[]',
+    trailing_stop_states JSONB NOT NULL DEFAULT '[]',
+    eval_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_state_time ON paper_trading_state (created_at DESC);
+```
+
+### 13.8 Six-Week Report Table
+
+```sql
+CREATE TABLE IF NOT EXISTS six_week_reports (
+    report_id VARCHAR(36) PRIMARY KEY,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    total_trading_sessions INTEGER NOT NULL,
+    total_completed_trades INTEGER NOT NULL,
+    final_sharpe DOUBLE PRECISION,
+    final_max_dd_pct NUMERIC(8,4),
+    final_dsr DOUBLE PRECISION,
+    final_pbo DOUBLE PRECISION,
+    final_uptime_pct NUMERIC(8,4),
+    total_unhandled_errors INTEGER NOT NULL DEFAULT 0,
+    total_risk_limit_breaches INTEGER NOT NULL DEFAULT 0,
+    total_unexplained_breaches INTEGER NOT NULL DEFAULT 0,
+    kill_switch_test_pass_rate NUMERIC(8,4),
+    avg_trailing_stop_deviation_pct NUMERIC(8,4),
+    avg_pnl_vs_backtest_divergence_pct NUMERIC(8,4),
+    total_ws_disconnections INTEGER NOT NULL DEFAULT 0,
+    ws_recovery_rate_pct NUMERIC(8,4),
+    data_quality_avg_score NUMERIC(8,6),
+    cost_drag_pct NUMERIC(8,4),
+    final_verdict VARCHAR(15) NOT NULL,
+    verdict_reasons JSONB NOT NULL DEFAULT '[]',
+    known_simulator_biases JSONB NOT NULL DEFAULT '[]',
+    recommendation TEXT,
+    weekly_reviews JSONB NOT NULL DEFAULT '[]',
+    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+### 13.9 Kill Switch Test Log Table
+
+```sql
+CREATE TABLE IF NOT EXISTS kill_switch_test_log (
+    test_id SERIAL PRIMARY KEY,
+    test_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    activation_time_ms INTEGER NOT NULL,
+    passed BOOLEAN NOT NULL,
+    details JSONB DEFAULT '{}'
+);
+```
+
+### 13.10 Maintenance Windows Table
+
+```sql
+CREATE TABLE IF NOT EXISTS maintenance_windows (
+    window_id SERIAL PRIMARY KEY,
+    start_time TIMESTAMPTZ NOT NULL,
+    end_time TIMESTAMPTZ NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+### 13.11 Apply Schema
+
+```powershell
+$env:PGPASSWORD = "password"
+Get-Content "G:\OC\02June26\indian-trading-bot\deployment\init_phase12.sql" | & docker exec -i trading_timescaledb psql -U trading -d trading_bot
+```
+
+---
+
+## Instruction 14 — Docker Compose + Grafana Dashboard
+
+### 14.1 Service Verification Script
+
+**Action:** Create `deployment/verify_services.py` — health check script that runs before market open.
+
+Verify all 5 Docker Compose services: TimescaleDB (5432), Redis (6379), Prometheus (9090), Grafana (3000), Ollama (11434). If any unhealthy, log CRITICAL and alert operator.
+
+### 14.2 Grafana Dashboard
+
+**Action:** Create `deployment/grafana/paper_trading_dashboard.json` — 14-panel dashboard:
+
+1. Virtual Capital + Equity (time series)
+2. Daily P&L (bar chart)
+3. Paper Orders (stat: count by status)
+4. Open Positions (table)
+5. Cumulative Sharpe Ratio (gauge: 0.0-2.0, green > 0.8, yellow 0.3-0.8, red < 0.3)
+6. Max Drawdown (gauge: 0-50%, green < 25%, yellow 25-35%, red > 35%)
+7. Uptime % (gauge: 95-100%, green > 99.5%, yellow 98-99.5%, red < 98%)
+8. Data Quality Score (gauge: 0-1.0)
+9. WebSocket Health (stat: connected/disconnected/fallback)
+10. Risk Limit Breaches (stat: count)
+11. Trailing Stop Deviation (time series)
+12. Signal Fetch Time Budget (bar chart per source)
+13. Kill Switch Status (stat: INACTIVE/THROTTLE/PAUSE/KILL)
+14. Daily Checklist Status (table: date x check x result)
+
+### 14.3 Verification Gate:
+- `python deployment/verify_services.py` — must report all 5 services healthy
+- Grafana accessible at http://localhost:3000
+
+---
+
+## Instruction 15 — Create `src/paper_trading/__init__.py` — Package Exports
+
+**Action:** Create new file `src/paper_trading/__init__.py`.
+
+```python
+"""Paper trading package.
+
+Runs the trading bot with real market data but zero real capital.
+All order placements are logged but NOT sent to broker.
+Per Plan.txt Phase 12: 6 weeks minimum paper trading with daily checklist,
+weekly reviews, and final go/no-go decision.
+
+Key safety: PaperOrderManager.place_order() has a HARD GATE that asserts
+PAPER_TRADING_ENABLED=True. If this flag is False, the bot crashes rather
+than sending a real order. This is intentional fail-safe design.
+"""
+
+from src.paper_trading.models import (
+    DailyChecklistResult,
+    GoNoGoVerdict,
+    PaperFill,
+    PaperOrder,
+    PaperOrderStatus,
+    PaperPosition,
+    PaperTradingPhase,
+    SixWeekReport,
+    WeeklyReviewResult,
+)
+from src.paper_trading.slippage_model import SlippageModel, SlippageResult
+from src.paper_trading.fill_simulator import FillSimulator
+from src.paper_trading.paper_order_manager import PaperOrderManager
+from src.paper_trading.paper_trading_engine import PaperTradingEngine
+from src.paper_trading.daily_checklist import DailyChecklistRunner
+from src.paper_trading.crash_recovery import CrashRecoveryManager, RecoveryResult
+from src.paper_trading.data_quality_monitor import DataQualityMonitor
+from src.paper_trading.weekly_review import WeeklyReviewRunner
+from src.paper_trading.six_week_report import SixWeekReportGenerator
+from src.paper_trading.websocket_health import WebSocketHealthMonitor
+
+__all__ = [
+    "CrashRecoveryManager",
+    "DailyChecklistResult",
+    "DailyChecklistRunner",
+    "DataQualityMonitor",
+    "FillSimulator",
+    "GoNoGoVerdict",
+    "PaperFill",
+    "PaperOrder",
+    "PaperOrderManager",
+    "PaperOrderStatus",
+    "PaperPosition",
+    "PaperTradingEngine",
+    "PaperTradingPhase",
+    "RecoveryResult",
+    "SixWeekReport",
+    "SixWeekReportGenerator",
+    "SlippageModel",
+    "SlippageResult",
+    "WeeklyReviewResult",
+    "WeeklyReviewRunner",
+    "WebSocketHealthMonitor",
+]
+```
+
+### Verification Gate:
+- `python -c "from src.paper_trading import PaperTradingEngine, PaperOrderManager, FillSimulator, SlippageModel, DailyChecklistRunner, WeeklyReviewRunner, SixWeekReportGenerator; print('Phase 12 package imports OK')"`
+- Must pass without error
+
+---
+
+## Instruction 16 — Write Test Suite (11 Test Files)
+
+### 16.1 `tests/paper_trading/test_models.py` (25 tests)
+- Enum value checks (PaperOrderStatus 7 values, PaperTradingPhase 6, GoNoGoVerdict 5)
+- PaperOrder creation + lots > 0 validation
+- PaperFill creation + fill_price > 0 validation
+- PaperPosition creation + entry_price > 0 validation
+- DailyChecklistResult + data_quality_score range + uptime range
+- WeeklyReviewResult + SixWeekReport creation
+- Frozen dataclass enforcement for all immutable models
+- Cross-field validation: sessions < 30 with GO verdict
+
+### 16.2 `tests/paper_trading/test_slippage_model.py` (20 tests)
+- Base slippage NIFTY (0.05%) vs BANKNIFTY (0.10%)
+- Session time multiplier: open x1.5, close x1.5, core x1.0
+- Near-expiry multiplier: <=3DTE x2.0, 4-7DTE x1.5, >7DTE x1.0
+- Illiquidity multiplier: wide spread x2.0, narrow x1.0
+- Directional slippage: buy above midpoint, sell below midpoint
+- Multiplicative model: base x session x expiry x illiquidity
+- Edge cases: zero bid/ask, negative price, bid > ask
+- Slippage ALWAYS unfavorable (buy fill > midpoint, sell fill < midpoint)
+
+### 16.3 `tests/paper_trading/test_fill_simulator.py` (15 tests)
+- Normal buy/sell fills with bid-ask data
+- Fill without market data (zero bid/ask fallback)
+- Exit fills: normal, kill switch (x1.5), trailing stop
+- Illiquid + near-expiry fills
+- Midpoint enabled vs disabled
+- NEVER raises exception on missing data
+- Risk breach flagging for lots > 3
+
+### 16.4 `tests/paper_trading/test_paper_order_manager.py` (20 tests)
+- **HARD GATE: PAPER_TRADING_ENABLED assertion** (critical test)
+- Order placement flow: signal -> risk check -> fill -> position
+- Kill switch interception (status=KILLED)
+- Risk check rejection (status=REJECTED)
+- Virtual capital tracking: entry deduction, exit P&L update
+- Mark-to-market unrealized P&L
+- Capital never negative check
+- Cancel order / cancel all orders
+- 14-field PaperOrder audit (Correction #15)
+- DB persistence verification
+- Multiple orders same session
+
+### 16.5 `tests/paper_trading/test_paper_trading_engine.py` (12 tests)
+- Engine initialization
+- HOLD -> None, BUY_LONG/SELL_SHORT/EXIT -> PaperOrder
+- Engine stats include capital + positions
+- Kill switch stops processing
+- PAPER_TRADING_ENABLED=False -> crash (intentional)
+- Eval count increment, multiple symbols, state persistence
+
+### 16.6 `tests/paper_trading/test_daily_checklist.py` (15 tests)
+- All 8 checklist points individually
+- Session start on time vs late
+- Signal generation: all 5 vs missing
+- Risk limits: 0 breaches vs triggered
+- Errors: 0 vs unhandled
+- WebSocket: no disconnection vs recovered vs not recovered
+- Sentiment/RAG: within budget vs over budget
+- Overall status: all PASS -> PASS, any FAIL -> FAIL
+
+### 16.7 `tests/paper_trading/test_crash_recovery.py` (10 tests)
+- State recovery from DB, empty state (first run)
+- Capital + position restoration
+- State consistency: pass vs fail (conservative fallback)
+- Recovery within 60s target
+- Signals skipped during downtime (no backfill)
+- Save state idempotent
+
+### 16.8 `tests/paper_trading/test_data_quality_monitor.py` (10 tests)
+- Tick count recording, spread acceptable vs too wide
+- Staleness: fresh vs stale
+- VIX range: in range vs out of range
+- Quality score: perfect (~1.0) vs poor (~0.0)
+- Daily reset clears counters
+
+### 16.9 `tests/paper_trading/test_weekly_review.py` (12 tests)
+- Weekly + cumulative Sharpe computation
+- Max drawdown computation
+- Verdict: GO, CAUTION, NO_GO (by Sharpe, DD, uptime, breaches)
+- Early stop: not triggered vs triggered (2 consecutive NO_GO)
+- DSR computation with known inputs
+
+### 16.10 `tests/paper_trading/test_six_week_report.py` (12 tests)
+- Report generation from weekly reviews
+- Go/No-Go verdict: all pass GO, Sharpe NO_GO, DSR NO_GO, CAUTION
+- Minimum sessions (30) and trades (30) for GO
+- 6 simulator biases documented
+- Recommendation: GO -> Phase 13, NO_GO -> Phase 6, CAUTION -> extend
+- Report file written as JSON
+
+### 16.11 `tests/paper_trading/test_websocket_health.py` (10 tests)
+- Connection/disconnection recording
+- Backoff delays: 1s, 2s, 4s
+- Max attempts exceeded -> no more reconnects
+- REST fallback activation after 3 failures
+- Reconnection success tracking
+- Disconnection time accumulation
+
+---
+
+## Instruction 17 — Write `tests/replay/test_paper_trading_replay.py` — Replay Verification
+
+**Action:** Create new file `tests/replay/test_paper_trading_replay.py`.
+**Reference:** User requirement: `pytest tests/replay/test_paper_trading_replay.py -v`
+
+### 17.1 Replay Test Architecture
+
+Replay entire paper trading period by:
+1. Loading all paper orders from TimescaleDB
+2. Loading all paper fills from TimescaleDB
+3. Reconstructing positions and P&L from order/fill records
+4. Verifying capital consistency: initial - costs + P&L = final
+5. Verifying fill prices are within slippage model bounds
+6. Verifying no real orders were placed (PAPER_TRADING_ENABLED was True)
+7. Verifying daily checklist was run for every trading day
+8. Verifying weekly reviews were run for every week
+9. Verifying kill switch tests were performed
+10. Generating the six-week report from replayed data
+
+### 17.2 Test Cases (10):
+1. `test_replay_loads_all_orders` — all orders from paper_orders table loadable
+2. `test_replay_capital_consistency` — capital reconstruction matches recorded capital
+3. `test_replay_fill_prices_within_slippage_bounds` — every fill within model bounds
+4. `test_replay_no_real_orders_placed` — PAPER_TRADING_ENABLED=True for all records
+5. `test_replay_daily_checklist_complete` — checklist for every trading day
+6. `test_replay_weekly_reviews_complete` — 6 weekly reviews present
+7. `test_replay_kill_switch_tests_performed` — kill switch test log non-empty
+8. `test_replay_pnl_matches_recorded` — reconstructed P&L matches stored P&L
+9. `test_replay_six_week_report_generatable` — report can be generated from replay data
+10. `test_replay_deterministic` — same data produces same report (hash comparison)
+
+---
+
+## Instruction 18 — Testing & Security Stack Verification
+
+### 18.1 Testing Stack Commands
+
+```powershell
+# Activate venv
+& "G:\OC\02June26\indian-trading-bot\.venv\Scripts\Activate.ps1"
+
+# 1. pytest with coverage (unit + integration + replay)
+pytest tests/paper_trading/ tests/replay/test_paper_trading_replay.py -v --cov=src/paper_trading --cov-report=term-missing --cov-report=html --cov-fail-under=90
+
+# 2. pytest-xdist (parallel execution)
+pytest tests/paper_trading/ -n auto -v
+
+# 3. pytest-asyncio (async tests)
+pytest tests/paper_trading/ -v -k "async"
+
+# 4. pytest-benchmark (fill simulation performance)
+pytest tests/paper_trading/ -v --benchmark-only
+
+# 5. hypothesis (property-based testing for slippage model)
+pytest tests/paper_trading/ -v -k "hypothesis"
+
+# 6. ruff (linting)
+ruff check src/paper_trading/ tests/paper_trading/ --config pyproject.toml
+
+# 7. mypy (type checking)
+mypy src/paper_trading/ --config-file pyproject.toml
+
+# 8. bandit (security scanning)
+bandit -r src/paper_trading/ -c pyproject.toml
+
+# 9. pip-audit (dependency vulnerability scan)
+pip-audit --strict
+
+# 10. gitleaks (secret scanning)
+gitleaks detect --source . --no-git
+
+# 11. cyclonedx-bom (SBOM generation)
+cyclonedx-py environment -o sbom_phase12.json
+
+# 12. trivy (container/vulnerability scan)
+trivy fs --severity HIGH,CRITICAL .
+
+# 13. locust (load testing for WebSocket/REST fallback)
+locust -f tests/load/paper_trading_load.py --host=http://localhost:9090 --users 10 --spawn-rate 2 --run-time 60s --headless
+```
+
+### 18.2 Coverage Requirements:
+- `src/paper_trading/` — minimum 90% line coverage
+- Critical paths: `PaperOrderManager.place_order()` — 100% coverage
+- Critical paths: `FillSimulator.simulate_fill()` — 100% coverage
+- Critical paths: `SlippageModel.compute_slippage()` — 100% coverage
+- All model `__post_init__` validation — 100% coverage
+
+### 18.3 Security Requirements:
+- `bandit`: zero HIGH severity findings
+- `pip-audit`: zero known vulnerabilities in dependencies
+- `gitleaks`: zero secret leaks (no API keys, no tokens)
+- `mypy`: zero errors in strict mode
+- `ruff`: zero violations
+
+### 18.4 Hypothesis Property-Based Tests:
+
+```python
+from hypothesis import given, strategies as st
+
+@given(
+    signal_price=st.floats(min_value=50.0, max_value=5000.0),
+    bid=st.floats(min_value=40.0, max_value=4900.0),
+    ask=st.floats(min_value=51.0, max_value=5100.0),
+    dte=st.integers(min_value=1, max_value=90),
+)
+def test_slippage_always_unfavorable_buy(signal_price, bid, ask, dte):
+    """For any valid inputs, buy fill price > midpoint."""
+
+@given(
+    signal_price=st.floats(min_value=50.0, max_value=5000.0),
+    bid=st.floats(min_value=40.0, max_value=4900.0),
+    ask=st.floats(min_value=51.0, max_value=5100.0),
+    dte=st.integers(min_value=1, max_value=90),
+)
+def test_slippage_always_unfavorable_sell(signal_price, bid, ask, dte):
+    """For any valid inputs, sell fill price < midpoint."""
+```
+
+Properties to verify:
+1. Slippage is ALWAYS unfavorable to the trader
+2. Slippage is ALWAYS positive (never reduces cost)
+3. Total slippage >= base slippage (multipliers >= 1.0)
+4. Fill price is ALWAYS > 0
+5. Slippage increases with: near-expiry, illiquidity, session open/close
+
+---
+
+## Instruction 19 — Windows 11 Production Deployment Configuration
+
+### 19.1 Startup Script (`scripts/start_paper_trading.ps1`)
+
+```powershell
+# Step 1: Verify Docker services
+$services = @("trading_timescaledb", "trading_redis", "trading_prometheus", "trading_grafana", "trading_ollama")
+foreach ($service in $services) {
+    $status = docker inspect -f '{{.State.Status}}' $service 2>$null
+    if ($status -ne "running") { docker start $service }
+}
+
+# Step 2: Activate venv
+& "G:\OC\02June26\indian-trading-bot\.venv\Scripts\Activate.ps1"
+
+# Step 3: Verify paper trading mode (HARD GATE)
+$envContent = Get-Content ".env" | Select-String "PAPER_TRADING_ENABLED"
+if ($envContent -notmatch "True") {
+    Write-Error "CRITICAL: PAPER_TRADING_ENABLED is not True. Aborting."
+    exit 1
+}
+
+# Step 4: Run database migrations
+$env:PGPASSWORD = "password"
+Get-Content "deployment\init_phase12.sql" | & docker exec -i trading_timescaledb psql -U trading -d trading_bot
+
+# Step 5: Start the paper trading engine
+python -m src.paper_trading.main
+```
+
+### 19.2 Windows Task Scheduler (`scripts/register_scheduled_task.ps1`)
+
+Register scheduled task for auto-start at 9:00 AM IST on weekdays (Monday-Friday). Ensures bot is ready for PRE_OPEN warmup at 9:00 IST. Settings: AllowStartIfOnBatteries, DontStopIfGoingOnBatteries, StartWhenAvailable, ExecutionTimeLimit 8 hours.
+
+### 19.3 Kill Switch Test Script (`scripts/test_kill_switch.ps1`)
+
+1. Send KILL signal via Redis pub/sub
+2. Measure time until all order generation ceases
+3. Verify response time < 3 seconds (Correction #5)
+4. Deactivate kill switch after test
+
+---
+
+## Instruction 20 — Prometheus Metrics Configuration
+
+### 20.1 Metrics to Expose
+
+```python
+# Gauges
+PAPER_CAPITAL = Gauge('paper_trading_capital', 'Virtual capital in INR')
+PAPER_EQUITY = Gauge('paper_trading_equity', 'Total equity in INR')
+PAPER_UNREALIZED_PNL = Gauge('paper_trading_unrealized_pnl', 'Unrealized P&L')
+PAPER_DAILY_PNL = Gauge('paper_trading_daily_pnl', 'Daily P&L')
+PAPER_OPEN_POSITIONS = Gauge('paper_trading_open_positions', 'Open positions count')
+PAPER_SHARPE = Gauge('paper_trading_sharpe', 'Current annualized Sharpe')
+PAPER_MAX_DD = Gauge('paper_trading_max_drawdown_pct', 'Max drawdown %')
+PAPER_UPTIME = Gauge('paper_trading_uptime_pct', 'Uptime percentage')
+PAPER_DATA_QUALITY = Gauge('paper_trading_data_quality_score', 'Data quality [0,1]')
+
+# Counters
+PAPER_ORDERS_TOTAL = Counter('paper_trading_orders_total', 'Total paper orders', ['status'])
+PAPER_TRADES_COMPLETED = Counter('paper_trading_trades_completed', 'Completed trades')
+PAPER_RISK_BREACHES = Counter('paper_trading_risk_breaches', 'Risk limit breaches', ['type'])
+PAPER_WS_DISCONNECTIONS = Counter('paper_trading_ws_disconnections', 'WebSocket disconnections')
+PAPER_ERRORS_UNHANDLED = Counter('paper_trading_errors_unhandled', 'Unhandled errors')
+
+# Histograms
+PAPER_FILL_SLIPPAGE = Histogram('paper_trading_fill_slippage', 'Fill slippage INR', buckets=[1,5,10,25,50,100,250])
+PAPER_SIGNAL_FETCH_TIME = Histogram('paper_trading_signal_fetch_time', 'Signal fetch time seconds', ['source'], buckets=[1,5,10,30,60,90,180])
+PAPER_EVAL_CYCLE_TIME = Histogram('paper_trading_eval_cycle_time', 'Eval cycle seconds', buckets=[1,5,10,30,60,120,300])
+PAPER_KILL_SWITCH_RESPONSE = Histogram('paper_trading_kill_switch_response_ms', 'Kill switch response ms', buckets=[100,500,1000,2000,3000,5000])
+
+# Info
+PAPER_TRADING_INFO = Info('paper_trading', 'Paper trading session info')
+```
+
+### 20.2 Prometheus Scrape Config
+
+Add to `deployment/prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: 'paper_trading_bot'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['host.docker.internal:8000']
+```
+
+---
+
+## Instruction 21 — Main Entry Point (`src/paper_trading/main.py`)
+
+```python
+"""Paper trading main entry point. Run: python -m src.paper_trading.main
+
+Steps:
+1. Load PaperTradingSettings from .env
+2. HARD GATE: assert PAPER_TRADING_ENABLED is True
+3. Initialize Docker service verification
+4. Load crash recovery state
+5. Initialize all components:
+   - SlippageModel, FillSimulator
+   - PaperOrderManager (with risk_manager, kill_switch, audit_logger)
+   - DataQualityMonitor, WebSocketHealthMonitor
+   - DailyChecklistRunner
+   - PaperTradingEngine
+6. Register Prometheus metrics
+7. Start HTTP server for Prometheus scraping (port 8000)
+8. Run PaperTradingEngine.run() (blocks until session ends)
+9. On session end: run weekly review (if Friday), persist state
+"""
+```
+
+### 21.1 Verification Gate:
+- `python -m src.paper_trading.main --dry-run` — initializes all components, verifies PAPER_TRADING_ENABLED, connects to Docker services, then exits without starting trading
+
+---
+
+## Instruction 22 — Final Verification Checklist (Pre-Paper-Trading)
+
+Before starting the 6-week paper trading period, verify ALL of the following:
+
+1. **PAPER_TRADING_ENABLED=True** in `.env` file — HARD GATE
+2. **All 5 Docker services running** — TimescaleDB, Redis, Prometheus, Grafana, Ollama
+3. **init_phase12.sql applied** — 9 new tables created in TimescaleDB
+4. **Phase 6 backtest results available** — for daily P&L comparison
+5. **NSE holiday calendar loaded** — for trading day detection
+6. **KiteConnect session established** — for market data (NOT for orders)
+7. **Kill switch test passes** — response time < 3 seconds
+8. **All unit tests pass** — pytest tests/paper_trading/ -v
+9. **All security scans pass** — ruff, mypy, bandit, pip-audit, gitleaks
+10. **Windows Task Scheduler registered** — auto-start at 9:00 AM IST
+11. **Grafana dashboard accessible** — http://localhost:3000
+12. **Crash recovery verified** — simulate crash, verify state loads within 60s
+13. **Virtual capital = 5,00,000 INR** — matches Phase 6 INITIAL_CAPITAL
+14. **All Phase 0-11 imports working** — no import errors
+
+---
+
+## 6-Week Paper Trading Metrics — Go/No-Go Decision Matrix
+
+| Metric | Go Bar | Caution Zone | No-Go Bar | Source |
+|--------|--------|-------------|-----------|--------|
+| Uptime | > 99.5% | 98-99.5% | < 98% | Correction #4; SRE SLO |
+| Unhandled errors | 0 critical | 1-2 non-critical | Any critical | Kaufman Ch.12 |
+| Kill switch test | Works in <3s | 3-5s | Fails | Correction #5 |
+| Estimated Sharpe | >= 0.8 | 0.3-0.8 | < 0.3 | Correction #6; Lopez de Prado Ch.1 |
+| Max drawdown | < 25% | 25-35% | > 35% | Correction #7; Kaufman Ch.12 |
+| Risk limit breaches | 0 unexplained | 1-2 explained | Any unexplained | Correction #8 |
+| DSR | >= 0.95 | 0.90-0.95 | < 0.90 | Lopez de Prado Ch.1; Phase 6 |
+| Min trading sessions | >= 30 | N/A | < 30 | Davey Ch.7 |
+| Min completed trades | >= 30 | N/A | < 30 | Davey Ch.7 |
+| Paper vs backtest divergence | < 5% | 5-10% | > 10% | Correction #14; Lopez de Prado Ch.11 |
+| Trailing stop deviation (NIFTY) | < 0.5% | 0.5-1.0% | > 1.0% | Correction #12 |
+| Trailing stop deviation (BANKNIFTY) | < 1.0% | 1.0-2.0% | > 2.0% | Correction #12 |
+| WS recovery rate | 100% | 95-100% | < 95% | Correction #13 |
+| Data quality score | > 0.8 | 0.5-0.8 | < 0.5 | Correction #17 |
+| CPCV alignment | Paper Sharpe within CPCV 95% CI | Within 99% CI | Outside 99% CI | Lopez de Prado Ch.12 |
+
+### Final Go/No-Go Decision Rules:
+
+**GO (proceed to Phase 13):**
+- ALL metrics in Go bar
+- DSR >= 0.95
+- 0 unexplained risk limit breaches
+- Kill switch test pass rate = 100%
+- Minimum 30 sessions + 30 trades completed
+
+**CAUTION (extend paper trading 2-4 weeks):**
+- Some metrics in caution zone
+- No metrics in No-Go zone
+- No 2 consecutive weekly NO_GO verdicts
+
+**NO_GO (return to Phase 6 for strategy revision):**
+- ANY metric in No-Go zone
+- DSR < 0.90
+- Any unexplained risk limit breaches
+- Kill switch tests failing
+- 2 consecutive weekly NO_GO verdicts (early stop, Davey Ch.7)
