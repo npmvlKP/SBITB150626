@@ -66,7 +66,7 @@ class KillSwitch:
         self._audit_logger = audit_logger
         self._current_level: KillSwitchLevel = KillSwitchLevel.INACTIVE
         self._activation_history: list[KillSwitchEvent] = []
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None  # Lazily initialized in async context
         self._last_change_time: datetime = datetime.utcnow()
 
         logger.info(
@@ -75,6 +75,13 @@ class KillSwitch:
             throttle_rate_pct=float(settings.THROTTLE_RATE_PCT),
             activation_paths=settings.ACTIVATION_PATHS,
         )
+
+    @property
+    def _async_lock(self) -> asyncio.Lock:
+        """Lazily initialize the asyncio lock (must be created within an event loop)."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def activate(self, level: KillSwitchLevel, source: str, reason: str) -> KillSwitchEvent:
         """Activate or escalate kill switch level.
@@ -87,7 +94,7 @@ class KillSwitch:
         Returns:
             KillSwitchEvent record
         """
-        async with self._lock:
+        async with self._async_lock:
             previous_level = self._current_level
 
             if self._current_level == level:
@@ -142,7 +149,7 @@ class KillSwitch:
             RuntimeError: If REQUIRE_MANUAL_RE_ENABLE is True and called automatically
         """
         if not self._settings.REQUIRE_MANUAL_RE_ENABLE:
-            async with self._lock:
+            async with self._async_lock:
                 previous_level = self._current_level
                 self._current_level = KillSwitchLevel.INACTIVE
                 self._last_change_time = datetime.utcnow()

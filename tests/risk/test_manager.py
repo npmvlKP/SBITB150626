@@ -7,6 +7,9 @@ import pytest
 from src.risk.kill_switch import KillSwitchLevel
 from src.risk.manager import RiskCheckResult, RiskManager
 
+# Ensure event loop is available for all tests in this class
+pytestmark = pytest.mark.asyncio
+
 
 class TestPreTradeCheck:
     """Tests for risk_manager.pre_trade_check()."""
@@ -146,13 +149,11 @@ class TestPreTradeCheck:
 class TestRiskManagerAutoChecks:
     """Tests for automatic risk monitoring methods."""
 
-    @pytest.mark.asyncio
     async def test_check_daily_loss_exceeded(self, risk_manager: RiskManager) -> None:
         """P&L <= -50K -> returns KILL."""
         result = await risk_manager.check_daily_loss(Decimal("-50000"))
         assert result == KillSwitchLevel.KILL
 
-    @pytest.mark.asyncio
     async def test_check_daily_loss_not_exceeded(self, risk_manager: RiskManager) -> None:
         """P&L > -50K -> returns None."""
         result = await risk_manager.check_daily_loss(Decimal("-49999"))
@@ -161,31 +162,26 @@ class TestRiskManagerAutoChecks:
         result2 = await risk_manager.check_daily_loss(Decimal("10000"))
         assert result2 is None
 
-    @pytest.mark.asyncio
     async def test_check_margin_utilization_kill(self, risk_manager: RiskManager) -> None:
         """96% margin -> returns KILL."""
         result = await risk_manager.check_margin_utilization(Decimal("0.96"))
         assert result == KillSwitchLevel.KILL
 
-    @pytest.mark.asyncio
     async def test_check_margin_utilization_throttle(self, risk_manager: RiskManager) -> None:
         """85% margin -> returns THROTTLE."""
         result = await risk_manager.check_margin_utilization(Decimal("0.85"))
         assert result == KillSwitchLevel.THROTTLE
 
-    @pytest.mark.asyncio
     async def test_check_margin_utilization_ok(self, risk_manager: RiskManager) -> None:
         """60% margin -> returns None."""
         result = await risk_manager.check_margin_utilization(Decimal("0.60"))
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_check_rejection_rate(self, risk_manager: RiskManager) -> None:
         """10 rejections/min -> returns KILL."""
         result = await risk_manager.check_rejection_rate(10)
         assert result == KillSwitchLevel.KILL
 
-    @pytest.mark.asyncio
     async def test_check_rejection_rate_ok(self, risk_manager: RiskManager) -> None:
         """5 rejections/min -> returns None."""
         result = await risk_manager.check_rejection_rate(5)

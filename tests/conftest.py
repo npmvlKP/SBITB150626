@@ -9,6 +9,9 @@ from src.risk.audit import AuditLogger
 from src.risk.kill_switch import KillSwitch
 from src.risk.manager import RiskManager
 
+# Enable asyncio for module-level fixtures
+pytest_plugins = ("pytest_asyncio",)
+
 
 @pytest.fixture
 def compliance_settings() -> ComplianceSettings:
@@ -58,13 +61,13 @@ def audit_settings() -> AuditSettings:
 
 
 @pytest.fixture
-def audit_logger(audit_settings: AuditSettings) -> AuditLogger:
+async def audit_logger(audit_settings: AuditSettings) -> AuditLogger:
     """Audit logger with test settings."""
     return AuditLogger(audit_settings)
 
 
 @pytest.fixture
-def kill_switch(
+async def kill_switch(
     kill_switch_settings: KillSwitchSettings,
     audit_logger: AuditLogger,
 ) -> KillSwitch:
@@ -73,7 +76,7 @@ def kill_switch(
 
 
 @pytest.fixture
-def risk_manager(
+async def risk_manager(
     compliance_settings: ComplianceSettings,
     risk_settings: RiskSettings,
     kill_switch: KillSwitch,

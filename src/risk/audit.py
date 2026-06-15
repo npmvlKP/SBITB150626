@@ -137,7 +137,7 @@ class AuditLogger:
         self._settings = settings
         self._ntp_clock = NTPClock(settings)
         self._events: list[AuditEvent] = []
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None  # Lazily initialized in async context
 
         logger.info(
             "audit_logger_initialized",
@@ -145,6 +145,13 @@ class AuditLogger:
             checksum_algorithm=settings.CHECKSUM_ALGORITHM,
             ntp_server=settings.NTP_SERVER,
         )
+
+    @property
+    def _async_lock(self) -> asyncio.Lock:
+        """Lazily initialize the asyncio lock (must be created within an event loop)."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     def _compute_checksum(self, event: AuditEvent) -> str:
         """Compute SHA-256 checksum of event fields.
@@ -184,7 +191,7 @@ class AuditLogger:
         Returns:
             AuditEvent record
         """
-        async with self._lock:
+        async with self._async_lock:
             event_id = uuid.uuid4()
             timestamp = datetime.now(UTC).replace(microsecond=0)
 
@@ -218,7 +225,7 @@ class AuditLogger:
         Returns:
             True if all checksums valid, False if tampering detected
         """
-        async with self._lock:
+        async with self._async_lock:
             for event in self._events:
                 expected = self._compute_checksum(event)
                 if event.checksum != expected:
@@ -252,7 +259,7 @@ class AuditLogger:
         Returns:
             List of matching AuditEvent records
         """
-        async with self._lock:
+        async with self._async_lock:
             results = self._events
 
             if event_type is not None:
