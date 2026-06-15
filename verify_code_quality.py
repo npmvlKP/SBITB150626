@@ -22,7 +22,7 @@ def run_ruff_check():
     
     try:
         result = subprocess.run(
-            ["ruff", "check", "src/", "tests/", "--output-format=text"],
+            ["ruff", "check", "src/", "tests/"],
             capture_output=True,
             text=True,
             timeout=60
