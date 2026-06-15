@@ -13,7 +13,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -21,6 +21,12 @@ if TYPE_CHECKING:
     from config.settings import AuditSettings
 
 logger = structlog.get_logger(__name__)
+
+
+def _utcnow() -> datetime:
+    """Get current UTC time as timezone-aware datetime."""
+    return datetime.now(UTC).replace(microsecond=0)
+
 
 # Event type constants
 ORDER_PLACED = "ORDER_PLACED"
@@ -70,7 +76,7 @@ class AuditEvent:
     timestamp: datetime
     event_type: str
     source: str
-    details: dict
+    details: dict[str, Any]
     checksum: str
     ntp_offset_ms: float | None = None
 
@@ -92,7 +98,7 @@ class NTPClock:
             timezone-aware UTC datetime
         """
         await self.check_offset()
-        return datetime.now(UTC).replace(microsecond=0)
+        return _utcnow()
 
     async def check_offset(self) -> float:
         """Query NTP server and return offset in milliseconds.
@@ -175,7 +181,7 @@ class AuditLogger:
         self,
         event_type: str,
         source: str,
-        details: dict,
+        details: dict[str, Any],
         ntp_offset_ms: float | None = None,
     ) -> AuditEvent:
         """Log an audit event with checksum.
@@ -193,7 +199,7 @@ class AuditLogger:
         """
         async with self._async_lock:
             event_id = uuid.uuid4()
-            timestamp = datetime.now(UTC).replace(microsecond=0)
+            timestamp = _utcnow()
 
             event = AuditEvent(
                 event_id=event_id,

@@ -2,15 +2,29 @@
 
 from datetime import time
 from decimal import Decimal
+from enum import Enum
 
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class KillSwitchLevel(str, Enum):
+    """Kill switch levels — per MiFID II Art. 17, NIST RS.RP-1, ISO A.8.26."""
+
+    INACTIVE = "inactive"
+    THROTTLE = "throttle"
+    PAUSE = "pause"
+    KILL = "kill"
 
 
 class ComplianceSettings(BaseSettings):
     """SEBI compliance enforcement constants — verified against NSE/INVG/67858, SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013."""
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = SettingsConfigDict(
+        env_prefix="COMPLIANCE_",
+        env_file=".env",
+        extra="ignore",
+    )
 
     MAX_ORDERS_PER_SECOND: int = Field(default=3, ge=1, le=10)
     MAX_ORDERS_PER_MINUTE: int = Field(default=60, ge=1, le=1000)
@@ -28,6 +42,8 @@ class ComplianceSettings(BaseSettings):
     ALGO_TAG_FORMAT: str = "{strategy_id}:{version}"
     SEBI_ALGO_CIRCULAR: str = "SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013"
     NSE_ATF_CIRCULAR: str = "NSE/INVG/67858"
+    # NOTE: NO 500ms resting time constant — was proposed in 2016 discussion paper
+    # but NEVER mandated per SEBI/HO/MRD/DP/CIR/P/2018/62
 
     @field_validator("MAX_ORDERS_PER_SECOND")
     @classmethod
@@ -40,24 +56,40 @@ class ComplianceSettings(BaseSettings):
 class RiskSettings(BaseSettings):
     """Client-side risk limits — self-imposed per CIR/MRD/DP/09/2012."""
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = SettingsConfigDict(
+        env_prefix="RISK_",
+        env_file=".env",
+        extra="ignore",
+    )
 
-    MAX_ORDER_VALUE_PER_TRADE: Decimal = Field(default=Decimal("200000"))
-    MAX_POSITION_NOTIONAL_PER_SYMBOL: Decimal = Field(default=Decimal("500000"))
-    MAX_TOTAL_EXPOSURE: Decimal = Field(default=Decimal("2000000"))
-    MARGIN_UTILIZATION_THRESHOLD: Decimal = Field(default=Decimal("0.80"))
-    MARGIN_UTILIZATION_KILL: Decimal = Field(default=Decimal("0.95"))
-    DAILY_LOSS_LIMIT: Decimal = Field(default=Decimal("50000"))
+    MAX_ORDER_VALUE_PER_TRADE: Decimal = Field(default=Decimal("200000"), ge=Decimal("0"))
+    MAX_POSITION_NOTIONAL_PER_SYMBOL: Decimal = Field(default=Decimal("500000"), ge=Decimal("0"))
+    MAX_TOTAL_EXPOSURE: Decimal = Field(default=Decimal("2000000"), ge=Decimal("0"))
+    MARGIN_UTILIZATION_THRESHOLD: Decimal = Field(default=Decimal("0.80"), ge=Decimal("0"), le=Decimal("1"))
+    MARGIN_UTILIZATION_KILL: Decimal = Field(default=Decimal("0.95"), ge=Decimal("0"), le=Decimal("1"))
+    DAILY_LOSS_LIMIT: Decimal = Field(default=Decimal("50000"), ge=Decimal("0"))
     ORDER_REJECTION_THRESHOLD: int = Field(default=10, ge=1)
-    CIRCUIT_LIMIT_PCT: Decimal = Field(default=Decimal("0.05"))
+    CIRCUIT_LIMIT_PCT: Decimal = Field(default=Decimal("0.05"), ge=Decimal("0"), le=Decimal("1"))
+
+    @model_validator(mode="after")
+    def validate_margin_thresholds(self) -> "RiskSettings":
+        if self.MARGIN_UTILIZATION_THRESHOLD >= self.MARGIN_UTILIZATION_KILL:
+            raise ValueError(
+                "MARGIN_UTILIZATION_THRESHOLD must be less than MARGIN_UTILIZATION_KILL"
+            )
+        return self
 
 
 class KillSwitchSettings(BaseSettings):
     """Kill switch configuration — per MiFID II Art. 17, NIST RS.RP-1, ISO A.8.26."""
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = SettingsConfigDict(
+        env_prefix="KILLSWITCH_",
+        env_file=".env",
+        extra="ignore",
+    )
 
-    THROTTLE_RATE_PCT: Decimal = Field(default=Decimal("0.10"))
+    THROTTLE_RATE_PCT: Decimal = Field(default=Decimal("0.10"), ge=Decimal("0"), le=Decimal("1"))
     REQUIRE_MANUAL_RE_ENABLE: bool = True
     ACTIVATION_PATHS: list[str] = ["keyboard", "telegram", "rest_api"]
 
@@ -65,7 +97,11 @@ class KillSwitchSettings(BaseSettings):
 class AuditSettings(BaseSettings):
     """Audit trail configuration — 7-year retention per SEBI requirement (5+)."""
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = SettingsConfigDict(
+        env_prefix="AUDIT_",
+        env_file=".env",
+        extra="ignore",
+    )
 
     RETENTION_YEARS: int = Field(default=7, ge=5)
     CHECKSUM_ALGORITHM: str = "sha256"
@@ -76,28 +112,39 @@ class AuditSettings(BaseSettings):
 class BrokerSettings(BaseSettings):
     """Per-broker configurations — Zerodha primary, Angel One fallback."""
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = SettingsConfigDict(
+        env_prefix="BROKER_",
+        env_file=".env",
+        extra="ignore",
+    )
 
-    ZERODHA_API_KEY: str = ""
-    ZERODHA_API_SECRET: str = ""
-    ZERODHA_ACCESS_TOKEN: str = ""
-    ZERODHA_TOTP_SECRET: str = ""
-    ZERODHA_API_RATE_QUOTES: int = 1
-    ZERODHA_API_RATE_HISTORICAL: int = 3
-    ZERODHA_API_RATE_ORDERS: int = 10
-    ZERODHA_WS_MAX_CONNECTIONS: int = 3
-    ZERODHA_WS_MAX_INSTRUMENTS: int = 9000
-    ZERODHA_SESSION_EXPIRY_IST: time = time(6, 0)
+    # Zerodha
+    ZERODHA_API_KEY: str = Field(default="", validation_alias="ZERODHA_API_KEY")
+    ZERODHA_API_SECRET: str = Field(default="", validation_alias="ZERODHA_API_SECRET")
+    ZERODHA_ACCESS_TOKEN: str = Field(default="", validation_alias="ZERODHA_ACCESS_TOKEN")
+    ZERODHA_TOTP_SECRET: str = Field(default="", validation_alias="ZERODHA_TOTP_SECRET")
+    ZERODHA_API_RATE_QUOTES: int = Field(default=1, ge=1)
+    ZERODHA_API_RATE_HISTORICAL: int = Field(default=3, ge=1)
+    ZERODHA_API_RATE_ORDERS: int = Field(default=10, ge=1)
+    ZERODHA_WS_MAX_CONNECTIONS: int = Field(default=3, ge=1, le=10)
+    ZERODHA_WS_MAX_INSTRUMENTS: int = Field(default=9000, ge=1)
+    ZERODHA_SESSION_EXPIRY_IST: time = Field(default=time(6, 0))
     ZERODHA_MARKET_PROTECTION: Decimal = Decimal("-1")
-    ZERODHA_MONTHLY_FEE: int = 500
-    ZERODHA_TAG_MAX_LENGTH: int = 20
+    ZERODHA_MONTHLY_FEE: int = Field(default=500, ge=0)
+    ZERODHA_TAG_MAX_LENGTH: int = Field(default=20, ge=1, le=40)
     ZERODHA_NO_SANDBOX: bool = True
-    ANGEL_ONE_API_KEY: str = ""
-    ANGEL_ONE_API_SECRET: str = ""
-    ANGEL_ONE_CLIENT_CODE: str = ""
-    ANGEL_ONE_PASSWORD: str = ""
-    ANGEL_ONE_TOTP_SECRET: str = ""
-    DHAN_CLIENT_ID: str = ""
-    DHAN_ACCESS_TOKEN: str = ""
-    TELEGRAM_BOT_TOKEN: str = ""
-    TELEGRAM_CHAT_ID: str = ""
+
+    # Angel One
+    ANGEL_ONE_API_KEY: str = Field(default="", validation_alias="ANGEL_ONE_API_KEY")
+    ANGEL_ONE_API_SECRET: str = Field(default="", validation_alias="ANGEL_ONE_API_SECRET")
+    ANGEL_ONE_CLIENT_CODE: str = Field(default="", validation_alias="ANGEL_ONE_CLIENT_CODE")
+    ANGEL_ONE_PASSWORD: str = Field(default="", validation_alias="ANGEL_ONE_PASSWORD")
+    ANGEL_ONE_TOTP_SECRET: str = Field(default="", validation_alias="ANGEL_ONE_TOTP_SECRET")
+
+    # Dhan
+    DHAN_CLIENT_ID: str = Field(default="", validation_alias="DHAN_CLIENT_ID")
+    DHAN_ACCESS_TOKEN: str = Field(default="", validation_alias="DHAN_ACCESS_TOKEN")
+
+    # Notifications
+    TELEGRAM_BOT_TOKEN: str = Field(default="", validation_alias="TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHAT_ID: str = Field(default="", validation_alias="TELEGRAM_CHAT_ID")

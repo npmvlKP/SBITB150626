@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -25,6 +25,11 @@ if TYPE_CHECKING:
     from src.risk.audit import AuditLogger
 
 logger = structlog.get_logger(__name__)
+
+
+def _utcnow() -> datetime:
+    """Get current UTC time as timezone-aware datetime."""
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 class KillSwitchLevel(Enum):
@@ -67,7 +72,7 @@ class KillSwitch:
         self._current_level: KillSwitchLevel = KillSwitchLevel.INACTIVE
         self._activation_history: list[KillSwitchEvent] = []
         self._lock: asyncio.Lock | None = None  # Lazily initialized in async context
-        self._last_change_time: datetime = datetime.utcnow()
+        self._last_change_time: datetime = _utcnow()
 
         logger.info(
             "kill_switch_initialized",
@@ -100,7 +105,7 @@ class KillSwitch:
             if self._current_level == level:
                 logger.debug("kill_switch_already_at_level", level=level.value, source=source)
                 return KillSwitchEvent(
-                    timestamp=datetime.utcnow(),
+                    timestamp=_utcnow(),
                     level=level,
                     trigger_source=source,
                     reason=reason,
@@ -108,10 +113,10 @@ class KillSwitch:
                 )
 
             self._current_level = level
-            self._last_change_time = datetime.utcnow()
+            self._last_change_time = _utcnow()
 
             event = KillSwitchEvent(
-                timestamp=datetime.utcnow(),
+                timestamp=_utcnow(),
                 level=level,
                 trigger_source=source,
                 reason=reason,
@@ -152,10 +157,10 @@ class KillSwitch:
             async with self._async_lock:
                 previous_level = self._current_level
                 self._current_level = KillSwitchLevel.INACTIVE
-                self._last_change_time = datetime.utcnow()
+                self._last_change_time = _utcnow()
 
                 event = KillSwitchEvent(
-                    timestamp=datetime.utcnow(),
+                    timestamp=_utcnow(),
                     level=KillSwitchLevel.INACTIVE,
                     trigger_source=source,
                     reason=reason,
@@ -200,7 +205,7 @@ class KillSwitch:
             return 0.0
         return max_orders_per_second
 
-    def get_state(self) -> dict:
+    def get_state(self) -> dict[str, Any]:
         """Return current kill switch state for monitoring.
 
         Returns:
@@ -217,7 +222,7 @@ class KillSwitch:
                 }
                 for e in self._activation_history[-10:]
             ],
-            "uptime_since_last_change_seconds": (datetime.utcnow() - self._last_change_time).total_seconds(),
+            "uptime_since_last_change_seconds": (_utcnow() - self._last_change_time).total_seconds(),
             "require_manual_re_enable": self._settings.REQUIRE_MANUAL_RE_ENABLE,
         }
 
@@ -232,7 +237,7 @@ class KillSwitchAPI:
     def __init__(self, kill_switch: KillSwitch) -> None:
         self._kill_switch = kill_switch
 
-    async def handle_kill_request(self, request: dict) -> dict:
+    async def handle_kill_request(self, request: dict[str, Any]) -> dict[str, Any]:
         """Handle POST /kill-switch request.
 
         Args:
@@ -264,7 +269,7 @@ class KillSwitchTelegramHandler:
     def __init__(self, kill_switch: KillSwitch) -> None:
         self._kill_switch = kill_switch
 
-    async def handle_kill_command(self, update: dict) -> None:
+    async def handle_kill_command(self, update: dict[str, Any]) -> None:
         """Handle /kill Telegram command.
 
         Args:

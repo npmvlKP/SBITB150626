@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -27,6 +27,11 @@ from src.risk.compliance import (
 from src.risk.kill_switch import KillSwitch, KillSwitchLevel
 
 logger = structlog.get_logger(__name__)
+
+
+def _utcnow() -> datetime:
+    """Get current UTC time as timezone-aware datetime."""
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 class RiskCheckResult(Enum):
@@ -68,7 +73,7 @@ class TokenBucketRateLimiter:
         self._rate = rate
         self._capacity = capacity
         self._tokens = float(capacity)
-        self._last_refill = asyncio.get_event_loop().time()
+        self._last_refill: float | None = None  # Lazily initialized in async context
         self._lock = asyncio.Lock()
 
     async def acquire(self) -> bool:
@@ -79,6 +84,8 @@ class TokenBucketRateLimiter:
         """
         async with self._lock:
             now = asyncio.get_event_loop().time()
+            if self._last_refill is None:
+                self._last_refill = now
             elapsed = now - self._last_refill
             self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
             self._last_refill = now
@@ -116,20 +123,20 @@ class RiskManager:
             capacity=int(settings.MAX_ORDERS_PER_SECOND),
         )
         self._daily_order_count = 0
-        self._last_daily_reset = datetime.utcnow().date()
+        self._last_daily_reset = _utcnow().date()
         self._daily_orders_lock = asyncio.Lock()
 
         logger.info("risk_manager_initialized")
 
     def _reset_daily_count_if_needed(self) -> None:
         """Reset daily order count at start of new trading day."""
-        today = datetime.utcnow().date()
+        today = _utcnow().date()
         if today > self._last_daily_reset:
             self._daily_order_count = 0
             self._last_daily_reset = today
             logger.info("daily_order_count_reset", date=str(today))
 
-    async def pre_trade_check(self, order: dict) -> PreTradeCheckResult:
+    async def pre_trade_check(self, order: dict[str, Any]) -> PreTradeCheckResult:
         """Run all 10 pre-trade risk checks sequentially.
 
         Per MiFID II RTS 6, FIX Risk Controls, SEBI CIR/MRD/DP/09/2012.
@@ -154,7 +161,7 @@ class RiskManager:
         """
         self._reset_daily_count_if_needed()
         details: list[PreTradeCheckDetail] = []
-        now = datetime.utcnow()
+        now = _utcnow()
 
         # Extract order fields
         symbol = order.get("symbol", "")

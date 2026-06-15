@@ -1,6 +1,7 @@
 """Shared pytest fixtures for all tests."""
 
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -61,13 +62,13 @@ def audit_settings() -> AuditSettings:
 
 
 @pytest.fixture
-async def audit_logger(audit_settings: AuditSettings) -> AuditLogger:
+def audit_logger(audit_settings: AuditSettings) -> AuditLogger:
     """Audit logger with test settings."""
     return AuditLogger(audit_settings)
 
 
 @pytest.fixture
-async def kill_switch(
+def kill_switch(
     kill_switch_settings: KillSwitchSettings,
     audit_logger: AuditLogger,
 ) -> KillSwitch:
@@ -76,7 +77,7 @@ async def kill_switch(
 
 
 @pytest.fixture
-async def risk_manager(
+def risk_manager(
     compliance_settings: ComplianceSettings,
     risk_settings: RiskSettings,
     kill_switch: KillSwitch,
@@ -86,7 +87,7 @@ async def risk_manager(
 
 
 @pytest.fixture
-def sample_order() -> dict:
+def sample_order() -> dict[str, Any]:
     """Valid NIFTY option order for testing."""
     return {
         "order_id": "test_order_001",

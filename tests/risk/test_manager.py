@@ -1,10 +1,12 @@
 """Tests for src/risk/manager.py."""
 
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
-from src.risk.kill_switch import KillSwitchLevel
+from config.settings import ComplianceSettings, RiskSettings
+from src.risk.kill_switch import KillSwitch, KillSwitchLevel
 from src.risk.manager import RiskCheckResult, RiskManager
 
 # Ensure event loop is available for all tests in this class
@@ -15,7 +17,11 @@ class TestPreTradeCheck:
     """Tests for risk_manager.pre_trade_check()."""
 
     @pytest.mark.asyncio
-    async def test_pre_trade_check_pass(self, risk_manager: RiskManager, sample_order: dict) -> None:
+    async def test_pre_trade_check_pass(
+        self,
+        risk_manager: RiskManager,
+        sample_order: dict[str, Any],
+    ) -> None:
         """Valid order -> all 10 checks PASS."""
         # Make sure market is in REGULAR hours by mocking the session check
         result = await risk_manager.pre_trade_check(sample_order)
@@ -28,7 +34,7 @@ class TestPreTradeCheck:
     @pytest.mark.asyncio
     async def test_pre_trade_check_fail_symbol(self, risk_manager: RiskManager) -> None:
         """Invalid symbol -> FAIL on check 1."""
-        order = {
+        order: dict[str, Any] = {
             "symbol": "INVALID_SYMBOL",
             "segment": "NSE",
             "quantity": 50,
@@ -42,9 +48,9 @@ class TestPreTradeCheck:
     @pytest.mark.asyncio
     async def test_pre_trade_check_fail_trading_hours(
         self,
-        compliance_settings,
-        risk_settings,
-        kill_switch,
+        compliance_settings: ComplianceSettings,
+        risk_settings: RiskSettings,
+        kill_switch: KillSwitch,
     ) -> None:
         """Order at 20:00 -> FAIL on check 2 (Trading Hours)."""
         # At 20:00, session is CLOSED -> fail trading hours check
@@ -56,7 +62,7 @@ class TestPreTradeCheck:
     @pytest.mark.asyncio
     async def test_pre_trade_check_fail_order_value(self, risk_manager: RiskManager) -> None:
         """Order > Rs 2L -> FAIL on check 3 (Max Order Value)."""
-        order = {
+        order: dict[str, Any] = {
             "symbol": "NIFTY",
             "segment": "NSE",
             "quantity": 50,
@@ -66,24 +72,23 @@ class TestPreTradeCheck:
         assert result.overall_result == RiskCheckResult.FAIL
         check3 = next(d for d in result.details if d.check_name == "Max Order Value")
         assert check3.result == RiskCheckResult.FAIL
-        assert "exceeds" in check3.reason.lower()
+        reason_lower = check3.reason.lower() if check3.reason else ""
+        assert "exceeds" in reason_lower
 
     @pytest.mark.asyncio
     async def test_pre_trade_check_fail_daily_count(
         self,
-        compliance_settings,
-        risk_settings,
-        kill_switch,
+        compliance_settings: ComplianceSettings,
+        risk_settings: RiskSettings,
+        kill_switch: KillSwitch,
     ) -> None:
         """Daily count exceeded -> FAIL on check 4."""
-        from src.risk.manager import RiskManager
-
         settings = compliance_settings
         rm = RiskManager(settings, risk_settings, kill_switch)
         # Manually set daily count to max
         rm._daily_order_count = settings.MAX_ORDERS_PER_DAY
 
-        order = {
+        order: dict[str, Any] = {
             "symbol": "NIFTY",
             "segment": "NSE",
             "quantity": 50,
@@ -95,14 +100,18 @@ class TestPreTradeCheck:
         assert check4.result == RiskCheckResult.FAIL
 
     @pytest.mark.asyncio
-    async def test_pre_trade_check_fail_kill_switch(self, risk_manager: RiskManager, kill_switch) -> None:
+    async def test_pre_trade_check_fail_kill_switch(
+        self,
+        risk_manager: RiskManager,
+        kill_switch: KillSwitch,
+    ) -> None:
         """KILL active -> FAIL on check 10 (Kill Switch Status)."""
         await kill_switch.activate(
             level=KillSwitchLevel.KILL,
             source="test",
             reason="Test",
         )
-        order = {
+        order: dict[str, Any] = {
             "symbol": "NIFTY",
             "segment": "NSE",
             "quantity": 50,
@@ -116,7 +125,7 @@ class TestPreTradeCheck:
     @pytest.mark.asyncio
     async def test_pre_trade_check_fail_price_protection(self, risk_manager: RiskManager) -> None:
         """Price > 5% from LTP -> FAIL on check 9 (Price Protection)."""
-        order = {
+        order: dict[str, Any] = {
             "symbol": "NIFTY",
             "segment": "NSE",
             "quantity": 50,
@@ -126,10 +135,15 @@ class TestPreTradeCheck:
         result = await risk_manager.pre_trade_check(order)
         check9 = next(d for d in result.details if d.check_name == "Price Protection")
         assert check9.result == RiskCheckResult.FAIL
-        assert "exceeds" in check9.reason.lower()
+        reason_lower = check9.reason.lower() if check9.reason else ""
+        assert "exceeds" in reason_lower
 
     @pytest.mark.asyncio
-    async def test_all_10_checks_present(self, risk_manager: RiskManager, sample_order: dict) -> None:
+    async def test_all_10_checks_present(
+        self,
+        risk_manager: RiskManager,
+        sample_order: dict[str, Any],
+    ) -> None:
         """Verify all 10 checks are executed."""
         result = await risk_manager.pre_trade_check(sample_order)
         assert len(result.details) == 10

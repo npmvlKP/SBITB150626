@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -19,7 +19,7 @@ class MarketDataProvider(ABC):
     """
 
     @abstractmethod
-    async def get_quote(self, symbol: str) -> dict:
+    async def get_quote(self, symbol: str) -> dict[str, Any]:
         """Get current quote for a symbol.
 
         Args:
@@ -43,7 +43,7 @@ class MarketDataProvider(ABC):
         """
 
     @abstractmethod
-    async def subscribe(self, symbols: list[str], callback: Callable[[dict], None]) -> None:
+    async def subscribe(self, symbols: list[str], callback: Callable[[dict[str, Any]], None]) -> None:
         """Subscribe to real-time quotes.
 
         Args:

@@ -6,6 +6,7 @@ Concrete implementations: Zerodha (Phase 3), Angel One (Phase 14), Dhan (Phase 1
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 
 class BrokerInterface(ABC):
@@ -23,7 +24,7 @@ class BrokerInterface(ABC):
         """
 
     @abstractmethod
-    async def place_order(self, params: dict) -> dict:
+    async def place_order(self, params: dict[str, Any]) -> dict[str, Any]:
         """Place a new order.
 
         Args:
@@ -34,7 +35,7 @@ class BrokerInterface(ABC):
         """
 
     @abstractmethod
-    async def cancel_order(self, order_id: str) -> dict:
+    async def cancel_order(self, order_id: str) -> dict[str, Any]:
         """Cancel an open order.
 
         Args:
@@ -45,7 +46,7 @@ class BrokerInterface(ABC):
         """
 
     @abstractmethod
-    async def cancel_all_orders(self) -> list[dict]:
+    async def cancel_all_orders(self) -> list[dict[str, Any]]:
         """Cancel all open orders.
 
         Returns:
@@ -53,7 +54,7 @@ class BrokerInterface(ABC):
         """
 
     @abstractmethod
-    async def get_positions(self) -> list[dict]:
+    async def get_positions(self) -> list[dict[str, Any]]:
         """Get current open positions.
 
         Returns:
@@ -61,7 +62,7 @@ class BrokerInterface(ABC):
         """
 
     @abstractmethod
-    async def get_margins(self) -> dict:
+    async def get_margins(self) -> dict[str, Any]:
         """Get available margins and usage.
 
         Returns:
@@ -69,7 +70,7 @@ class BrokerInterface(ABC):
         """
 
     @abstractmethod
-    async def get_order_book(self) -> list[dict]:
+    async def get_order_book(self) -> list[dict[str, Any]]:
         """Get all orders (open + historical).
 
         Returns:
@@ -77,7 +78,7 @@ class BrokerInterface(ABC):
         """
 
     @abstractmethod
-    async def get_instruments(self, segment: str) -> list[dict]:
+    async def get_instruments(self, segment: str) -> list[dict[str, Any]]:
         """Get instrument list for a segment.
 
         Args:

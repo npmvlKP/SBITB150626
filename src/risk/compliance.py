@@ -50,7 +50,7 @@ class TradingSession(Enum):
     CLOSED = "closed"
 
 
-SEBI_CIRCULAR_REFERENCES: dict = {
+SEBI_CIRCULAR_REFERENCES: dict[str, str] = {
     "ops_threshold": "SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013 + NSE/INVG/67858",
     "algo_tagging": "SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013 (broker responsibility)",
     "pre_trade_risk": "CIR/MRD/DP/09/2012",
