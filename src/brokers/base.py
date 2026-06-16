@@ -6,86 +6,93 @@ Concrete implementations: Zerodha (Phase 3), Angel One (Phase 14), Dhan (Phase 1
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    pass
+
+__all__ = ["BrokerInterface"]
 
 class BrokerInterface(ABC):
-    """Abstract broker interface — all broker implementations must implement
-    these methods.
-
-    Methods are async to support both sync (Zerodha) and async-capable
-    (Angel One) brokers.
-    """
+    """Abstract broker interface for trading operations."""
 
     @abstractmethod
     async def authenticate(self) -> str:
-        """Authenticate with the broker API.
+        """Authenticate with the broker and return access token.
 
         Returns:
-            Access token string
+            str: Access token for authenticated session
         """
+        pass
 
     @abstractmethod
-    async def place_order(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Place a new order.
+    async def place_order(self, params: dict) -> dict:
+        """Place a new order with the broker.
 
         Args:
-            params: Order parameters dict
+            params: Order parameters including symbol, quantity, order type, etc.
 
         Returns:
-            Order response dict with order_id
+            dict: Order confirmation response
         """
+        pass
 
     @abstractmethod
-    async def cancel_order(self, order_id: str) -> dict[str, Any]:
-        """Cancel an open order.
+    async def cancel_order(self, order_id: str) -> dict:
+        """Cancel an existing order.
 
         Args:
-            order_id: Order ID to cancel
+            order_id: The ID of the order to cancel
 
         Returns:
-            Cancellation response dict
+            dict: Cancellation confirmation response
         """
+        pass
 
     @abstractmethod
     async def cancel_all_orders(self) -> list[dict[str, Any]]:
-        """Cancel all open orders.
+        """Cancel all active orders.
 
         Returns:
-            List of cancellation response dicts
+            list[dict]: List of cancellation responses for all orders
         """
+        pass
 
     @abstractmethod
     async def get_positions(self) -> list[dict[str, Any]]:
-        """Get current open positions.
+        """Get current positions.
 
         Returns:
-            List of position dicts
+            list[dict]: List of current positions
         """
+        pass
 
     @abstractmethod
     async def get_margins(self) -> dict[str, Any]:
-        """Get available margins and usage.
+        """Get account margin information.
 
         Returns:
-            Margins dict with available, used, etc.
+            dict: Margin details including available margins, utilized margins, etc.
         """
+        pass
 
     @abstractmethod
     async def get_order_book(self) -> list[dict[str, Any]]:
-        """Get all orders (open + historical).
+        """Get the order book.
 
         Returns:
-            List of order dicts
+            list[dict]: List of order book entries
         """
+        pass
 
     @abstractmethod
     async def get_instruments(self, segment: str) -> list[dict[str, Any]]:
-        """Get instrument list for a segment.
+        """Get available instruments for a specific segment.
 
         Args:
-            segment: "NSE" or "MCX"
+            segment: Trading segment (e.g., 'equity', 'options', 'futures')
 
         Returns:
-            List of instrument dicts
+            list[dict]: List of instruments with their details
         """
+        pass

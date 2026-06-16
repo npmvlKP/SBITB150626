@@ -1,48 +1,53 @@
-"""Abstract strategy interface."""
+"""Abstract strategy interface for algorithmic trading."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    __all__ = ["StrategyInterface"]
 
 
 class StrategyInterface(ABC):
-    """Abstract strategy interface.
-
-    All trading strategies must inherit from this and implement all methods.
-    Strategies are event-driven: on_tick, on_order_update.
-    """
+    """Abstract base class for trading strategies."""
 
     @property
     @abstractmethod
     def strategy_id(self) -> str:
-        """Unique strategy identifier."""
+        """Unique identifier for the strategy."""
+        pass
 
     @property
     @abstractmethod
     def version(self) -> str:
-        """Strategy version string."""
+        """Version of the strategy."""
+        pass
 
     @abstractmethod
     async def on_tick(self, tick: dict[str, Any]) -> None:
-        """Handle incoming market tick.
+        """Process incoming market tick.
 
         Args:
-            tick: Tick data dict with LTP, depth, etc.
+            tick: Market tick data containing symbol, price, volume, etc.
         """
+        pass
 
     @abstractmethod
     async def on_order_update(self, update: dict[str, Any]) -> None:
-        """Handle order update (fill, rejection, etc.).
+        """Process order update notification.
 
         Args:
-            update: Order update dict
+            update: Order update containing status, execution details, etc.
         """
+        pass
 
     @abstractmethod
     async def start(self) -> None:
-        """Start the strategy — initialize state, subscribe to data."""
+        """Start the strategy. Performs initialization and sets up required subscriptions."""
+        pass
 
     @abstractmethod
     async def stop(self) -> None:
-        """Stop the strategy — close positions, cancel orders."""
+        """Stop the strategy. Cleans up resources and cancels active orders."""
+        pass

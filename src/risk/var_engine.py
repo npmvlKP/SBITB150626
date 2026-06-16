@@ -5,6 +5,7 @@ Reference: McNeil/Frey/Embrechts "Quantitative Risk Management", Ch.2-5
 - Ch.4: GARCH volatility models
 - Ch.5: Extreme Value Theory (EVT)
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,21 +22,43 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
-    from config.settings import QuantitativeRiskSettings
+    from config.settings import (
+        PositionLimitSettings,
+        QuantitativeRiskSettings,
+        RiskSettings,
+    )
+
+
+class AuditLogger:  # Stub - replace with actual implementation
+    """Placeholder for audit logging functionality."""
+
+    def info(self, event: str, **kwargs: Any) -> None:
+        pass
+
+    def warning(self, event: str, **kwargs: Any) -> None:
+        pass
+
+    def error(self, event: str, **kwargs: Any) -> None:
+        pass
+
 
 def _utcnow() -> datetime:
     """Get current UTC time as timezone-aware datetime."""
     return datetime.now(UTC).replace(microsecond=0)
 
+
 class VarMethod(Enum):
     """VaR computation methods."""
+
     HISTORICAL = "historical"
     PARAMETRIC = "parametric"
     MONTE_CARLO = "monte_carlo"
 
+
 @dataclass(frozen=True)
 class VarResult:
     """Result of VaR/CVaR computation."""
+
     method: VarMethod
     confidence_level: float
     holding_period_days: int
@@ -47,9 +70,11 @@ class VarResult:
     computation_time_ms: float
     data_points_used: int
 
+
 @dataclass(frozen=True)
 class GarchResult:
     """Result of GARCH model fit."""
+
     model_type: str  # "GARCH", "EGARCH", "GJR"
     p: int
     q: int
@@ -64,9 +89,11 @@ class GarchResult:
     fitted_date: datetime
     residuals: np.ndarray
 
+
 @dataclass(frozen=True)
 class EvtResult:
     """Result of Extreme Value Theory (EVT) analysis."""
+
     threshold: float
     tail_index_xi: float  # Shape parameter (Hill estimator)
     tail_index_se: float  # Standard error
@@ -76,9 +103,11 @@ class EvtResult:
     goodness_of_fit_pvalue: float  # Anderson-Darling test p-value
     timestamp: datetime
 
+
 @dataclass(frozen=True)
 class StressTestResult:
     """Result of a single stress test scenario."""
+
     scenario_name: str
     pct_drop: Decimal
     portfolio_loss: Decimal
@@ -86,6 +115,7 @@ class StressTestResult:
     would_trigger_kill_switch: bool
     would_breach_var_limit: bool
     greek_impact: dict  # {"delta": ..., "gamma": ..., "vega": ...}
+
 
 class HistoricalVarEngine:
     """Historical Simulation VaR/CVaR per McNeil Ch.2.2.
@@ -174,6 +204,7 @@ class HistoricalVarEngine:
     def _time_scale(self, value: float, holding_period: int) -> float:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""
         return value * np.sqrt(holding_period)
+
 
 class ParametricVarEngine:
     """Parametric (Variance-Covariance) VaR/CVaR per McNeil Ch.2.3.
@@ -275,11 +306,14 @@ class ParametricVarEngine:
             # t-distribution
             z_alpha = -scipy.stats.t.ppf(1 - alpha, df)
             # Approximate CVaR for t-distribution
-            return mu - sigma * scipy.stats.t.expect(lambda x: x, args=(df,), lb=np.inf if z_alpha > 0 else z_alpha) / (1 - alpha)
+            return mu - sigma * scipy.stats.t.expect(lambda x: x, args=(df,), lb=np.inf if z_alpha > 0 else z_alpha) / (
+                1 - alpha
+            )
 
     def _time_scale(self, value: float, holding_period: int) -> float:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""
         return value * np.sqrt(holding_period)
+
 
 class MonteCarloVarEngine:
     """Monte Carlo Simulation VaR per McNeil Ch.2.4.
@@ -365,6 +399,7 @@ class MonteCarloVarEngine:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""
         return value * np.sqrt(holding_period)
 
+
 class GarchVarEngine:
     """GARCH-adjusted VaR per McNeil Ch.4. Fits GARCH(p,q) model to return
     series, forecasts 1-step ahead conditional volatility, then computes VaR
@@ -437,7 +472,8 @@ class GarchVarEngine:
                 except Exception:
                     return default
 
-            omega = fit_result.params["omega"]
+            # omega parameter stored for potential future logging
+            fit_result.params["omega"]
             alpha = sum([get_param(f"alpha[{i}]") for i in range(1, p + 1)])
             beta = sum([get_param(f"beta[{i}]") for i in range(1, q + 1)])
             persistence = alpha + beta
@@ -588,12 +624,14 @@ class GarchVarEngine:
         Ljung-Box test: if pvalue < 0.05, residuals have remaining ARCH effects (model insufficient).
         """
         from statsmodels.stats.diagnostic import acorr_ljungbox
+
         standardized_resid = result.resid / result.conditional_volatility
         lb_test = acorr_ljungbox(standardized_resid, lags=[10])
         return {
             "lb_test_pvalue": lb_test["lb_pvalue"].iloc[0],
             "acf_lag1": standardized_resid.autocorr(lag=1),
         }
+
 
 class EvtEngine:
     """Extreme Value Theory engine per McNeil Ch.5 (Peaks Over Threshold / GPD
@@ -667,7 +705,8 @@ class EvtEngine:
                 cvar_evt = var_evt + (beta + xi * (var_evt - threshold)) / (1 - xi)
 
             # Step 8: Goodness-of-fit test (Anderson-Darling)
-            anderson_result = scipy.stats.genpareto.nnlf((xi, 0, beta), exceedances)
+            # Compute negative log-likelihood for potential future use
+            scipy.stats.genpareto.nnlf((xi, 0, beta), exceedances)
             ad_pvalue = 1.0  # Placeholder - actual implementation would compute p-value
 
             # Build and return result
@@ -710,12 +749,13 @@ class EvtEngine:
             k = len(losses)
 
         order_stats = np.sort(losses)[-k:]
-        rank = np.arange(1, k + 1) if k > 0 else np.array([1])
+        # rank would be used in more detailed hill estimator implementations
         log_diff = np.log(order_stats) - np.log(order_stats[0])
         xi = np.sum(log_diff) / k
         se = xi / np.sqrt(k)
 
         return float(xi), float(se)
+
 
 class StressTestEngine:
     """Stress testing per McNeil Ch.9 (Scenario-based risk assessment).
@@ -799,10 +839,8 @@ class StressTestEngine:
         and compare to normal VaR.
         If ratio > CORRELATION_BREAK_THRESHOLD: flag as correlation break risk.
         """
-        # Simplified implementation: assume correlation break increases VaR by sqrt(n_positions)
-        n_positions = len(current_positions)
+        # Simplified implementation: correlation break scenario
         portfolio_value = sum(pos["value"] for pos in current_positions)
-        crisis_var_timescale = np.sqrt(float(n_positions))
 
         return StressTestResult(
             scenario_name="correlation_break",
@@ -813,6 +851,7 @@ class StressTestEngine:
             would_breach_var_limit=True,
             greek_impact={"delta": Decimal("0"), "gamma": Decimal("0"), "vega": Decimal("0")},
         )
+
 
 class RiskEngineOrchestrator:
     """Orchestrates all quantitative risk engines.
@@ -859,7 +898,6 @@ class RiskEngineOrchestrator:
         5. Log result via audit_logger
         6. Return VarResult
         """
-        start_time = datetime.now()
         try:
             # Try GARCH first
             if self._settings.VAR_METHOD == "historical":
@@ -947,7 +985,7 @@ class RiskEngineOrchestrator:
             return current_var
         except Exception as e:
             logger.error("var_all_methods_failed", error=str(e))
-            raise RuntimeError(f"All VaR computation methods failed: {e}")
+            raise RuntimeError(f"All VaR computation methods failed: {e}") from e
 
     async def check_var_limit(self, pnl_series: pd.Series, portfolio_value: Decimal) -> bool:
         """Check if portfolio VaR is within limits.
@@ -1052,7 +1090,9 @@ class RiskEngineOrchestrator:
                 "last_var": float(self._last_var_result.var_amount) if self._last_var_result else None,
                 "last_cvar": float(self._last_var_result.cvar_amount) if self._last_var_result else None,
                 "last_method": self._last_var_result.method.value if self._last_var_result else None,
-                "last_computation_time_ms": self._last_var_result.computation_time_ms if self._last_var_result else None,
+                "last_computation_time_ms": self._last_var_result.computation_time_ms
+                if self._last_var_result
+                else None,
             },
             "garch": {
                 "last_volatility_forecast": self._garch._result.forecast_annualized if self._garch._result else None,

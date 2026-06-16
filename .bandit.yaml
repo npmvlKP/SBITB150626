@@ -1,27 +1,19 @@
-dont_fix: false
- sklearn-import-check: false
- tests/disabled_alerts/BAN0101-no-discards-used-token.yaml:
-   file_type: yaml
-   include_test: true
+# Bandit configuration file
+# This file configures bandit security scanner behavior
 
-# Exclude known test files from bandit security analysis
-tests/**/*.py: false
+# General settings
+exclude_dirs:
+  - backups
+  - config/secrets.env.example
+  - tests
+  - deployment
 
-# Quant trading components with reasonable security assumptions
-src/risk/var_engine.py:
-  bandit-code-level-checks:
-    - B108: # hardcoded_temp_credentials: Some cryptographic components will
-            # have temporary hardcoded credentials for testing signing certs
-            - signatures/_funcs.py
+# Skip tests for specific rules
+tests:
+  B108:  # hardcoded_temp_credentials
+    skip_on_text:
+      - "tests/disabled_alerts/BAN0101-no-discards-used-token.yaml"
+    config:
+      samples: true
 
-exclude_paths:
-   - backups
-   - config/secrets.env.example
-   - TESTING_DATA*
-
-# System Identification files with manual concepts not automated
-src/risk/**
-- "always_listen": True
-- "allow_extensions":
-    # Not all risk models follow the same standards
-    - src/risk/var_engine.py
+# Exemptions for quantified

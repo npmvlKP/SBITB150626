@@ -7,21 +7,27 @@ A self-trade occurs when:
 Per CIR/MRD/DP/09/2012: pre-trade risk controls must prevent erroneous orders.
 Self-trade prevention is an industry best practice (FIX Self-Trade Prevention, MiFID II).
 """
+
 from __future__ import annotations
+
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from src.risk.audit import AuditLogger
+
 
 @dataclass(frozen=True)
 class SelfTradeCheckResult:
     """Result of self-trade prevention check."""
+
     is_self_trade: bool
     matching_order_id: str | None
     matching_side: str | None  # "BUY" or "SELL"
     reason: str
     sebi_reference: str = "CIR/MRD/DP/09/2012 (pre-trade risk controls)"
+
 
 class SelfTradePrevention:
     """Client-side self-trade prevention as defense-in-depth.
@@ -56,7 +62,7 @@ class SelfTradePrevention:
             existing_price = Decimal(str(existing_order.get("price", "0")))
 
             # Check if same symbol and opposite sides
-            if (symbol == existing_symbol and transaction_type != existing_side):
+            if symbol == existing_symbol and transaction_type != existing_side:
                 # Check price overlap (bid/ask crossing)
                 if transaction_type == "BUY" and price >= existing_price:
                     # New BUY at/above existing SELL

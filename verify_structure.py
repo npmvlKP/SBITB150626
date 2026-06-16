@@ -162,7 +162,7 @@ def main():
     total_checks = 0
     total_passed = 0
 
-    for category, (passed, results) in all_results.items():
+    for category, (_passed, results) in all_results.items():
         category_total = len(results)
         category_passed = sum(1 for v in results.values() if v)
 
