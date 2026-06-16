@@ -891,8 +891,8 @@ Run these commands sequentially and verify each:
 
 ```powershell
 # 1. Create virtual environment
-python -m venv .venv
-.venv\Scripts\activate
+python -m venv SBITB150626
+SBITB150626\Scripts\activate
 
 # 2. Install project with dev dependencies
 pip install -e ".[dev]"
