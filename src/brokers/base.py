@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 __all__ = ["BrokerInterface"]
 
+
 class BrokerInterface(ABC):
     """Abstract broker interface for trading operations."""
 

@@ -1,4 +1,5 @@
 """Test suite for abstract interfaces verification."""
+
 import inspect
 import os
 import sys
@@ -36,7 +37,7 @@ class TestBrokerInterface:
             "get_positions",
             "get_margins",
             "get_order_book",
-            "get_instruments"
+            "get_instruments",
         ]
 
         for method in required_methods:

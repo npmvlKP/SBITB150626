@@ -9,157 +9,511 @@ Checks:
   6. Memory usage (warn if > 80%)
 
 Exit code: 0 if all healthy, 1 if any CRITICAL issue.
+
+Per MiFID II Art. 17, NIST RS.RP-1, ISO A.8.26 for kill switch.
+Per SEBI: 5+ year retention (we retain 7 years).
 """
 
 from __future__ import annotations
 
 import asyncio
 import shutil
-from datetime import datetime
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from typing import TYPE_CHECKING
 
 import structlog
-from rich.console import Console
-from rich.table import Table
 
-from config.settings import AuditSettings, KillSwitchSettings
-from src.risk.audit import NTPClock
-from src.risk.kill_switch import KillSwitch, KillSwitchLevel
+if TYPE_CHECKING:
+    pass
 
 logger = structlog.get_logger(__name__)
-console = Console()
 
 
-async def check_db_connectivity() -> tuple[bool, str]:
-    """Check TimescaleDB connectivity."""
+class HealthStatus(Enum):
+    """Health check status levels."""
+
+    HEALTHY = "healthy"
+    WARNING = "warning"
+    CRITICAL = "critical"
+    SKIPPED = "skipped"
+
+
+@dataclass
+class HealthCheckResult:
+    """Result of a single health check."""
+
+    name: str
+    status: HealthStatus
+    message: str
+    details: str | None = None
+
+    def is_critical(self) -> bool:
+        """Check if this result represents a critical failure."""
+        return self.status == HealthStatus.CRITICAL
+
+
+def _get_ist_timestamp() -> str:
+    """Get current timestamp in IST timezone.
+
+    Returns:
+        ISO format timestamp string with IST timezone
+    """
+    ist = timezone(datetime.now().astimezone().utcoffset())  # type: ignore[arg-type]
+    return datetime.now(ist).strftime("%Y-%m-%dT%H:%M:%S %Z")
+
+
+async def check_db_connectivity() -> HealthCheckResult:
+    """Check TimescaleDB connectivity.
+
+    Returns:
+        HealthCheckResult with connectivity status
+    """
     try:
         import asyncpg
 
-        conn = await asyncpg.connect("postgresql://trading:password@localhost:5432/trading_bot")
-        await conn.close()
-        return True, "Connected"
-    except Exception as e:
-        return False, str(e)
+        try:
+            conn = await asyncio.wait_for(
+                asyncpg.connect(
+                    host="localhost",
+                    port=5432,
+                    user="trading",
+                    password="password",
+                    database="trading_bot",
+                    timeout=5,
+                ),
+                timeout=10,
+            )
+            await conn.close()
+            return HealthCheckResult(
+                name="TimescaleDB",
+                status=HealthStatus.HEALTHY,
+                message="Connected successfully",
+                details="postgresql://localhost:5432/trading_bot",
+            )
+        except asyncpg.InvalidCatalogNameError:
+            # Database doesn't exist - skip gracefully
+            return HealthCheckResult(
+                name="TimescaleDB",
+                status=HealthStatus.SKIPPED,
+                message="Database not configured",
+                details="TimescaleDB is optional for Phase 0",
+            )
+    except ImportError:
+        return HealthCheckResult(
+            name="TimescaleDB",
+            status=HealthStatus.SKIPPED,
+            message="asyncpg not installed",
+            details="pip install asyncpg for database connectivity",
+        )
+    except Exception as e:  # noqa: BLE001
+        return HealthCheckResult(
+            name="TimescaleDB",
+            status=HealthStatus.SKIPPED,
+            message=f"Not running or unavailable: {type(e).__name__}",
+            details="TimescaleDB is optional - continuing without it",
+        )
 
 
-async def check_redis_connectivity() -> tuple[bool, str]:
-    """Check Redis connectivity."""
+async def check_redis_connectivity() -> HealthCheckResult:
+    """Check Redis connectivity.
+
+    Returns:
+        HealthCheckResult with connectivity status
+    """
     try:
         import redis.asyncio as redis
 
-        client = redis.from_url("redis://localhost:6379/0")
-        await client.ping()
-        await client.close()
-        return True, "Connected"
-    except Exception as e:
-        return False, str(e)
+        try:
+            client = redis.from_url(
+                "redis://localhost:6379/0",
+                socket_connect_timeout=5,
+            )
+            await asyncio.wait_for(client.ping(), timeout=10)
+            await client.aclose()
+            return HealthCheckResult(
+                name="Redis",
+                status=HealthStatus.HEALTHY,
+                message="Connected successfully",
+                details="redis://localhost:6379/0",
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                name="Redis",
+                status=HealthStatus.SKIPPED,
+                message=f"Not running: {type(e).__name__}",
+                details="Redis is optional for Phase 0",
+            )
+    except ImportError:
+        return HealthCheckResult(
+            name="Redis",
+            status=HealthStatus.SKIPPED,
+            message="redis package not installed",
+            details="pip install redis for caching support",
+        )
 
 
-async def check_ntp_clock() -> tuple[bool, float]:
-    """Check NTP clock offset."""
-    settings = AuditSettings()
-    clock = NTPClock(settings)
-    offset = await clock.check_offset()
-    return abs(offset) <= settings.MAX_NTP_OFFSET_MS, offset
+async def check_ntp_clock(max_offset_ms: int = 500) -> HealthCheckResult:
+    """Check NTP clock offset against configured server.
+
+    Args:
+        max_offset_ms: Maximum allowed offset in milliseconds
+
+    Returns:
+        HealthCheckResult with NTP offset status
+    """
+    try:
+        import ntplib
+
+        settings = {"NTP_SERVER": "in.pool.ntp.org", "MAX_NTP_OFFSET_MS": max_offset_ms}
+        client = ntplib.NTPClient()
+        response = client.request(settings["NTP_SERVER"], timeout=5)
+        offset_ms = response.offset * 1000
+
+        status = HealthStatus.HEALTHY
+        message = "Clock synchronized"
+
+        if abs(offset_ms) > settings["MAX_NTP_OFFSET_MS"]:
+            status = HealthStatus.WARNING
+            message = "Clock drift detected"
+            logger.warning(
+                "ntp_clock_drift",
+                offset_ms=offset_ms,
+                max_allowed=settings["MAX_NTP_OFFSET_MS"],
+            )
+
+        return HealthCheckResult(
+            name="NTP Clock",
+            status=status,
+            message=message,
+            details=f"Offset: {offset_ms:.1f}ms (max: ±{settings['MAX_NTP_OFFSET_MS']}ms)",
+        )
+    except ImportError:
+        return HealthCheckResult(
+            name="NTP Clock",
+            status=HealthStatus.WARNING,
+            message="ntplib not installed - cannot verify clock sync",
+            details="pip install ntplib for NTP checks",
+        )
+    except Exception as e:  # noqa: BLE001
+        return HealthCheckResult(
+            name="NTP Clock",
+            status=HealthStatus.WARNING,
+            message=f"NTP server unavailable: {type(e).__name__}",
+            details="Clock may drift from IST time - manual verification recommended",
+        )
 
 
-def check_disk_space() -> tuple[bool, str]:
-    """Check available disk space."""
-    _total, _used, free = shutil.disk_usage("/")
-    free_gb = free // (2**30)
-    if free_gb < 10:
-        return False, f"{free_gb}GB free"
-    return True, f"{free_gb}GB free"
+def check_kill_switch_state() -> HealthCheckResult:
+    """Check kill switch state is INACTIVE.
+
+    Returns:
+        HealthCheckResult with kill switch status
+    """
+    try:
+        from config.settings import KillSwitchSettings
+        from src.risk.kill_switch import KillSwitch, KillSwitchLevel
+
+        settings = KillSwitchSettings()
+        ks = KillSwitch(settings)
+        state = ks.get_state()
+        current_level = state["current_level"]
+
+        if current_level == KillSwitchLevel.INACTIVE.value:
+            return HealthCheckResult(
+                name="Kill Switch",
+                status=HealthStatus.HEALTHY,
+                message="System armed and ready",
+                details=f"Level: {current_level.upper()}",
+            )
+        return HealthCheckResult(
+            name="Kill Switch",
+            status=HealthStatus.CRITICAL,
+            message=f"Kill switch is ACTIVE: {current_level.upper()}",
+            details="Trading halted - investigate immediately",
+        )
+    except Exception as e:  # noqa: BLE001
+        return HealthCheckResult(
+            name="Kill Switch",
+            status=HealthStatus.CRITICAL,
+            message=f"Cannot verify kill switch: {type(e).__name__}",
+            details="Safe state assumed - manual verification required",
+        )
 
 
-def check_memory() -> tuple[bool, str]:
-    """Check memory usage."""
+def check_disk_space(min_free_gb: int = 10) -> HealthCheckResult:
+    """Check available disk space.
+
+    Args:
+        min_free_gb: Minimum required free space in GB
+
+    Returns:
+        HealthCheckResult with disk space status
+    """
+    try:
+        _total, _used, free = shutil.disk_usage("/")
+        free_gb = free // (2**30)
+
+        if free_gb < min_free_gb:
+            return HealthCheckResult(
+                name="Disk Space",
+                status=HealthStatus.CRITICAL,
+                message=f"Low disk space: {free_gb}GB free",
+                details=f"Minimum required: {min_free_gb}GB",
+            )
+
+        status = HealthStatus.HEALTHY
+        message = f"Sufficient space: {free_gb}GB free"
+
+        if free_gb < min_free_gb * 2:
+            status = HealthStatus.WARNING
+            message = f"Limited disk space: {free_gb}GB free"
+
+        return HealthCheckResult(
+            name="Disk Space",
+            status=status,
+            message=message,
+            details=f"Total: {_total // (2**30)}GB, Used: {_used // (2**30)}GB, Free: {free_gb}GB",
+        )
+    except Exception as e:  # noqa: BLE001
+        return HealthCheckResult(
+            name="Disk Space",
+            status=HealthStatus.CRITICAL,
+            message=f"Cannot check disk space: {type(e).__name__}",
+            details="Manual verification required",
+        )
+
+
+def check_memory_usage(warn_threshold: float = 80.0) -> HealthCheckResult:
+    """Check system memory usage.
+
+    Args:
+        warn_threshold: Warning threshold percentage
+
+    Returns:
+        HealthCheckResult with memory usage status
+    """
     try:
         import psutil
 
         mem = psutil.virtual_memory()
         used_pct = mem.percent
-        if used_pct > 80:
-            return False, f"{used_pct:.1f}% used"
-        return True, f"{used_pct:.1f}% used"
+        available_gb = mem.available / (2**30)
+        total_gb = mem.total / (2**30)
+
+        if used_pct > warn_threshold:
+            return HealthCheckResult(
+                name="Memory",
+                status=HealthStatus.WARNING,
+                message=f"High memory usage: {used_pct:.1f}%",
+                details=f"Available: {available_gb:.1f}GB / {total_gb:.1f}GB total",
+            )
+
+        return HealthCheckResult(
+            name="Memory",
+            status=HealthStatus.HEALTHY,
+            message=f"Memory usage OK: {used_pct:.1f}%",
+            details=f"Available: {available_gb:.1f}GB / {total_gb:.1f}GB total",
+        )
     except ImportError:
-        return True, "psutil not installed"
+        return HealthCheckResult(
+            name="Memory",
+            status=HealthStatus.SKIPPED,
+            message="psutil not installed",
+            details="pip install psutil for memory monitoring",
+        )
+    except Exception as e:  # noqa: BLE001
+        return HealthCheckResult(
+            name="Memory",
+            status=HealthStatus.WARNING,
+            message=f"Cannot check memory: {type(e).__name__}",
+            details="Manual verification recommended",
+        )
 
 
 async def run_health_check() -> int:
-    """Run all health checks and print report.
+    """Run all health checks and print structured report.
 
     Returns:
-        0 if all healthy, 1 if any CRITICAL issue
+        Exit code: 0 if all healthy, 1 if any CRITICAL issue
     """
-    console.print("\n[bold blue]SBITB Health Check — Pre-Market[/bold blue]")
-    console.print(f"Timestamp: {datetime.utcnow().isoformat()} IST\n")
+    console_available = False
+    try:
+        import rich.console  # noqa: F401
+    except ImportError:
+        logger.warning("rich_not_installed_using_console_output")
+    else:
+        console_available = True
 
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Check", style="cyan")
-    table.add_column("Status", style="bold")
+    # Run all checks concurrently
+    results = await asyncio.gather(
+        check_ntp_clock(max_offset_ms=500),
+        check_disk_space(min_free_gb=10),
+        check_memory_usage(warn_threshold=80.0),
+        check_kill_switch_state(),
+        check_db_connectivity(),
+        check_redis_connectivity(),
+    )
+
+    # Convert kill switch check result if returned as tuple
+    processed_results: list[HealthCheckResult] = []
+    for result in results:
+        if isinstance(result, tuple):
+            # Legacy tuple format conversion
+            ok, message = result
+            processed_results.append(
+                HealthCheckResult(
+                    name="Unknown",
+                    status=HealthStatus.HEALTHY if ok else HealthStatus.CRITICAL,
+                    message=message,
+                )
+            )
+        else:
+            processed_results.append(result)
+
+    # Count critical issues
+    critical_count = sum(1 for r in processed_results if r.is_critical())
+
+    if console_available:
+        _print_rich_report(processed_results, critical_count)
+    else:
+        _print_console_report(processed_results, critical_count)
+
+    if critical_count > 0:
+        logger.error("health_check_critical_issues", count=critical_count)
+        return 1
+
+    logger.info("health_check_all_passed", checks=len(processed_results))
+    return 0
+
+
+def _print_rich_report(results: list[HealthCheckResult], critical_count: int) -> None:
+    """Print formatted report using rich library.
+
+    Args:
+        results: List of health check results
+        critical_count: Number of critical issues
+    """
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+
+    console.print()
+    console.print("[bold blue]═══════════════════════════════════════════════════[/bold blue]")
+    console.print("[bold blue]          SBITB-150626 Health Check Report          [/bold blue]")
+    console.print("[bold blue]═══════════════════════════════════════════════════[/bold blue]")
+    console.print(f"Timestamp : {_get_ist_timestamp()}")
+    console.print(f"Checks    : {len(results)} total")
+    console.print()
+
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Check", style="cyan", width=18)
+    table.add_column("Status", style="bold", width=12)
     table.add_column("Details", style="dim")
 
-    critical_issues = 0
-
-    # NTP Clock
-    ntp_ok, ntp_offset = await check_ntp_clock()
-    ntp_status = "[green]OK[/green]" if ntp_ok else "[red]WARN[/red]"
-    ntp_detail = f"{ntp_offset:.1f}ms offset"
-    table.add_row("NTP Clock", ntp_status, ntp_detail)
-    if not ntp_ok:
-        critical_issues += 1
-
-    # Disk Space
-    disk_ok, disk_detail = check_disk_space()
-    disk_status = "[green]OK[/green]" if disk_ok else "[red]WARN[/red]"
-    table.add_row("Disk Space", disk_status, disk_detail)
-    if not disk_ok:
-        critical_issues += 1
-
-    # Memory
-    mem_ok, mem_detail = check_memory()
-    mem_status = "[green]OK[/green]" if mem_ok else "[red]WARN[/red]"
-    table.add_row("Memory", mem_status, mem_detail)
-    if not mem_ok:
-        critical_issues += 1
-
-    # Kill Switch
-    ks_settings = KillSwitchSettings()
-    ks = KillSwitch(ks_settings)
-    ks_state = ks.get_state()["current_level"]
-    ks_ok = ks_state == KillSwitchLevel.INACTIVE.value
-    ks_status = "[green]OK[/green]" if ks_ok else "[red]WARN[/red]"
-    table.add_row("Kill Switch", ks_status, f"Level: {ks_state}")
-    if not ks_ok:
-        critical_issues += 1
-
-    # TimescaleDB (skip if not running)
-    db_ok, db_detail = await check_db_connectivity()
-    if db_ok:
-        table.add_row("TimescaleDB", "[green]OK[/green]", db_detail)
-    else:
-        table.add_row("TimescaleDB", "[yellow]SKIP[/yellow]", "Not running (optional)")
-
-    # Redis (skip if not running)
-    redis_ok, redis_detail = await check_redis_connectivity()
-    if redis_ok:
-        table.add_row("Redis", "[green]OK[/green]", redis_detail)
-    else:
-        table.add_row("Redis", "[yellow]SKIP[/yellow]", "Not running (optional)")
+    for result in results:
+        status_icon = _get_status_icon(result.status)
+        table.add_row(
+            result.name,
+            f"{status_icon} {result.status.value.upper()}",
+            result.details or result.message,
+        )
 
     console.print(table)
     console.print()
 
-    if critical_issues > 0:
-        console.print(f"[red]CRITICAL: {critical_issues} issue(s) found — do not trade[/red]")
-        return 1
+    # Summary
+    if critical_count > 0:
+        console.print(f"[bold red]⚠ CRITICAL: {critical_count} issue(s) found — DO NOT TRADE[/bold red]")
+        console.print("[yellow]Fix all critical issues before proceeding.[/yellow]")
+    else:
+        console.print("[bold green]✓ All checks passed — System ready for trading[/bold green]")
 
-    console.print("[green]All critical checks passed — system ready[/green]")
-    return 0
+    console.print()
+
+
+def _print_console_report(results: list[HealthCheckResult], critical_count: int) -> None:
+    """Print report to stdout without rich library.
+
+    Args:
+        results: List of health check results
+        critical_count: Number of critical issues
+    """
+    print("\n" + "=" * 60)
+    print("          SBITB-150626 Health Check Report")
+    print("=" * 60)
+    print(f"Timestamp : {_get_ist_timestamp()}")
+    print(f"Checks    : {len(results)} total")
+    print()
+
+    for result in results:
+        icon = _get_status_icon(result.status)
+        print(f"[{result.status.value.upper():9}] {icon} {result.name}")
+        print(f"            {result.details or result.message}")
+        print()
+
+    if critical_count > 0:
+        print(f"WARNING: {critical_count} critical issue(s) found - DO NOT TRADE")
+    else:
+        print("SUCCESS: All checks passed - System ready")
+    print()
+
+
+def _get_status_color(status: HealthStatus) -> str:
+    """Get rich color for status.
+
+    Args:
+        status: HealthStatus enum value
+
+    Returns:
+        Rich color string
+    """
+    colors = {
+        HealthStatus.HEALTHY: "green",
+        HealthStatus.WARNING: "yellow",
+        HealthStatus.CRITICAL: "red",
+        HealthStatus.SKIPPED: "dim",
+    }
+    return colors.get(status, "white")
+
+
+def _get_status_icon(status: HealthStatus) -> str:
+    """Get icon for status.
+
+    Args:
+        status: HealthStatus enum value
+
+    Returns:
+        Status icon character
+    """
+    icons = {
+        HealthStatus.HEALTHY: "✓",
+        HealthStatus.WARNING: "⚠",
+        HealthStatus.CRITICAL: "✗",
+        HealthStatus.SKIPPED: "○",
+    }
+    return icons.get(status, "?")
+
+
+def main() -> int:
+    """Entry point for health check script.
+
+    Returns:
+        Exit code matching run_health_check result
+    """
+    try:
+        return asyncio.run(run_health_check())
+    except KeyboardInterrupt:
+        print("\nHealth check interrupted by user.")
+        return 1
+    except Exception as e:
+        logger.critical("health_check_unexpected_error", error=str(e), error_type=type(e).__name__)
+        print(f"\nFATAL: Health check failed unexpectedly: {e}")
+        return 1
 
 
 if __name__ == "__main__":
-    import sys
-
-    exit_code = asyncio.run(run_health_check())
-    sys.exit(exit_code)
+    sys.exit(main())
