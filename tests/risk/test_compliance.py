@@ -2,8 +2,6 @@
 
 from datetime import datetime
 
-import pytest
-
 from config.settings import ComplianceSettings
 from src.risk.compliance import (
     ComplianceLevel,

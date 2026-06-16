@@ -32,7 +32,7 @@ if each & every task related to the initial requested prompt is completed succes
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 Sequential Plan 2 Build:-
-So far sequential instructions which  are straight input to an to an AI coding agent to initiate & conclude the production grade implementation PLAN related to "Phase 0-18 + TESTING GATE MATRIX + Dash Board" are suggested and these are available at "G:\OC\02June26\Plan" location. 
+So far sequential instructions which  are straight input to an to an AI coding agent to initiate & conclude the production grade implementation PLAN related to "Phase 0-18 + TESTING GATE MATRIX + Dash Board" are suggested and these are available at "G:\OC\02June26\Plan" location.
 Now keeping in view of the massive project structure, suggest me the strict, zero assumptions, production grade sequential steps how to build / implement the project duly answering these queries:
 [1]. Optimized MCP Servers installation & how to call them
 [2]. open source completely free best highly optimized plugin / puginsto build the said project
@@ -40,7 +40,7 @@ Now keeping in view of the massive project structure, suggest me the strict, zer
 [4]. New / Empty git repo "git@github.com:npmvlKP/SBITB.09June26.git / https://github.com/npmvlKP/SBITB.09June26.git", without README, .gitignore, & License.
 [5]. Sequential order of implementation / build the project phases explained.
 [6]. Any other relevant enhancements / suggestions / Optimizations to build the Production Grade SBITB.09June26 project.
-STRICTLY PLAN only, NO other ACTION / ACTIVITY on this, except the prompted requests. 
+STRICTLY PLAN only, NO other ACTION / ACTIVITY on this, except the prompted requests.
 
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 <@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&
@@ -83,27 +83,27 @@ Phase 14	Deep RL in Action	Zai & Brown	Hands-on DRL implementation
 Phase 10	NLP with Transformers (Revised Ed)	Tunstall, von Werra & Wolf	HuggingFace for sentiment pipeline
 VERIFIED TECH STACK (Windows 11 Compatible, Python 3.11+, All Free/Open Source)
 Layer	Technology	PyPI Package	Win11	Py 3.11+	Notes
-Language	Python 3.11+	—	Yes	Yes	
-IDE	VS Code	—	Yes	—	
+Language	Python 3.11+	—	Yes	Yes
+IDE	VS Code	—	Yes	—
 Broker (Primary)	Zerodha Kite Connect v5.2.0	kiteconnect	Yes	Yes	Rs 500/mo; NSE + MCX + NFO
 Broker (Fallback)	Angel One SmartAPI	smartapi-python	Yes	Yes	Free; NSE + MCX
 Broker (Depth)	Dhan v2.2.0	dhanhq	Yes	Yes	Free; 200-level depth
 Database	PostgreSQL	psycopg2	Yes	Yes	Primary store
 Time-series DB	TimescaleDB	— (PG extension)	Yes (Docker)	—	90%+ tick compression
 Cache/Queue	Redis	redis	Yes (Docker)	Yes	Pub/sub + cache
-Data Processing	Pandas + Polars	pandas, polars	Yes	Yes	
+Data Processing	Pandas + Polars	pandas, polars	Yes	Yes
 Technical Analysis	TA-Lib v0.6.8	ta-lib	Yes (wheel)	Yes	150+ indicators + candlestick patterns
 TA Backup	ta (pure Python)	ta	Yes	Yes	If TA-Lib C lib issues
 Historical Data	jugaad-data	jugaad-data	Yes	Yes	NSE F&O bhavcopy + derivatives
 Options Greeks	vollib (primary) + QuantLib (secondary)	vollib, QuantLib	Yes	Yes	vollib for fast IV; QuantLib for Indian calendar
-Backtesting	Backtrader	backtrader	Yes	Yes	
+Backtesting	Backtrader	backtrader	Yes	Yes
 Sentiment	FinBERT + muRIL	transformers	Yes	Yes	HuggingFace models
 RAG	LangChain + ChromaDB	langchain, chromadb	Yes	Yes	Local, no API fees
 LLM (local)	Ollama + Qwen 2.5 7B	—	Yes	—	CPU inference, 128K context
 Feature Store	Feast	feast	Yes	Yes	Offline + online features
-ML	PyTorch	torch	Yes	Yes	
-Containerization	Docker + Docker Compose	—	Yes (WSL2)	—	
-Monitoring	Prometheus + Grafana	—	Yes (Docker)	—	
+ML	PyTorch	torch	Yes	Yes
+Containerization	Docker + Docker Compose	—	Yes (WSL2)	—
+Monitoring	Prometheus + Grafana	—	Yes (Docker)	—
 CI/CD	GitHub Actions	—	Yes	—	Free for public repos
 Cloud Deploy	Oracle Cloud Free Tier (Mumbai)	—	—	—	ARM Ampere A1, always-free
 Testing & Security Stack
@@ -952,7 +952,7 @@ All Python libraries	$0	Open-source (MIT/Apache/BSD)
 Ollama + Qwen 2.5 7B	$0	Local LLM, no API fees
 FinBERT + muRIL	$0	HuggingFace models
 LangChain + ChromaDB	$0	Open-source
-Total	~$6/month	
+Total	~$6/month
 
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 <@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&

@@ -110,7 +110,7 @@ pip install -e ".[ml]"
 
 python -c "from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification; print('transformers OK')"
 python -c "import torch; print(f'torch {torch.__version__} OK')"
-python -c "from transformers import pipeline; pipe = pipeline('text-classification', model='ProsusAI/finbert', top_k=3); print(f'FinBERT pipeline OK: {pipe(\"Revenue surged 20%\")}')" 
+python -c "from transformers import pipeline; pipe = pipeline('text-classification', model='ProsusAI/finbert', top_k=3); print(f'FinBERT pipeline OK: {pipe(\"Revenue surged 20%\")}')"
 # NOTE: First run downloads ~470MB model. Subsequent runs use cache.
 
 python -c "from transformers import AutoTokenizer; tok = AutoTokenizer.from_pretrained('google/muril-base-cased'); print(f'muRIL tokenizer OK, vocab={tok.vocab_size}')"

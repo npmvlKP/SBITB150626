@@ -1,0 +1,103 @@
+groups:
+- name: trading-bot-alerts
+  rules:
+
+  # High app latency alerts
+  - alert: HighTradingLatency
+    expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, job)) > 2
+    for: 5m
+    labels:
+      severity: critical
+      context: trading_engine
+    annotations:
+      summary: "High latency detected in trading engine"
+      description: "95th percentile latency for job {{ $labels.job }} is {{ $value }}s"
+
+  # Error rate alerts
+  - alert: HighErrorRate
+    expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+    for: 5m
+    labels:
+      severity: critical
+      context: trading_engine
+    annotations:
+      summary: "High error rate detected"
+      description: "Error rate is {{ $value }} for component {{ $labels.job }}"
+
+  # Database alerts
+  - alert: DatabaseDown
+    expr: up{job="timescaledb"} == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Database service is down"
+      description: "TimescaleDB service is unavailable"
+
+  - alert: DatabaseHighCPU
+    expr: rate(container_cpu_usage_seconds_total{name="trading_timescaledb"}[5m]) > 0.8
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Database CPU usage high"
+      description: "TimescaleDB CPU usage is {{ $value }}"
+
+  - alert: DatabaseHighMemory
+    expr: container_memory_usage_bytes{name="trading_timescaledb"} > 3500000000
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Database memory usage high"
+      description: "TimescaleDB memory usage is {{ $value }} bytes"
+
+  # Redis alerts
+  - alert: RedisDown
+    expr: up{job="redis"} == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Redis service is down"
+      description: "Redis service is unavailable"
+
+  # Prometheus alerts
+  - alert: PrometheusDown
+    expr: up{job="prometheus"} == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Prometheus service is down"
+      description: "Prometheus service is unavailable"
+
+  # Disk space alerts
+  - alert: LowDiskSpace
+    expr: (node_filesystem_size_bytes{mountpoint="/var/lib/postgresql/data"} - node_filesystem_free_bytes{mountpoint="/var/lib/postgresql/data"}) / node_filesystem_size_bytes{mountpoint="/var/lib/postgresql/data"} * 100 > 80
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Low disk space on database storage"
+      description: "Only {{ $value }}% disk space remaining"
+
+  # Audit trail alerts
+  - alert: AuditTrailBacklog
+    expr: sum(audit_events_total{status="pending"}) > 100
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Audit trail backlog detected"
+      description: "{{ $value }} audit events pending processing"
+
+  # Compliance alerts
+  - alert: SEBINonCompliance
+    expr: sebi_compliance_failure > 0
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: "SEBI compliance failure detected"
+      description: "SEBI compliance check failed: {{ $labels.reason }}"

@@ -1,0 +1,117 @@
+{
+  "id": null,
+  "title": "System Monitoring",
+  "tags": ["trading", "infrastructure"],
+  "style": "dark",
+  "timezone": "UTC",
+  "editable": true,
+  "refresh": "10s",
+  "schemaVersion": 37,
+  "panels": [
+    {
+      "id": 1,
+      "title": "System Status Overview",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "up{job=\"trading_bot\"}",
+          "legendFormat": "Trading Bot"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "up{job=\"timescaledb\"}",
+          "legendFormat": "TimescaleDB"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "up{job=\"redis\"}",
+          "legendFormat": "Redis"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "up{job=\"prometheus\"}",
+          "legendFormat": "Prometheus"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "text": {},
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Resource Utilization",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "rate(container_cpu_usage_seconds_total{name=~\"trading_.*\"}[5m])",
+          "legendFormat": "{{name}} CPU"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "container_memory_usage_bytes{name=~\"trading_.*\"}",
+          "legendFormat": "{{name}} Memory"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Database Performance",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "rate(pg_stat_activity_count{datname=\"trading_bot\", state=\"active\"}[5m])",
+          "legendFormat": "Active connections"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "rate(pg_stat_database_tup_fetched{datname=\"trading_bot\"}[5m])",
+          "legendFormat": "Tuples fetched"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "rate(pg_stat_database_tup_inserted{datname=\"trading_bot\"}[5m])",
+          "legendFormat": "Tuples inserted"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Redis Performance",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "rate(redis_commands_processed_total[5m])",
+          "legendFormat": "Commands per second"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "redis_memory_used_bytes",
+          "legendFormat": "Memory usage"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus-Trading" },
+          "expr": "rate(redis_keyspace_hits_total[5m]) / (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m]))",
+          "legendFormat": "Hit rate"
+        }
+      ]
+    }
+  ]
+}

@@ -5,18 +5,17 @@ Reference: McNeil/Frey/Embrechts "Quantitative Risk Management", Ch.2-5
 - Ch.4: GARCH volatility models
 - Ch.5: Extreme Value Theory (EVT)
 """
-
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+import scipy.stats
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -104,7 +103,6 @@ class HistoricalVarEngine:
         portfolio_value: Decimal,
     ) -> VarResult:
         """Compute historical VaR and CVaR.
-
         Steps (McNeil Ch.2.2 Algorithm 2.1):
         1. Validate: len(pnl_series) >= VAR_LOOKBACK_DAYS, else raise InsufficientDataError
         2. Take last VAR_LOOKBACK_DAYS observations
@@ -122,7 +120,7 @@ class HistoricalVarEngine:
         self._validate_data(pnl_series)
 
         # Extract lookback period
-        lookback_pnl = pnl_series.iloc[-self._settings.VAR_LOOKBACK_DAYS:].copy()
+        lookback_pnl = pnl_series.iloc[-self._settings.VAR_LOOKBACK_DAYS :].copy()
         losses = -lookback_pnl  # Convert to positive losses
 
         # Compute VaR using historical quantile
@@ -194,7 +192,6 @@ class ParametricVarEngine:
         portfolio_value: Decimal,
     ) -> VarResult:
         """Compute parametric VaR and CVaR.
-
         Steps:
         1. Fit distribution parameters: mu = mean(pnl), sigma = std(pnl)
         2. If GARCH_DISTRIBUTION == "t": fit df via MLE (scipy.stats.t.fit)
@@ -206,7 +203,7 @@ class ParametricVarEngine:
             start_time = datetime.now()
 
             # Extract lookback period
-            lookback_pnl = pnl_series.iloc[-self._settings.VAR_LOOKBACK_DAYS:].copy()
+            lookback_pnl = pnl_series.iloc[-self._settings.VAR_LOOKBACK_DAYS :].copy()
             mu, sigma = lookback_pnl.mean(), lookback_pnl.std()
 
             # Determine z-value based on distribution
@@ -214,14 +211,12 @@ class ParametricVarEngine:
             holding_period = self._settings.VAR_HOLDING_PERIOD_DAYS
 
             if self._settings.GARCH_DISTRIBUTION == "normal":
-                from scipy.stats import norm
-                z_alpha = -norm.ppf(1 - alpha)
+                z_alpha = -scipy.stats.norm.ppf(1 - alpha)
                 cvar_closed = self._cvar_closed_form(mu, sigma, alpha, None)
-            else:  # t-distribution
-                from scipy.stats import t
-                # Fit degrees of freedom for t-distribution
-                df = t.fit(lookback_pnl)[0]
-                z_alpha = -t.ppf(1 - alpha, df)
+            else:
+                # t-distribution
+                df = scipy.stats.t.fit(lookback_pnl)[0]  # degrees of freedom
+                z_alpha = -scipy.stats.t.ppf(1 - alpha, df)
                 cvar_closed = self._cvar_closed_form(mu, sigma, alpha, df)
 
             # Compute VaR and CVaR
@@ -262,8 +257,7 @@ class ParametricVarEngine:
         mu, sigma = pnl_series.mean(), pnl_series.std()
 
         if self._settings.GARCH_DISTRIBUTION == "t":
-            from scipy.stats import t
-            df = t.fit(pnl_series)[0]
+            df = scipy.stats.t.fit(pnl_series)[0]
             return {"mu": mu, "sigma": sigma, "df": df}
         else:
             return {"mu": mu, "sigma": sigma, "df": None}
@@ -271,18 +265,17 @@ class ParametricVarEngine:
     def _cvar_closed_form(self, mu: float, sigma: float, alpha: float, df: float | None) -> float:
         """CVaR closed-form: for normal, E[X|X<=VaR] = mu - sigma * phi(z)/(1-alpha).
         For t-distribution: use scipy.stats.t.expect().
-
         McNeil Ch.2.3 Eq.2.16.
         """
-        if df is None:  # Normal distribution
-            from scipy.stats import norm
-            z_alpha = -norm.ppf(1 - alpha)
-            return mu - sigma * norm.pdf(z_alpha) / (1 - alpha)
-        else:  # t-distribution
-            from scipy.stats import t
-            z_alpha = -t.ppf(1 - alpha, df)
+        if df is None:
+            # Normal distribution
+            z_alpha = -scipy.stats.norm.ppf(1 - alpha)
+            return mu - sigma * scipy.stats.norm.pdf(z_alpha) / (1 - alpha)
+        else:
+            # t-distribution
+            z_alpha = -scipy.stats.t.ppf(1 - alpha, df)
             # Approximate CVaR for t-distribution
-            return mu - sigma * t.expect(lambda x: x, args=(df,), lb=np.inf if z_alpha > 0 else z_alpha) / (1 - alpha)
+            return mu - sigma * scipy.stats.t.expect(lambda x: x, args=(df,), lb=np.inf if z_alpha > 0 else z_alpha) / (1 - alpha)
 
     def _time_scale(self, value: float, holding_period: int) -> float:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""
@@ -291,7 +284,8 @@ class ParametricVarEngine:
 class MonteCarloVarEngine:
     """Monte Carlo Simulation VaR per McNeil Ch.2.4.
 
-    Simulates portfolio P&L using fitted distribution or historical bootstrap.
+    Simulates portfolio P&L using fitted distribution or historical
+    bootstrap.
     """
 
     def __init__(self, settings: QuantitativeRiskSettings):
@@ -303,7 +297,6 @@ class MonteCarloVarEngine:
         portfolio_value: Decimal,
     ) -> VarResult:
         """Compute Monte Carlo VaR and CVaR.
-
         Steps:
         1. Fit distribution to pnl_series (normal or t)
         2. Generate MONTE_CARLO_SIMULATIONS random P&L scenarios
@@ -319,17 +312,17 @@ class MonteCarloVarEngine:
 
         # Set up random number generator (no seed in production)
         rng = np.random.default_rng()
+
         alpha = self._settings.VAR_CONFIDENCE_LEVEL
         holding_period = self._settings.VAR_HOLDING_PERIOD_DAYS
         simulations = self._settings.MONTE_CARLO_SIMULATIONS
 
         # Fit distribution parameters
-        lookback_pnl = pnl_series.iloc[-self._settings.VAR_LOOKBACK_DAYS:].copy()
+        lookback_pnl = pnl_series.iloc[-self._settings.VAR_LOOKBACK_DAYS :].copy()
         mu, sigma = lookback_pnl.mean(), lookback_pnl.std()
 
         if self._settings.GARCH_DISTRIBUTION == "t":
-            from scipy.stats import t
-            df = t.fit(lookback_pnl)[0]
+            df = scipy.stats.t.fit(lookback_pnl)[0]
             scenarios = rng.standard_t(df, size=simulations) * sigma + mu
         else:
             scenarios = rng.normal(mu, sigma, size=simulations)
@@ -340,7 +333,7 @@ class MonteCarloVarEngine:
 
         # Compute VaR and CVaR
         var_loss_level = losses_sorted[int((1 - alpha) * simulations)]
-        cvar_loss_level = losses_sorted[int((1 - alpha) * simulations):].mean()
+        cvar_loss_level = losses_sorted[int((1 - alpha) * simulations) :].mean()
 
         # Time scaling
         var_time_scaled = self._time_scale(var_loss_level, holding_period)
@@ -373,13 +366,13 @@ class MonteCarloVarEngine:
         return value * np.sqrt(holding_period)
 
 class GarchVarEngine:
-    """GARCH-adjusted VaR per McNeil Ch.4.
-
-    Fits GARCH(p,q) model to return series, forecasts 1-step ahead conditional
-    volatility, then computes VaR using parametric approach with GARCH volatility.
+    """GARCH-adjusted VaR per McNeil Ch.4. Fits GARCH(p,q) model to return
+    series, forecasts 1-step ahead conditional volatility, then computes VaR
+    using parametric approach with GARCH volatility.
 
     McNeil Ch.4: GARCH(1,1) is sufficient for most financial series.
     Persistence: alpha_1 + beta_1 < 1 (stationarity condition).
+
     Fail-closed: if GARCH fit fails, log error and return None (caller falls back to historical VaR).
     """
 
@@ -428,19 +421,25 @@ class GarchVarEngine:
             dist = self._settings.GARCH_DISTRIBUTION
 
             model = arch.arch_model(
-                return_series.iloc[-self._settings.VAR_LOOKBACK_DAYS:],
+                return_series.iloc[-self._settings.VAR_LOOKBACK_DAYS :],
                 vol=model_type,
                 p=p,
                 q=q,
                 dist=dist,
             )
-
             fit_result = model.fit(disp="off", options={"maxiter": 1000, "warn.no.convergence": False})
 
             # Check stationarity condition (alpha + beta < 1)
-            omega = fit_result.params['omega']
-            alpha = sum([fit_result.params[f'alpha[{i}]'] for i in range(1, p + 1)])
-            beta = sum([fit_result.params[f'beta[{i}]'] for i in range(1, q + 1)])
+            def get_param(name: str, default: float = 0.0) -> float:
+                """Get parameter value or default if not present."""
+                try:
+                    return float(fit_result.params.get(name, default))
+                except Exception:
+                    return default
+
+            omega = fit_result.params["omega"]
+            alpha = sum([get_param(f"alpha[{i}]") for i in range(1, p + 1)])
+            beta = sum([get_param(f"beta[{i}]") for i in range(1, q + 1)])
             persistence = alpha + beta
 
             if persistence >= 1:
@@ -489,7 +488,6 @@ class GarchVarEngine:
             )
 
             return result
-
         except Exception as e:
             logger.error("garch_fit_failed", error=str(e), exception=type(e).__name__)
             self._model = None
@@ -501,7 +499,8 @@ class GarchVarEngine:
             return None
 
     def needs_refit(self) -> bool:
-        """Return True if GARCH_REFIT_FREQUENCY_DAYS have elapsed since last fit."""
+        """Return True if GARCH_REFIT_FREQUENCY_DAYS have elapsed since last
+        fit."""
         if self._last_fit_date is None:
             return True
         days_since_fit = (_utcnow() - self._last_fit_date).days
@@ -514,7 +513,6 @@ class GarchVarEngine:
         conditional_mean: float = 0.0,
     ) -> VarResult | None:
         """Compute GARCH-adjusted VaR.
-
         Steps:
         1. If not fitted or needs_refit: call fit()
         2. If fit failed: return None (caller falls back)
@@ -526,16 +524,17 @@ class GarchVarEngine:
         if self._result is None or self.needs_refit():
             return_series = 100 * pnl_series.pct_change().dropna()  # Convert to returns
             await self.fit(return_series)
-            if self._result is None:
-                logger.error("garch_var_compute_failed", fallback="using_historical_var")
-                return None
+
+        if self._result is None:
+            logger.error("garch_var_compute_failed", fallback="using_historical_var")
+            return None
 
         try:
             start_time = datetime.now()
 
             # Get GARCH results
             result = self._result
-            z_alpha = -stats.norm.ppf(1 - self._settings.VAR_CONFIDENCE_LEVEL)
+            z_alpha = -scipy.stats.norm.ppf(1 - self._settings.VAR_CONFIDENCE_LEVEL)
             holding_period = self._settings.VAR_HOLDING_PERIOD_DAYS
 
             # Use last forecast as current volatility estimate
@@ -576,8 +575,7 @@ class GarchVarEngine:
 
     def _cvar_closed_form_garch(self, mu: float, sigma: float, z_alpha: float) -> float:
         """CVaR closed-form for GARCH-adjusted parametric VaR."""
-        from scipy.stats import norm
-        return mu - sigma * norm.pdf(z_alpha) / norm.cdf(z_alpha) if sigma != 0 else mu
+        return mu - sigma * scipy.stats.norm.pdf(z_alpha) / scipy.stats.norm.cdf(z_alpha) if sigma != 0 else mu
 
     def _time_scale(self, value: float, holding_period: int) -> float:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""
@@ -585,8 +583,8 @@ class GarchVarEngine:
 
     def _diagnose_fit(self, result: Any) -> dict:
         """Compute ACF/PACF of standardized residuals (McNeil Ch.4.5).
-        Return {"lb_test_pvalue": ..., "acf_lag1": ...}.
 
+        Return {"lb_test_pvalue": ..., "acf_lag1": ...}.
         Ljung-Box test: if pvalue < 0.05, residuals have remaining ARCH effects (model insufficient).
         """
         from statsmodels.stats.diagnostic import acorr_ljungbox
@@ -598,11 +596,11 @@ class GarchVarEngine:
         }
 
 class EvtEngine:
-    """Extreme Value Theory engine per McNeil Ch.5 (Peaks Over Threshold / GPD method).
+    """Extreme Value Theory engine per McNeil Ch.5 (Peaks Over Threshold / GPD
+    method).
 
     Models the tail of the P&L distribution using the Generalized Pareto Distribution (GPD).
     McNeil Ch.5.3: POT method with GPD fit to exceedances above threshold.
-
     Fail-closed: if insufficient exceedances (< EVT_MIN_TAIL_SAMPLES), return None.
     """
 
@@ -622,14 +620,14 @@ class EvtEngine:
         7. Compute CVaR_EVT = VaR_EVT + (beta + xi * (VaR_EVT - threshold)) / (1 - xi) (McNeil Eq.5.15)
            CRITICAL: Only valid when xi < 1 (finite ES). If xi >= 1: log ERROR "Infinite ES — EVT unreliable"
         8. Goodness-of-fit: Anderson-Darling test on exceedances vs fitted GPD
-            If pvalue < 0.05: log WARNING "GPD fit rejected — EVT results unreliable"
+           If pvalue < 0.05: log WARNING "GPD fit rejected — EVT results unreliable"
         9. Return EvtResult
         """
         try:
             start_time = datetime.now()
 
             # Prepare data: convert pnl to losses
-            losses = -pnl_series.iloc[-self._settings.VAR_LOOKBACK_DAYS:].copy()
+            losses = -pnl_series.iloc[-self._settings.VAR_LOOKBACK_DAYS :].copy()
             losses = losses.dropna()
 
             # Step 2: Set threshold at EVT_THRESHOLD_PERCENTILE quantile
@@ -650,8 +648,7 @@ class EvtEngine:
                 return None
 
             # Step 5: Fit GPD to exceedances
-            from scipy.stats import genpareto
-            xi, _, beta = genpareto.fit(exceedances)
+            xi, _, beta = scipy.stats.genpareto.fit(exceedances)
 
             # Step 6: Compute VaR_EVT
             n = len(losses)
@@ -665,12 +662,12 @@ class EvtEngine:
                     xi=xi,
                     error="EVT tail index xi >= 1 — infinite expected shortfall",
                 )
-                cvar_evt = Decimal('Infinity')
+                cvar_evt = Decimal("Infinity")
             else:
                 cvar_evt = var_evt + (beta + xi * (var_evt - threshold)) / (1 - xi)
 
             # Step 8: Goodness-of-fit test (Anderson-Darling)
-            anderson_result = genpareto.nnlf((xi, 0, beta), exceedances)
+            anderson_result = scipy.stats.genpareto.nnlf((xi, 0, beta), exceedances)
             ad_pvalue = 1.0  # Placeholder - actual implementation would compute p-value
 
             # Build and return result
@@ -680,7 +677,7 @@ class EvtEngine:
                 tail_index_se=xi / np.sqrt(len(exceedances)),  # Standard error approximation
                 n_exceedances=len(exceedances),
                 var_evt=Decimal(str(var_evt)),
-                cvar_evt=Decimal(str(cvar_evt)) if xi < 1 else Decimal('Infinity'),
+                cvar_evt=Decimal(str(cvar_evt)) if xi < 1 else Decimal("Infinity"),
                 goodness_of_fit_pvalue=ad_pvalue,
                 timestamp=_utcnow(),
             )
@@ -696,16 +693,15 @@ class EvtEngine:
             )
 
             return result
-
         except Exception as e:
             logger.error("evt_fit_failed", error=str(e))
             return None
 
     def _hill_estimator(self, losses: np.ndarray) -> tuple[float, float]:
         """Hill estimator for tail index xi (McNeil Ch.5.2).
-        Returns (xi, standard_error).
 
-        SE = xi / sqrt(k) where k = number of order statistics used.
+        Returns (xi, standard_error). SE = xi / sqrt(k) where k = number
+        of order statistics used.
         """
         k = int(len(losses) * 0.05)  # Top 5% as extreme
         if k < self._settings.EVT_MIN_TAIL_SAMPLES:
@@ -714,9 +710,8 @@ class EvtEngine:
             k = len(losses)
 
         order_stats = np.sort(losses)[-k:]
-        rank = np.arange(1, k + 1)
+        rank = np.arange(1, k + 1) if k > 0 else np.array([1])
         log_diff = np.log(order_stats) - np.log(order_stats[0])
-
         xi = np.sum(log_diff) / k
         se = xi / np.sqrt(k)
 
@@ -725,14 +720,15 @@ class EvtEngine:
 class StressTestEngine:
     """Stress testing per McNeil Ch.9 (Scenario-based risk assessment).
 
-    Applies predefined scenario shocks to current portfolio and measures impact.
+    Applies predefined scenario shocks to current portfolio and measures
+    impact.
     """
 
     def __init__(
         self,
         settings: QuantitativeRiskSettings,
-        position_settings: PositionLimitSettings,
-        risk_settings: RiskSettings,
+        position_settings: "PositionLimitSettings",
+        risk_settings: "RiskSettings",
     ):
         self._quant_settings = settings
         self._position_settings = position_settings
@@ -761,7 +757,6 @@ class StressTestEngine:
         for pct_drop in self._quant_settings.STRESS_SCENARIO_PCT_DROP:
             scenario_name = f"{float(pct_drop) * -100:.0f}% drop"
             pct_drop_float = float(pct_drop)
-
             portfolio_loss = Decimal(str(portfolio_value * abs(pct_drop_float)))
 
             # Projected margin utilization after scenario (simplified)
@@ -769,17 +764,15 @@ class StressTestEngine:
             projected_margin_utilization = Decimal(str(margin_utilization * margin_impact_ratio))
 
             # Check if would trigger kill switch
-            would_trigger_kill_switch = (
-                projected_margin_utilization >= self._risk_settings.MARGIN_UTILIZATION_KILL
-            )
+            would_trigger_kill_switch = projected_margin_utilization >= self._risk_settings.MARGIN_UTILIZATION_KILL
 
             # Check if would breach VaR limit
             would_breach_var_limit = portfolio_loss > self._quant_settings.VAR_MAX_PORTFOLIO_VAR
 
             # Greek impact estimation (simplified)
             greek_impact = {"delta": Decimal("0"), "gamma": Decimal("0"), "vega": Decimal("0")}
-            # TODO: More accurate Greek estimation would require position-level details
 
+            # TODO: More accurate Greek estimation would require position-level details
             results.append(
                 StressTestResult(
                     scenario_name=scenario_name,
@@ -801,15 +794,15 @@ class StressTestEngine:
         correlation_matrix: np.ndarray,
     ) -> StressTestResult:
         """Stress test: correlation breakdown (McNeil Ch.9.3).
-
-        During crises, correlations spike toward 1. Recalculate portfolio VaR
-        assuming all pairwise correlations = 1.0 and compare to normal VaR.
+        During crises, correlations spike toward 1.
+        Recalculate portfolio VaR assuming all pairwise correlations = 1.0
+        and compare to normal VaR.
         If ratio > CORRELATION_BREAK_THRESHOLD: flag as correlation break risk.
         """
         # Simplified implementation: assume correlation break increases VaR by sqrt(n_positions)
         n_positions = len(current_positions)
         portfolio_value = sum(pos["value"] for pos in current_positions)
-        crisis_var_timescale = np.sqrt(n_positions)
+        crisis_var_timescale = np.sqrt(float(n_positions))
 
         return StressTestResult(
             scenario_name="correlation_break",
@@ -842,9 +835,9 @@ class RiskEngineOrchestrator:
     def __init__(
         self,
         quant_settings: QuantitativeRiskSettings,
-        position_settings: PositionLimitSettings,
-        risk_settings: RiskSettings,
-        audit_logger: AuditLogger,
+        position_settings: "PositionLimitSettings",
+        risk_settings: "RiskSettings",
+        audit_logger: "AuditLogger",
     ):
         self._historical = HistoricalVarEngine(quant_settings)
         self._parametric = ParametricVarEngine(quant_settings)
@@ -867,7 +860,6 @@ class RiskEngineOrchestrator:
         6. Return VarResult
         """
         start_time = datetime.now()
-
         try:
             # Try GARCH first
             if self._settings.VAR_METHOD == "historical":
@@ -892,7 +884,6 @@ class RiskEngineOrchestrator:
             # If GARCH succeeded, use it
             if current_var is not None:
                 self._last_var_result = current_var
-
                 if self._audit is not None:
                     await self._audit.log_event(
                         event_type="VAR_COMPUTED",
@@ -907,19 +898,16 @@ class RiskEngineOrchestrator:
                             "data_points_used": current_var.data_points_used,
                         },
                     )
-
                 logger.info("var_computed_garch", var_amount=float(current_var.var_amount))
                 return current_var
 
             # GARCH failed - fall back to configured method
             fallback_method = self._settings.VAR_METHOD
-
             logger.info(
                 "var_fallback_to_method",
                 backup_method=fallback_method,
                 reason="garch_unavailable",
             )
-
         except Exception as e:
             logger.warning(
                 "var_garch_failed",
@@ -940,7 +928,6 @@ class RiskEngineOrchestrator:
                 raise ValueError(f"Unknown VAR_METHOD: {fallback_method}")
 
             self._last_var_result = current_var
-
             if self._audit is not None:
                 await self._audit.log_event(
                     event_type="VAR_COMPUTED",
@@ -956,10 +943,8 @@ class RiskEngineOrchestrator:
                         "fallback_used": True,
                     },
                 )
-
             logger.info("var_computed", method=fallback_method, var_amount=float(current_var.var_amount))
             return current_var
-
         except Exception as e:
             logger.error("var_all_methods_failed", error=str(e))
             raise RuntimeError(f"All VaR computation methods failed: {e}")
@@ -967,9 +952,10 @@ class RiskEngineOrchestrator:
     async def check_var_limit(self, pnl_series: pd.Series, portfolio_value: Decimal) -> bool:
         """Check if portfolio VaR is within limits.
 
-        Returns True if VaR <= VAR_MAX_PORTFOLIO_VAR AND CVaR <= VAR_MAX_PORTFOLIO_CVAR.
-        Returns False (reject) if either limit breached.
-        Logs result via audit_logger with RISK_CHECK_PASSED or RISK_CHECK_FAILED event.
+        Returns True if VaR <= VAR_MAX_PORTFOLIO_VAR AND CVaR <=
+        VAR_MAX_PORTFOLIO_CVAR. Returns False (reject) if either limit
+        breached. Logs result via audit_logger with RISK_CHECK_PASSED or
+        RISK_CHECK_FAILED event.
         """
         try:
             var_result = await self.compute_var(pnl_series, portfolio_value)
@@ -990,7 +976,6 @@ class RiskEngineOrchestrator:
                     var_breach=var_breach,
                     cvar_breach=cvar_breach,
                 )
-
                 if self._audit is not None:
                     await self._audit.log_event(
                         event_type="VAR_LIMIT_BREACHED",
@@ -1005,7 +990,6 @@ class RiskEngineOrchestrator:
                             "method": var_result.method.value,
                         },
                     )
-
                 return False
             else:
                 if self._audit is not None:
@@ -1022,10 +1006,8 @@ class RiskEngineOrchestrator:
                         },
                     )
                 return True
-
         except Exception as e:
             logger.error("var_limit_check_error", error=str(e))
-
             if self._audit is not None:
                 await self._audit.log_event(
                     event_type="RISK_CHECK_FAILED",
@@ -1036,7 +1018,6 @@ class RiskEngineOrchestrator:
                         "fallback_action": "reject_order",
                     },
                 )
-
             # Fail-closed on error
             return False
 
@@ -1052,15 +1033,19 @@ class RiskEngineOrchestrator:
     def get_risk_summary(self) -> dict:
         """Return current risk state: VaR, CVaR, GARCH volatility, EVT tail index, last stress test results."""
         last_stress_tests = None
-        if hasattr(self._stress, '_last_stress_tests'):
-            last_stress_tests = [
-                {
-                    "scenario": st.scenario_name,
-                    "portfolio_loss": float(st.portfolio_loss),
-                    "would_breach_var_limit": st.would_breach_var_limit,
-                }
-                for st in self._stress._last_stress_tests
-            ] if hasattr(self._stress, '_last_stress_tests') else []
+        if hasattr(self._stress, "_last_stress_tests"):
+            last_stress_tests = (
+                [
+                    {
+                        "scenario": st.scenario_name,
+                        "portfolio_loss": float(st.portfolio_loss),
+                        "would_breach_var_limit": st.would_breach_var_limit,
+                    }
+                    for st in self._stress._last_stress_tests
+                ]
+                if hasattr(self._stress, "_last_stress_tests")
+                else []
+            )
 
         return {
             "var": {
@@ -1075,7 +1060,9 @@ class RiskEngineOrchestrator:
                 "last_model_type": self._garch._result.model_type if self._garch._result else None,
             },
             "evt": {
-                "last_tail_index_xi": self._evt._last_evt_result.tail_index_xi if hasattr(self._evt, '_last_evt_result') and self._evt._last_evt_result else None,
+                "last_tail_index_xi": self._evt._last_evt_result.tail_index_xi
+                if hasattr(self._evt, "_last_evt_result") and self._evt._last_evt_result
+                else None,
             },
             "stress_tests": last_stress_tests,
         }

@@ -141,8 +141,8 @@ class RiskManager:
     async def _reset_daily_count_if_needed(self) -> None:
         """Reset daily order count at start of new trading day.
 
-        Per SEBI circular CIR/MRD/DP/09/2012, daily order limits
-        must reset at start of each trading day.
+        Per SEBI circular CIR/MRD/DP/09/2012, daily order limits must
+        reset at start of each trading day.
         """
         today = _utcnow().date()
         if today > self._last_daily_reset:
@@ -162,8 +162,8 @@ class RiskManager:
     async def pre_trade_check(self, order: dict[str, Any]) -> PreTradeCheckResult:
         """Run all 10 pre-trade risk checks sequentially.
 
-        If ANY check fails, overall_result = FAIL with reason.
-        Per MiFID II RTS 6, FIX Risk Controls, SEBI CIR/MRD/DP/09/2012.
+        If ANY check fails, overall_result = FAIL with reason. Per MiFID
+        II RTS 6, FIX Risk Controls, SEBI CIR/MRD/DP/09/2012.
         """
         await self._reset_daily_count_if_needed()
         details: list[PreTradeCheckDetail] = []
@@ -244,9 +244,7 @@ class RiskManager:
         )
         if order_value > self._risk_settings.MAX_ORDER_VALUE_PER_TRADE:
             check3.result = RiskCheckResult.FAIL
-            check3.reason = (
-                f"Order value {order_value} exceeds max {self._risk_settings.MAX_ORDER_VALUE_PER_TRADE}"
-            )
+            check3.reason = f"Order value {order_value} exceeds max {self._risk_settings.MAX_ORDER_VALUE_PER_TRADE}"
             logger.warning(
                 "risk_check_failed",
                 check=check3.check_name,
@@ -327,9 +325,7 @@ class RiskManager:
         required_margin = order_value
         if self._available_margin < required_margin:
             check6.result = RiskCheckResult.FAIL
-            check6.reason = (
-                f"Available margin {self._available_margin} < required margin {required_margin}"
-            )
+            check6.reason = f"Available margin {self._available_margin} < required margin {required_margin}"
             logger.warning(
                 "risk_check_failed",
                 check=check6.check_name,
@@ -357,9 +353,7 @@ class RiskManager:
         position_notional = order_value  # price * quantity = notional
         if position_notional > self._risk_settings.MAX_POSITION_NOTIONAL_PER_SYMBOL:
             check7.result = RiskCheckResult.FAIL
-            check7.reason = (
-                f"Position notional {position_notional} exceeds limit {self._risk_settings.MAX_POSITION_NOTIONAL_PER_SYMBOL}"
-            )
+            check7.reason = f"Position notional {position_notional} exceeds limit {self._risk_settings.MAX_POSITION_NOTIONAL_PER_SYMBOL}"
             logger.warning(
                 "risk_check_failed",
                 check=check7.check_name,
@@ -416,9 +410,7 @@ class RiskManager:
             price_difference = abs(price - explicit_ltp) / explicit_ltp
             if price_difference > self._risk_settings.CIRCUIT_LIMIT_PCT:
                 check9.result = RiskCheckResult.FAIL
-                check9.reason = (
-                    f"Price deviation {price_difference:.4%} exceeds price protection limit of {self._risk_settings.CIRCUIT_LIMIT_PCT}"
-                )
+                check9.reason = f"Price deviation {price_difference:.4%} exceeds price protection limit of {self._risk_settings.CIRCUIT_LIMIT_PCT}"
                 logger.warning(
                     "risk_check_failed",
                     check=check9.check_name,

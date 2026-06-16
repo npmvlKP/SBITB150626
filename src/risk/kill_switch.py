@@ -36,10 +36,9 @@ def _utcnow() -> datetime:
 class KillSwitchLevel(Enum):
     """Kill switch escalation levels.
 
-    INACTIVE  → Normal operation
-    THROTTLE  → Reduced order rate (10% of normal)
-    PAUSE     → No new orders, existing held
-    KILL      → No new orders + cancel all existing
+    INACTIVE  → Normal operation THROTTLE  → Reduced order rate (10% of
+    normal) PAUSE     → No new orders, existing held KILL      → No new
+    orders + cancel all existing
     """
 
     INACTIVE = "inactive"
@@ -84,7 +83,8 @@ class KillSwitch:
 
     @property
     def _async_lock(self) -> asyncio.Lock:
-        """Lazily initialize the asyncio lock (must be created within an event loop)."""
+        """Lazily initialize the asyncio lock (must be created within an event
+        loop)."""
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock

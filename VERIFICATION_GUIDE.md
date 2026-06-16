@@ -444,7 +444,7 @@ For issues or questions:
 
 ---
 
-**Last Updated**: 2025-06-15  
-**Python Version**: 3.11+  
-**Virtual Environment**: SBITB150626  
+**Last Updated**: 2025-06-15
+**Python Version**: 3.11+
+**Virtual Environment**: SBITB150626
 **Status**: Active

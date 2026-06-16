@@ -1,4 +1,5 @@
-"""Application settings with Pydantic BaseSettings — SEBI compliance constants and risk limits."""
+"""Application settings with Pydantic BaseSettings — SEBI compliance constants
+and risk limits."""
 
 from datetime import time
 from decimal import Decimal
@@ -9,7 +10,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class KillSwitchLevel(str, Enum):
-    """Kill switch levels — per MiFID II Art. 17, NIST RS.RP-1, ISO A.8.26."""
+    """Kill switch levels — per MiFID II Art.
+
+    17, NIST RS.RP-1, ISO A.8.26.
+    """
 
     INACTIVE = "inactive"
     THROTTLE = "throttle"
@@ -18,7 +22,8 @@ class KillSwitchLevel(str, Enum):
 
 
 class ComplianceSettings(BaseSettings):
-    """SEBI compliance enforcement constants — verified against NSE/INVG/67858, SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013."""
+    """SEBI compliance enforcement constants — verified against NSE/INVG/67858,
+    SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013."""
 
     model_config = SettingsConfigDict(
         env_prefix="COMPLIANCE_",
@@ -74,14 +79,15 @@ class RiskSettings(BaseSettings):
     @model_validator(mode="after")
     def validate_margin_thresholds(self) -> "RiskSettings":
         if self.MARGIN_UTILIZATION_THRESHOLD >= self.MARGIN_UTILIZATION_KILL:
-            raise ValueError(
-                "MARGIN_UTILIZATION_THRESHOLD must be less than MARGIN_UTILIZATION_KILL"
-            )
+            raise ValueError("MARGIN_UTILIZATION_THRESHOLD must be less than MARGIN_UTILIZATION_KILL")
         return self
 
 
 class KillSwitchSettings(BaseSettings):
-    """Kill switch configuration — per MiFID II Art. 17, NIST RS.RP-1, ISO A.8.26."""
+    """Kill switch configuration — per MiFID II Art.
+
+    17, NIST RS.RP-1, ISO A.8.26.
+    """
 
     model_config = SettingsConfigDict(
         env_prefix="KILLSWITCH_",
@@ -95,7 +101,8 @@ class KillSwitchSettings(BaseSettings):
 
 
 class AuditSettings(BaseSettings):
-    """Audit trail configuration — 7-year retention per SEBI requirement (5+)."""
+    """Audit trail configuration — 7-year retention per SEBI requirement
+    (5+)."""
 
     model_config = SettingsConfigDict(
         env_prefix="AUDIT_",

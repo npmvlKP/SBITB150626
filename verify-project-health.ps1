@@ -1,7 +1,7 @@
 # ============================================================================
 # SBITB-150626 Project Health Verification Script
 # ============================================================================
-# Description: Comprehensive health check for SEBI-compliant Indian 
+# Description: Comprehensive health check for SEBI-compliant Indian
 #              algorithmic trading bot (NSE + MCX)
 # Platform: Windows 11 PowerShell
 # Author: Automated Build System
@@ -42,17 +42,17 @@ function Write-TestResult {
         [string]$Details = "",
         [string]$Color = $null
     )
-    
+
     if ($Color -eq $null) {
         $Color = if ($Passed) { "Green" } else { "Red" }
     }
-    
+
     $status = if ($Passed) { "PASS" } else { "FAIL" }
     Write-Host "  [$status] $TestName" -ForegroundColor $Color
     if ($Details) {
         Write-Host "       $Details" -ForegroundColor Gray
     }
-    
+
     if ($Passed) {
         $Script:PassedChecks++
     } elseif ($Color -eq "Yellow") {
@@ -222,7 +222,7 @@ if (Get-Command ruff -ErrorAction SilentlyContinue) {
     Write-Host "Running ruff check..."
     $ruffOutput = ruff check src/ tests/ --output-format=text 2>&1
     $ruffExitCode = $LASTEXITCODE
-    
+
     if ($ruffExitCode -eq 0) {
         Write-TestResult "Ruff linting" $true "No issues found"
     } else {
@@ -247,12 +247,12 @@ if ($Quick) {
     $testOutput = python -m pytest tests/ -v --tb=short --strict-markers 2>&1
     $testDuration = (Get-Date) - $testStart
     $testExitCode = $LASTEXITCODE
-    
+
     # Parse results
     if ($testOutput -match "(\d+) passed") {
         $passedTests = [int]$matches[1]
         Write-TestResult "Pytest execution" $true "$passedTests tests passed in $($testDuration.TotalSeconds.ToString('0.0'))s"
-        
+
         if ($testOutput -match "(\d+) failed") {
             $failedTests = [int]$matches[1]
             Write-Host "  Warning: $failedTests tests failed" -ForegroundColor Yellow
@@ -260,7 +260,7 @@ if ($Quick) {
     } else {
         Write-TestResult "Pytest execution" $false "Could not parse results"
     }
-    
+
     # Show last 15 lines of test output
     Write-Host "`n  Last 15 lines of test output:"
     Write-Host "  " + ("-" * 70)
@@ -308,7 +308,7 @@ Write-Section "PHASE 7: Build System" "Package Configuration"
 
 if (Test-Path "pyproject.toml") {
     Write-TestResult "pyproject.toml exists" $true
-    
+
     # Try to parse with Python
     try {
         python -c "import tomllib; tomllib.load(open('pyproject.toml', 'rb'))" 2>&1

@@ -1,4 +1,5 @@
-"""End-of-day reconciliation — compare broker order book with local audit trail.
+"""End-of-day reconciliation — compare broker order book with local audit
+trail.
 
 Per ISO A.8.15: daily reconciliation is a compliance requirement.
 Per Zerodha API: order book is transient (daily); positions reset for intraday.

@@ -10,9 +10,11 @@ from typing import Any
 
 
 class BrokerInterface(ABC):
-    """Abstract broker interface — all broker implementations must implement these methods.
+    """Abstract broker interface — all broker implementations must implement
+    these methods.
 
-    Methods are async to support both sync (Zerodha) and async-capable (Angel One) brokers.
+    Methods are async to support both sync (Zerodha) and async-capable
+    (Angel One) brokers.
     """
 
     @abstractmethod

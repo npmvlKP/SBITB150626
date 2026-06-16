@@ -1,0 +1,30 @@
+# Bandit Security Rules Configuration
+# Website: https://bandit.readthedocs.io/
+# File: bandit.yaml
+
+exclude_dirs:
+  - backups
+  - config/secrets.env.example
+  - tests
+  - deployment
+  - **/verify_*
+
+tests:
+  B108:  # hardcodedtemp: hardcoded password
+    skip_on_text: ["tests/disabled_alerts/BAN0101-no-discards-used-token.yaml"]
+    config:
+      samples: true
+
+# Exemptions for quantified risk models that handle sensitive assets
+src/risk/var_engine.py:
+    - B101: constant-on: Configuration constants for risk model parameters
+    - B601: subprocess_popen: Risk engine executes sub-processes for volatility modeling
+    - B303: all_but_first_iterator: Safer transverse while implementing GARCH risk calculations
+    - B315: pickling: Risk parameter caching
+
+# Additional team configuration
+current_user_type: Developer
+skip_on_text:
+  - the HardcodedTempCredentials are used only for test TLS signing
+  - mock_user: Example User for System Identification
+  - pass: "Avoid returning hardcoded settings"

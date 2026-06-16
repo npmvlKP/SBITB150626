@@ -148,7 +148,7 @@ Lines    : Append after line 198
 
 class MCXSettings(BaseSettings):
     """MCX commodity segment configuration.
-    
+
     Per SEBI/HO/CDMRD/DMP/CIR/P/2016/97 and MCX contract specification circulars.
     Supports both standard and mini contracts (configurable via LOT_SIZE_MODE).
     """
@@ -191,7 +191,7 @@ class MCXSettings(BaseSettings):
 
 class MCXSegmentRiskSettings(BaseSettings):
     """Combined NSE+MCX segment risk limits.
-    
+
     Per CIR/MRD/DP/09/2012: risk controls apply across all segments.
     Combined limits prevent total exposure from exceeding safe thresholds.
     """
@@ -215,7 +215,7 @@ class MCXSegmentRiskSettings(BaseSettings):
 
 class MCXCostSettings(BaseSettings):
     """MCX transaction cost model.
-    
+
     CTT = 0.125% on SELL only (SEBI/HO/CDMRD/DMP/CIR/P/2016/97).
     Brokerage: Zerodha Rs 20 per executed order (commodity).
     Exchange txn charges: MCX published schedule.
@@ -344,7 +344,7 @@ class MCXOrder:
 @dataclass
 class ContinuousContract:
     """Back-adjusted continuous contract series (Kaufman Ch.3).
-    
+
     On roll date, the price difference between old and new contract
     is added as a cumulative adjustment factor to maintain continuity.
     """
@@ -396,14 +396,14 @@ async def check_mcx_session_break(
     settings: ComplianceSettings,
 ) -> bool:
     """Return True if currently in MCX session break (14:30–17:00).
-    
+
     During session break, NO orders are allowed for MCX segment.
     Per SEBI/HO/CDMRD/DMP/CIR/P/2016/97.
-    
+
     Args:
         now: Current datetime (IST).
         settings: Compliance settings with MCX session times.
-    
+
     Returns:
         True if in session break, False otherwise.
     """
@@ -421,17 +421,17 @@ async def validate_mcx_product_type(
     settings: MCXSettings,
 ) -> bool:
     """Validate product type is allowed for the MCX instrument.
-    
+
     CRUDEOIL: only MIS (intraday) allowed.
     GOLD/SILVER: MIS or NRML allowed.
     BO (bracket order): ALWAYS rejected (Zerodha disabled BO in 2021).
     CO (cover order): ALWAYS rejected (not supported for MCX).
-    
+
     Args:
         instrument: MCX instrument enum.
         product_type: Requested product type.
         settings: MCX settings with allowed product types per instrument.
-    
+
     Returns:
         True if product type is valid for this instrument, False otherwise.
     """
@@ -455,15 +455,15 @@ async def check_combined_ops(
     settings: MCXSegmentRiskSettings,
 ) -> bool:
     """Check if combined OPS across NSE+MCX exceeds limit.
-    
+
     Per CIR/MRD/DP/09/2012: risk controls apply across all segments.
     We use 3 OPS combined (well below SEBI 10 OPS registration threshold).
-    
+
     Args:
         nse_ops: Current NSE orders per second.
         mcx_ops: Current MCX orders per second.
         settings: MCX segment risk settings.
-    
+
     Returns:
         True if combined OPS is within limit, False if exceeded.
     """
@@ -479,14 +479,14 @@ async def validate_mcx_order(
     mcx_ops: float,
 ) -> tuple[bool, str]:
     """Full MCX compliance validation for an order.
-    
+
     Checks:
     1. Not in session break
     2. Product type valid for instrument
     3. Combined OPS within limit
     4. Instrument is allowed
     5. Lot size valid for configured mode
-    
+
     Returns:
         Tuple of (is_valid, reason). If is_valid=False, reason explains rejection.
     """
@@ -525,15 +525,15 @@ def get_lot_size(
     settings: MCXSettings,
 ) -> int:
     """Return lot size for instrument based on LOT_SIZE_MODE setting.
-    
+
     Per MCX circulars:
     - Standard: GOLD=100, SILVER=30, CRUDEOIL=100
     - Mini:     GOLDM=10, SILVERM=5, CRUDEOILM=10
-    
+
     Args:
         instrument: MCX instrument enum.
         settings: MCX settings with lot size configuration.
-    
+
     Returns:
         Lot size in units.
     """
@@ -553,14 +553,14 @@ def get_effective_instrument(
     settings: MCXSettings,
 ) -> MCXInstrument:
     """Map instrument to correct contract based on lot size mode.
-    
+
     If LOT_SIZE_MODE="mini", GOLD maps to GOLDM, SILVER to SILVERM, etc.
     If LOT_SIZE_MODE="standard", returns instrument as-is.
-    
+
     Args:
         instrument: Requested instrument.
         settings: MCX settings.
-    
+
     Returns:
         Effective instrument (standard or mini variant).
     """
@@ -581,13 +581,13 @@ def compute_notional_value(
     settings: MCXSettings,
 ) -> Decimal:
     """Compute notional value = price * lot_size * quantity_lots.
-    
+
     Args:
         price: Price per unit.
         instrument: MCX instrument.
         quantity_lots: Number of lots.
         settings: MCX settings.
-    
+
     Returns:
         Notional value in INR.
     """
@@ -601,12 +601,12 @@ def validate_quantity(
     settings: MCXSettings,
 ) -> bool:
     """Validate that quantity is positive and within max lots limit.
-    
+
     Args:
         quantity_lots: Requested quantity in lots.
         instrument: MCX instrument.
         settings: MCX settings with MAX_LOTS_PER_ORDER.
-    
+
     Returns:
         True if valid, False otherwise.
     """
@@ -640,44 +640,44 @@ Key Classes/Functions:
 
 class MCXSessionManager:
     """Track MCX trading session state and transitions.
-    
+
     MCX has TWO trading sessions with a mandatory break:
     - Morning:  9:00–14:30 IST (orders allowed)
     - Break:    14:30–17:00 IST (orders NOT allowed)
     - Evening:  17:00–23:30 IST (orders allowed)
     - Closed:   Outside all sessions
-    
+
     Per SEBI/HO/CDMRD/DMP/CIR/P/2016/97.
-    
+
     Args:
         settings: ComplianceSettings with MCX session times.
         audit_logger: AuditLogger for session transition events.
     """
-    
+
     def __init__(self, settings: ComplianceSettings, audit_logger: AuditLogger): ...
-    
+
     @property
     def current_session(self) -> MCXSession:
         """Current MCX session state."""
-    
+
     async def update_session(self, now: datetime) -> MCXSession:
         """Update session state based on current time.
-        
+
         Emits SESSION_START audit event when entering MORNING or EVENING.
         Emits SESSION_END audit event when leaving MORNING or EVENING.
         Logs SESSION_BREAK event when entering BREAK period.
         """
-    
+
     def is_trading_allowed(self) -> bool:
         """Return True if orders are allowed in current session.
-        
+
         Orders allowed only during MORNING and EVENING sessions.
         NOT allowed during BREAK or CLOSED.
         """
-    
+
     async def wait_for_session_start(self, target: MCXSession) -> None:
         """Block until the target session starts.
-        
+
         Useful for waiting for evening session to open.
         Checks every 30 seconds.
         """
@@ -725,44 +725,44 @@ class MarketEvent:
 
 class MCXEventCalendar:
     """Crude oil event calendar for risk-aware trading.
-    
+
     Per Coulling Ch.5: volume confirms divergence signals around events.
     Per Chan Ch.5: avoid mean-reversion during high-impact events.
-    
+
     Args:
         events_file: Path to JSON file with scheduled events.
         cycle_mode_minutes_before: Minutes before high-impact event to stop trading.
         cycle_mode_minutes_after: Minutes after high-impact event to resume trading.
     """
-    
+
     def __init__(
         self,
         events_file: str = "config/mcx_events.json",
         cycle_mode_minutes_before: int = 30,
         cycle_mode_minutes_after: int = 15,
     ): ...
-    
+
     async def load_events(self) -> None:
         """Load events from JSON file. Validate schema on load."""
-    
+
     def is_near_high_impact_event(self, now: datetime) -> bool:
         """Return True if within cycle_mode window of a HIGH-impact event.
-        
+
         Used by CrudeMeanReversionStrategy to enter cycle_mode
         (disable new entries but allow exit management).
         """
-    
+
     def get_upcoming_events(self, hours: int = 24) -> list[MarketEvent]:
         """Return events scheduled within next N hours."""
-    
+
     def get_seasonal_bollinger_adjustment(self, month: int) -> dict[str, float]:
         """Return Bollinger Band parameter adjustments for the month.
-        
+
         Seasonal patterns in crude (Chan Ch.4):
         - Summer (May–Aug): Higher volatility → wider bands (multiplier 2.5)
         - Winter (Nov–Feb): Lower volatility → standard bands (multiplier 2.0)
         - Shoulder months: Standard bands
-        
+
         Returns:
             Dict with keys: "bb_multiplier", "bb_period_adjustment"
         """
@@ -797,23 +797,23 @@ Key Classes/Functions:
 
 class MCXDataPipeline:
     """MCX historical data pipeline with continuous contract construction.
-    
+
     Per Kaufman Ch.3: Build continuous series with difference-adjustment.
     Roll 5 days before expiry to maintain liquidity in near-month.
-    
+
     Args:
         provider: MarketDataProvider instance (Zerodha KiteConnect).
         settings: MCXSettings with contract configuration.
         session_manager: MCXSessionManager for session-aware fetching.
     """
-    
+
     def __init__(
         self,
         provider: MarketDataProvider,
         settings: MCXSettings,
         session_manager: MCXSessionManager,
     ): ...
-    
+
     async def fetch_historical(
         self,
         instrument: MCXInstrument,
@@ -822,20 +822,20 @@ class MCXDataPipeline:
         timeframe: str = "day",
     ) -> pd.DataFrame:
         """Fetch historical OHLCV data for MCX instrument.
-        
+
         Uses MarketDataProvider.get_historical() under the hood.
         Respects Zerodha rate limits: 3 req/sec for historical data.
-        
+
         Args:
             instrument: MCX instrument.
             from_date: Start date.
             to_date: End date.
             timeframe: "1minute", "5minute", "15minute", "hour", "day"
-        
+
         Returns:
             DataFrame with columns: open, high, low, close, volume, timestamp
         """
-    
+
     async def build_continuous_series(
         self,
         instrument: MCXInstrument,
@@ -843,27 +843,27 @@ class MCXDataPipeline:
         to_date: date,
     ) -> pd.DataFrame:
         """Build back-adjusted continuous contract series.
-        
+
         Kaufman Ch.3 algorithm:
         1. Fetch data for current contract
         2. On roll date (5 days before expiry), fetch next contract
         3. Compute price difference at roll point
         4. Add cumulative adjustment factor to all prior data
         5. Return seamless continuous series
-        
+
         Adjustment method per MCXSettings.BACK_ADJUSTMENT_METHOD:
         - "difference": add_diff = old_close - new_close on roll date
         - "ratio":      ratio = old_close / new_close on roll date
-        
+
         Args:
             instrument: MCX instrument.
             from_date: Start date.
             to_date: End date.
-        
+
         Returns:
             Back-adjusted DataFrame with continuous price series.
         """
-    
+
     async def compute_indicators(
         self,
         df: pd.DataFrame,
@@ -871,7 +871,7 @@ class MCXDataPipeline:
         params: dict | None = None,
     ) -> pd.DataFrame:
         """Compute technical indicators on OHLCV data.
-        
+
         Indicators supported:
         - "ema": Exponential Moving Average (periods from params)
         - "atr": Average True Range (period from params, default 14)
@@ -879,30 +879,30 @@ class MCXDataPipeline:
         - "adx": Average Directional Index (period from params, default 14)
         - "rsi": Relative Strength Index (period from params, default 14)
         - "volume_sma": Volume Simple Moving Average
-        
+
         Args:
             df: OHLCV DataFrame.
             indicators: List of indicator names to compute.
             params: Optional dict of indicator parameters.
-        
+
         Returns:
             DataFrame with indicator columns appended.
         """
-    
+
     async def get_active_contract(
         self,
         instrument: MCXInstrument,
         now: date,
     ) -> MCXContract:
         """Get the currently active (most liquid) contract for instrument.
-        
+
         Fetches instruments from broker, filters by instrument type,
         selects contract with expiry > ROLL_DAYS_BEFORE_EXPIRY from now.
-        
+
         Args:
             instrument: MCX instrument.
             now: Current date.
-        
+
         Returns:
             MCXContract for the active contract.
         """
@@ -938,11 +938,11 @@ MCX Bhavcopy Column Differences from NSE:
     Exchange Instrument Type Expiry Date  Strike Price  Option Type
     Open  High  Low  Close  Settlement Price  Volume  Open Interest
     Change  Change%  Last Traded Price
-    
+
   NSE columns (typical):
     Symbol Date Series Open High Low Close Last
     PrevClose Volume Turnover
-    
+
   → Different parser required; DO NOT reuse NSE bhavcopy parser
 
 Key Classes/Functions:
@@ -964,68 +964,68 @@ class MCXBhavcopyRecord:
 
 class MCXBhavcopyIngestor:
     """MCX bhavcopy download and ingestion.
-    
+
     Downloads daily settlement CSV from MCX website.
     Parses into MCXBhavcopyRecord objects.
     Stores to TimescaleDB mcx_bhavcopy table.
-    
+
     Per SEBI: daily reconciliation requires settlement data.
-    
+
     Args:
         db_url: TimescaleDB connection string.
         download_dir: Local directory for CSV files.
     """
-    
+
     def __init__(self, db_url: str, download_dir: str = "data/mcx_bhavcopy"): ...
-    
+
     async def download(self, trading_date: date) -> Path:
         """Download MCX bhavcopy CSV for the given date.
-        
+
         URL pattern: https://www.mcxindia.com/market-data/bhavcopy
         (exact URL to be verified; may require API key or session)
-        
+
         Args:
             trading_date: Date to download bhavcopy for.
-        
+
         Returns:
             Path to downloaded CSV file.
         """
-    
+
     async def parse(self, csv_path: Path) -> list[MCXBhavcopyRecord]:
         """Parse MCX bhavcopy CSV into structured records.
-        
+
         MCX CSV format differs from NSE:
         - Different column names and order
         - Includes Settlement Price column (NSE does not)
         - Includes Open Interest column
         - Different date format (DD-MMM-YYYY)
-        
+
         Args:
             csv_path: Path to MCX bhavcopy CSV.
-        
+
         Returns:
             List of MCXBhavcopyRecord objects.
-        
+
         Raises:
             ValueError: If CSV schema doesn't match expected format.
         """
-    
+
     async def store(self, records: list[MCXBhavcopyRecord], trading_date: date) -> int:
         """Store bhavcopy records to TimescaleDB.
-        
+
         Uses INSERT ... ON CONFLICT DO UPDATE (upsert) for idempotency.
-        
+
         Args:
             records: Parsed bhavcopy records.
             trading_date: Trading date for the records.
-        
+
         Returns:
             Number of records inserted/updated.
         """
-    
+
     async def validate(self, records: list[MCXBhavcopyRecord]) -> list[str]:
         """Validate bhavcopy records for data integrity.
-        
+
         Checks:
         - No negative prices
         - High >= Low
@@ -1034,20 +1034,20 @@ class MCXBhavcopyIngestor:
         - Volume >= 0
         - Open Interest >= 0
         - Settlement price > 0 for active contracts
-        
+
         Args:
             records: Records to validate.
-        
+
         Returns:
             List of validation error messages (empty = all valid).
         """
-    
+
     async def run_daily(self, trading_date: date) -> int:
         """Full daily pipeline: download → parse → validate → store.
-        
+
         Args:
             trading_date: Date to process.
-        
+
         Returns:
             Number of records stored.
         """
@@ -1105,7 +1105,7 @@ def compute_trade_cost(
     cost_settings: MCXCostSettings,
 ) -> MCXTradeCost:
     """Compute full transaction cost for an MCX trade.
-    
+
     Args:
         side: "BUY" or "SELL".
         price: Price per unit.
@@ -1113,10 +1113,10 @@ def compute_trade_cost(
         instrument: MCX instrument.
         mcx_settings: MCX settings (lot sizes).
         cost_settings: MCX cost settings (rates).
-    
+
     Returns:
         MCXTradeCost with complete cost breakdown.
-    
+
     Cost computation:
     1. notional = price * lot_size * quantity_lots
     2. brokerage = Rs 20 per executed order
@@ -1129,7 +1129,7 @@ def compute_trade_cost(
     9. break_even_ticks = total / (lot_size * quantity_lots * tick_size)
     """
     notional = price * Decimal(get_lot_size(instrument, mcx_settings)) * Decimal(quantity_lots)
-    
+
     brokerage = cost_settings.BROKERAGE_PER_ORDER
     ctt = Decimal("0") if side == "BUY" else notional * cost_settings.CTT_RATE_SELL
     exchange_txn = notional * cost_settings.EXCHANGE_TXN_RATE
@@ -1137,11 +1137,11 @@ def compute_trade_cost(
     sebi_fee = Decimal("0") if side == "BUY" else notional * cost_settings.SEBI_TURNOVER_FEE_RATE
     stamp_duty = notional * cost_settings.STAMP_DUTY_RATE_BUY if side == "BUY" else Decimal("0")
     total = brokerage + ctt + exchange_txn + gst + sebi_fee + stamp_duty
-    
+
     tick_size = _get_tick_size(instrument, mcx_settings)
     lot_size = get_lot_size(instrument, mcx_settings)
     break_even_ticks = total / (Decimal(lot_size) * Decimal(quantity_lots) * tick_size)
-    
+
     return MCXTradeCost(
         brokerage=brokerage,
         ctt=ctt,
@@ -1162,14 +1162,14 @@ def compute_round_trip_cost(
     cost_settings: MCXCostSettings,
 ) -> MCXTradeCost:
     """Compute round-trip (buy+sell) cost for MCX trade.
-    
+
     Args:
         price: Entry price (assumes same exit price for cost calc).
         quantity_lots: Number of lots.
         instrument: MCX instrument.
         mcx_settings: MCX settings.
         cost_settings: MCX cost settings.
-    
+
     Returns:
         Combined MCXTradeCost for buy + sell.
     """
@@ -1228,49 +1228,49 @@ Key Class:
 
 class GoldTrendStrategy(StrategyInterface):
     """Gold trend-following strategy using 50/200 EMA crossover.
-    
+
     Kaufman Ch.7: EMA crossover for trend identification.
     Dalton Ch.3: Market profile POC for support/resistance.
-    
+
     Entry:
     - Long:  fast EMA crosses above slow EMA + ATR > min_atr_threshold
     - Short: fast EMA crosses below slow EMA + ATR > min_atr_threshold
-    
+
     Exit:
     - Trailing stop: 1.5× ATR from highest/lowest price since entry
     - Session end: flat position before session break (14:30) if MIS
     - Kill switch: immediate flat on KILL level
-    
+
     Risk:
     - Max 1 position at a time
     - Position size = 1 lot (configurable)
     - Break-even validation: expected move > round_trip_cost
     """
-    
+
     @property
     def strategy_id(self) -> str:
         return "mcx_gold_trend"
-    
+
     @property
     def version(self) -> str:
         return "1.0.0"
-    
+
     async def on_tick(self, tick: dict) -> None:
         """Process incoming tick for Gold.
-        
+
         1. Update EMA calculations
         2. Check session status (no trades during BREAK)
         3. If no position: check for EMA crossover entry
         4. If in position: update trailing stop, check exit
         5. Log all decisions to audit trail
         """
-    
+
     async def on_order_update(self, update: dict) -> None:
         """Handle order fill/reject/cancel for Gold strategy."""
-    
+
     async def start(self) -> None:
         """Initialize strategy: fetch historical data, compute initial EMAs."""
-    
+
     async def stop(self) -> None:
         """Graceful shutdown: flatten position if MIS, log final state."""
 
@@ -1316,33 +1316,33 @@ Key Class:
 
 class SilverTrendStrategy(StrategyInterface):
     """Silver trend-following strategy using 20/50 EMA crossover.
-    
+
     Kaufman Ch.7: Faster EMA for more volatile instruments.
     Silver is more volatile than Gold → shorter EMA periods, wider stops.
-    
+
     Entry:
     - Long:  fast EMA crosses above slow EMA + ATR > min_atr_threshold
     - Short: fast EMA crosses below slow EMA + ATR > min_atr_threshold
-    
+
     Exit:
     - Trailing stop: 2.0× ATR from highest/lowest price since entry
     - Session end: flat position before session break (14:30) if MIS
     - Kill switch: immediate flat on KILL level
-    
+
     Risk:
     - Max 1 position at a time
     - Position size = 1 lot (configurable)
     - Break-even validation: expected move > round_trip_cost
     """
-    
+
     @property
     def strategy_id(self) -> str:
         return "mcx_silver_trend"
-    
+
     @property
     def version(self) -> str:
         return "1.0.0"
-    
+
     # Same interface methods as GoldTrendStrategy but with different parameters
 
 Verification Gate 11:
@@ -1393,46 +1393,46 @@ Key Class:
 
 class CrudeMeanReversionStrategy(StrategyInterface):
     """Crude oil mean-reversion strategy with ADX filter and event awareness.
-    
+
     Chan Ch.5: Mean-reversion works in ranging markets (ADX<20).
     Coulling Ch.5: Volume confirms divergence signals.
-    
+
     Entry (LONG):
     - 15min: price touches lower BB + RSI < 30
     - 1hr: trend filter confirms no strong trend (ADX < 20)
     - Not near high-impact event (cycle_mode = False)
     - Volume > 20-period volume SMA (Coulling: volume confirms)
-    
+
     Entry (SHORT):
     - 15min: price touches upper BB + RSI > 70
     - 1hr: trend filter confirms no strong trend (ADX < 20)
     - Not near high-impact event (cycle_mode = False)
     - Volume > 20-period volume SMA
-    
+
     Exit:
     - Mean reversion target: price returns to BB middle band
     - Stop loss: 2× ATR from entry
     - Cycle mode: no new entries, manage existing exits only
     - Session end: MUST flatten (MIS = intraday only)
     - Kill switch: immediate flatten
-    
+
     Risk:
     - Max 1 position at a time
     - MIS product type only (intraday, no overnight)
     - Break-even validation: expected mean-reversion profit > round_trip_cost
     """
-    
+
     @property
     def strategy_id(self) -> str:
         return "mcx_crude_meanrev"
-    
+
     @property
     def version(self) -> str:
         return "1.0.0"
-    
+
     async def on_tick(self, tick: dict) -> None:
         """Process incoming tick for Crude Oil.
-        
+
         1. Check session status (no trades during BREAK)
         2. Check cycle_mode (near high-impact event?)
         3. Update BB, ADX, RSI on 15min and 1hr data
@@ -1441,17 +1441,17 @@ class CrudeMeanReversionStrategy(StrategyInterface):
         6. If MIS + approaching session break: flatten position
         7. Log all decisions to audit trail
         """
-    
+
     @property
     def is_cycle_mode(self) -> bool:
         """True if near a high-impact event; no new entries allowed.
-        
+
         Existing positions are still managed (exit on target/stop).
         """
-    
+
     def get_adjusted_bb_params(self) -> dict[str, float]:
         """Get seasonally-adjusted Bollinger Band parameters.
-        
+
         Delegates to MCXEventCalendar.get_seasonal_bollinger_adjustment().
         Summer (May–Aug): wider bands (2.5 std dev)
         Winter (Nov–Feb): standard bands (2.0 std dev)
@@ -1493,7 +1493,7 @@ Key Classes/Functions:
 
 class MCXBacktestResult:
     """Structured backtest result for an MCX strategy.
-    
+
     Attributes:
         strategy_id: Strategy identifier.
         instrument: MCX instrument tested.
@@ -1514,20 +1514,20 @@ class MCXBacktestResult:
 
 class MCXBacktestRunner:
     """Backtest runner for MCX commodity strategies.
-    
+
     Integrates:
     - MCXDataPipeline for historical data with continuous contracts
     - MCXCostModel for realistic transaction costs
     - MCXSessionManager for session-aware simulation
     - MCXEventCalendar for event-aware crude backtests
-    
+
     Args:
         data_pipeline: MCXDataPipeline instance.
         cost_settings: MCXCostSettings instance.
         session_manager: MCXSessionManager instance.
         event_calendar: MCXEventCalendar instance (for crude only).
     """
-    
+
     def __init__(
         self,
         data_pipeline: MCXDataPipeline,
@@ -1535,7 +1535,7 @@ class MCXBacktestRunner:
         session_manager: MCXSessionManager,
         event_calendar: MCXEventCalendar | None = None,
     ): ...
-    
+
     async def run(
         self,
         strategy: StrategyInterface,
@@ -1546,7 +1546,7 @@ class MCXBacktestRunner:
         timeframe: str = "day",
     ) -> MCXBacktestResult:
         """Run backtest for an MCX strategy.
-        
+
         Steps:
         1. Fetch continuous contract historical data
         2. Compute required indicators
@@ -1555,7 +1555,7 @@ class MCXBacktestRunner:
         5. Compute transaction costs for each trade
         6. Track equity curve and trade log
         7. Calculate performance metrics
-        
+
         Args:
             strategy: Strategy instance to backtest.
             instrument: MCX instrument.
@@ -1563,7 +1563,7 @@ class MCXBacktestRunner:
             end_date: Backtest period end.
             initial_capital: Starting capital (default Rs 1L).
             timeframe: Bar timeframe ("day", "hour", "15minute").
-        
+
         Returns:
             MCXBacktestResult with full performance analysis.
         """
@@ -1600,26 +1600,26 @@ Key Classes/Functions:
 
 class MCXRiskAdapter:
     """Adapter that wraps RiskManager with MCX-specific and combined checks.
-    
+
     Per CIR/MRD/DP/09/2012: risk controls apply at combined level.
     The existing RiskManager handles NSE checks; this adapter adds:
     - MCX-specific limits (lower per-symbol, lower circuit, lower max order)
     - Combined limits across NSE+MCX
     - Per-segment order counting for combined OPS
-    
+
     Args:
         risk_manager: Existing RiskManager instance.
         mcx_segment_risk: MCXSegmentRiskSettings.
         mcx_settings: MCXSettings.
     """
-    
+
     def __init__(
         self,
         risk_manager: RiskManager,
         mcx_segment_risk: MCXSegmentRiskSettings,
         mcx_settings: MCXSettings,
     ): ...
-    
+
     async def pre_trade_check_mcx(
         self,
         order: MCXOrder,
@@ -1631,7 +1631,7 @@ class MCXRiskAdapter:
         mcx_ops: float,
     ) -> PreTradeCheckResult:
         """Run MCX-specific + combined segment pre-trade checks.
-        
+
         Additional checks beyond base RiskManager:
         1. MCX max order value (Rs 1.5L vs NSE Rs 2L)
         2. MCX position limit (Rs 3L per symbol vs NSE Rs 5L)
@@ -1641,9 +1641,9 @@ class MCXRiskAdapter:
         6. Combined exposure: nse_exposure + mcx_exposure <= Rs 20L
         7. MCX session break check (no orders 14:30–17:00)
         8. MCX product type validation
-        
+
         All checks log to audit trail with SEBI circular references.
-        
+
         Args:
             order: MCXOrder to validate.
             nse_daily_pnl: NSE day's P&L.
@@ -1652,35 +1652,35 @@ class MCXRiskAdapter:
             mcx_total_exposure: Total MCX exposure.
             nse_ops: NSE current OPS rate.
             mcx_ops: MCX current OPS rate.
-        
+
         Returns:
             PreTradeCheckResult with combined check details.
         """
-    
+
     async def check_combined_daily_loss(
         self,
         nse_pnl: Decimal,
         mcx_pnl: Decimal,
     ) -> KillSwitchLevel | None:
         """Check combined daily loss across NSE+MCX.
-        
+
         Per CIR/MRD/DP/09/2012: combined loss limit Rs 10K.
         If combined loss >= Rs 10K → KILL.
-        
+
         Args:
             nse_pnl: NSE day P&L (negative if loss).
             mcx_pnl: MCX day P&L (negative if loss).
-        
+
         Returns:
             KillSwitchLevel.KILL if combined loss exceeded, None otherwise.
         """
-    
+
     def get_segment_exposure(self, segment: Segments) -> Decimal:
         """Get current total exposure for a segment.
-        
+
         Args:
             segment: NSE or MCX.
-        
+
         Returns:
             Total notional exposure for the segment.
         """
@@ -1717,7 +1717,7 @@ Key Classes/Functions:
 
 class MCXOrchestrator:
     """MCX strategy orchestrator with session lifecycle management.
-    
+
     Manages the full MCX trading day:
     1. Initialize strategies with historical data
     2. Start morning session (9:00)
@@ -1725,10 +1725,10 @@ class MCXOrchestrator:
     4. Resume strategies for evening session (17:00)
     5. Stop all strategies at close (23:30)
     6. Daily reconciliation and reporting
-    
+
     Per MiFID II Art. 17: kill switch integration.
     Per SEBI/HO/CDMRD/DMP/CIR/P/2016/97: session compliance.
-    
+
     Args:
         strategies: List of MCX strategy instances.
         session_manager: MCXSessionManager.
@@ -1736,7 +1736,7 @@ class MCXOrchestrator:
         audit_logger: AuditLogger.
         kill_switch: KillSwitch.
     """
-    
+
     def __init__(
         self,
         strategies: list[StrategyInterface],
@@ -1745,44 +1745,44 @@ class MCXOrchestrator:
         audit_logger: AuditLogger,
         kill_switch: KillSwitch,
     ): ...
-    
+
     async def initialize(self) -> None:
         """Initialize all strategies (fetch data, compute indicators)."""
-    
+
     async def run_morning_session(self) -> None:
         """Run strategies during morning session (9:00–14:30).
-        
+
         Starts strategy tasks, monitors session time.
         At 14:25 (5 min before break), signal strategies to flatten MIS positions.
         At 14:30, pause all strategy tasks.
         """
-    
+
     async def run_session_break(self) -> None:
         """Handle session break (14:30–17:00).
-        
+
         No trading allowed. Log session break audit event.
         Wait for evening session start.
         """
-    
+
     async def run_evening_session(self) -> None:
         """Run strategies during evening session (17:00–23:30).
-        
+
         Resume strategy tasks, monitor session time.
         At 23:25 (5 min before close), signal strategies to flatten all positions.
         At 23:30, stop all strategy tasks.
         """
-    
+
     async def daily_reconciliation(self) -> None:
         """End-of-day reconciliation.
-        
+
         Per SEBI: daily reconciliation of positions, P&L, and orders.
         Compute combined NSE+MCX P&L for risk tracking.
         Log DAILY_RECONCILIATION audit event.
         """
-    
+
     async def handle_kill_switch(self, level: KillSwitchLevel) -> None:
         """Handle kill switch activation across all MCX strategies.
-        
+
         KILL: flatten all positions, cancel all pending orders, stop all strategies.
         PAUSE: stop new entries, keep existing positions.
         THROTTLE: reduce order rate across all strategies.

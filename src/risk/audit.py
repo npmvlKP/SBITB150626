@@ -154,7 +154,8 @@ class AuditLogger:
 
     @property
     def _async_lock(self) -> asyncio.Lock:
-        """Lazily initialize the asyncio lock (must be created within an event loop)."""
+        """Lazily initialize the asyncio lock (must be created within an event
+        loop)."""
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock

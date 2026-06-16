@@ -27,7 +27,8 @@ logger = structlog.get_logger(__name__)
 class ComplianceLevel(Enum):
     """Algo registration status based on OPS.
 
-    Per NSE/INVG/67858: <=10 OPS = UNREGISTERED; >10 OPS = must REGISTER with exchange.
+    Per NSE/INVG/67858: <=10 OPS = UNREGISTERED; >10 OPS = must REGISTER
+    with exchange.
     """
 
     UNREGISTERED = "unregistered"
