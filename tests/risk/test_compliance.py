@@ -2,6 +2,9 @@
 
 from datetime import datetime
 
+import pytest
+
+from config.settings import ComplianceSettings
 from src.risk.compliance import (
     ComplianceLevel,
     Segments,
@@ -83,45 +86,69 @@ class TestIsOrderAllowed:
 class TestCheckOpsThreshold:
     """Tests for check_ops_threshold()."""
 
-    def test_check_ops_threshold_below_10(self) -> None:
+    def test_check_ops_threshold_below_10(
+        self,
+        compliance_settings: ComplianceSettings,
+    ) -> None:
         """5 OPS -> UNREGISTERED."""
-        result = check_ops_threshold(5.0)
+        result = check_ops_threshold(5.0, compliance_settings)
         assert result == ComplianceLevel.UNREGISTERED
 
-    def test_check_ops_threshold_at_10(self) -> None:
+    def test_check_ops_threshold_at_10(
+        self,
+        compliance_settings: ComplianceSettings,
+    ) -> None:
         """10 OPS -> UNREGISTERED (at threshold, not above)."""
-        result = check_ops_threshold(10.0)
+        result = check_ops_threshold(10.0, compliance_settings)
         assert result == ComplianceLevel.UNREGISTERED
 
-    def test_check_ops_threshold_above_10(self) -> None:
+    def test_check_ops_threshold_above_10(
+        self,
+        compliance_settings: ComplianceSettings,
+    ) -> None:
         """15 OPS -> REGISTERED (requires registration)."""
-        result = check_ops_threshold(15.0)
+        result = check_ops_threshold(15.0, compliance_settings)
         assert result == ComplianceLevel.REGISTERED
 
 
 class TestValidateSymbol:
     """Tests for validate_symbol()."""
 
-    def test_validate_symbol_nifty(self) -> None:
+    def test_validate_symbol_nifty(
+        self,
+        compliance_settings: ComplianceSettings,
+    ) -> None:
         """NIFTY in NSE -> True."""
-        assert validate_symbol("NIFTY", Segments.NSE) is True
+        assert validate_symbol("NIFTY", Segments.NSE, compliance_settings) is True
 
-    def test_validate_symbol_banknifty(self) -> None:
+    def test_validate_symbol_banknifty(
+        self,
+        compliance_settings: ComplianceSettings,
+    ) -> None:
         """BANKNIFTY in NSE -> True."""
-        assert validate_symbol("BANKNIFTY", Segments.NSE) is True
+        assert validate_symbol("BANKNIFTY", Segments.NSE, compliance_settings) is True
 
-    def test_validate_symbol_invalid(self) -> None:
+    def test_validate_symbol_invalid(
+        self,
+        compliance_settings: ComplianceSettings,
+    ) -> None:
         """AAPL in NSE -> False."""
-        assert validate_symbol("AAPL", Segments.NSE) is False
+        assert validate_symbol("AAPL", Segments.NSE, compliance_settings) is False
 
-    def test_validate_symbol_gold_mcx(self) -> None:
+    def test_validate_symbol_gold_mcx(
+        self,
+        compliance_settings: ComplianceSettings,
+    ) -> None:
         """GOLD in MCX -> True."""
-        assert validate_symbol("GOLD", Segments.MCX) is True
+        assert validate_symbol("GOLD", Segments.MCX, compliance_settings) is True
 
-    def test_validate_symbol_case_insensitive(self) -> None:
+    def test_validate_symbol_case_insensitive(
+        self,
+        compliance_settings: ComplianceSettings,
+    ) -> None:
         """Symbol check is case-insensitive."""
-        assert validate_symbol("nifty", Segments.NSE) is True
-        assert validate_symbol("NiFtY", Segments.NSE) is True
+        assert validate_symbol("nifty", Segments.NSE, compliance_settings) is True
+        assert validate_symbol("NiFtY", Segments.NSE, compliance_settings) is True
 
 
 class TestFormatAlgoTag:

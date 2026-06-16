@@ -60,7 +60,7 @@ SEBI_CIRCULAR_REFERENCES: dict[str, str] = {
 }
 
 
-def get_trading_session(segment: Segments, now: datetime) -> TradingSession:
+def get_trading_session(segment: Segments, now: datetime, settings: ComplianceSettings | None = None) -> TradingSession:
     """Return current trading session for the given segment.
 
     NSE hours (IST):
@@ -69,20 +69,22 @@ def get_trading_session(segment: Segments, now: datetime) -> TradingSession:
       - POST_MARKET: 15:30-15:40
       - CLOSED: else
 
-    MCX hours (IST):
-      - MORNING: 9:00-14:30
-      - EVENING: 17:00-23:30
-      - CLOSED: else
+    MCX hours (IST) - from ComplianceSettings:
+      - Uses MCX_TRADING_START_IST through MCX_TRADING_END_EVENING_IST
 
     Per SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013.
 
     Args:
         segment: NSE or MCX
         now: Current datetime (IST-aware or naive, treated as IST)
+        settings: ComplianceSettings instance for MCX-specific times
 
     Returns:
         TradingSession enum value
     """
+    if settings is None:
+        settings = ComplianceSettings()
+
     ist_now = now.replace(tzinfo=None)
     current_time = ist_now.time()
 
@@ -101,10 +103,11 @@ def get_trading_session(segment: Segments, now: datetime) -> TradingSession:
         return TradingSession.CLOSED
 
     elif segment == Segments.MCX:
-        morning_start = time(9, 0)
-        morning_end = time(14, 30)
-        evening_start = time(17, 0)
-        evening_end = time(23, 30)
+        # Use settings for MCX-specific session times
+        morning_start = settings.MCX_TRADING_START_IST
+        morning_end = settings.MCX_TRADING_END_MORNING_IST
+        evening_start = settings.MCX_TRADING_START_EVENING_IST
+        evening_end = settings.MCX_TRADING_END_EVENING_IST
 
         if morning_start <= current_time < morning_end:
             return TradingSession.REGULAR
@@ -130,10 +133,10 @@ def is_order_allowed(session: TradingSession) -> bool:
     return session == TradingSession.REGULAR
 
 
-def check_ops_threshold(current_ops: float, settings: ComplianceSettings | None = None) -> ComplianceLevel:
+def check_ops_threshold(current_ops: float, settings: ComplianceSettings) -> ComplianceLevel:
     """Check if current OPS exceeds SEBI registration threshold.
 
-    Per NSE/INVG/67858: >10 OPS requires exchange registration through broker.
+    Per NSE/INVG/67858: <=10 OPS = UNREGISTERED; >10 OPS = REGISTERED.
     We self-impose 3 OPS (well below threshold).
 
     Args:
@@ -144,9 +147,6 @@ def check_ops_threshold(current_ops: float, settings: ComplianceSettings | None 
         ComplianceLevel.UNREGISTERED if current_ops <= SEBI_OPS_REGISTRATION_THRESHOLD
         ComplianceLevel.REGISTERED otherwise (and log WARNING)
     """
-    if settings is None:
-        settings = ComplianceSettings()
-
     threshold = settings.SEBI_OPS_REGISTRATION_THRESHOLD
 
     if current_ops <= threshold:
@@ -163,24 +163,24 @@ def check_ops_threshold(current_ops: float, settings: ComplianceSettings | None 
         current_ops=current_ops,
         threshold=threshold,
         reference=SEBI_CIRCULAR_REFERENCES["ops_threshold"],
+        message="SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013: Exchange registration required",
     )
     return ComplianceLevel.REGISTERED
 
 
-def validate_symbol(symbol: str, segment: Segments, settings: ComplianceSettings | None = None) -> bool:
+def validate_symbol(symbol: str, segment: Segments, settings: ComplianceSettings) -> bool:
     """Validate symbol is in the allowed instruments list for the segment.
+
+    Per SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013.
 
     Args:
         symbol: Instrument symbol (e.g., "NIFTY", "GOLD")
         segment: Trading segment
-        settings: ComplianceSettings instance
+        settings: ComplianceSettings instance with ALLOWED_NSE_INSTRUMENTS or ALLOWED_MCX_INSTRUMENTS
 
     Returns:
-        True if symbol is allowed, False otherwise
+        True if symbol is allowed for the segment, False otherwise
     """
-    if settings is None:
-        settings = ComplianceSettings()
-
     if segment == Segments.NSE:
         return symbol.upper() in [s.upper() for s in settings.ALLOWED_NSE_INSTRUMENTS]
     elif segment == Segments.MCX:
