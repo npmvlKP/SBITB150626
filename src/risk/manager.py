@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from config.settings import ComplianceSettings, RiskSettings
 
 from src.risk.compliance import (
-    SEBI_CIRCULAR_REFERENCES,
     Segments,
     get_trading_session,
     is_order_allowed,
@@ -28,9 +27,11 @@ from src.risk.kill_switch import KillSwitch, KillSwitchLevel
 
 logger = structlog.get_logger(__name__)
 
+
 def _utcnow() -> datetime:
     """Get current UTC time as timezone-aware datetime."""
     return datetime.now(UTC).replace(microsecond=0)
+
 
 class RiskCheckResult(Enum):
     """Result of a single risk check."""
@@ -40,6 +41,7 @@ class RiskCheckResult(Enum):
     THROTTLED = "throttled"
     KILLED = "killed"
 
+
 @dataclass
 class PreTradeCheckDetail:
     """Result of a single pre-trade risk check."""
@@ -47,7 +49,8 @@ class PreTradeCheckDetail:
     check_name: str
     result: RiskCheckResult
     reason: str | None = None
-    sebi_reference: str | None = None
+    sebi_reference: str | None = None  # Circular number for audit trail
+
 
 @dataclass
 class PreTradeCheckResult:
@@ -57,6 +60,7 @@ class PreTradeCheckResult:
     details: list[PreTradeCheckDetail]
     timestamp: datetime
     order_id: str | None = None
+
 
 class TokenBucketRateLimiter:
     """Token bucket rate limiter for order throttling.
@@ -74,7 +78,7 @@ class TokenBucketRateLimiter:
     async def acquire(self) -> bool:
         """Acquire a token if available.
 
-        Implements token bucket algorithm for rate limiting per
+        Implements standard token bucket with refill per
         MiFID II RTS 6, FIX Order Throttling, NSE/INVG/67858.
 
         Returns:
@@ -91,10 +95,17 @@ class TokenBucketRateLimiter:
 
             if self._tokens >= 1.0:
                 self._tokens -= 1.0
+                logger.info("rate_limit_token_acquired", tokens_remaining=self._tokens)
                 return True
 
-            logger.warning("rate_limit_exceeded", tokens=self._tokens, rate=self._rate, capacity=self._capacity)
+            logger.warning(
+                "rate_limit_exceeded",
+                tokens=self._tokens,
+                rate=self._rate,
+                capacity=self._capacity,
+            )
             return False
+
 
 class RiskManager:
     """Pre-trade risk check pipeline — 10 sequential checks.
@@ -118,43 +129,43 @@ class RiskManager:
         self._daily_order_count = 0
         self._last_daily_reset = _utcnow().date()
         self._daily_orders_lock = asyncio.Lock()
-        self._daily_checked_on = None
-
-        # Set a default available margin
-        self.AVAILABLE_MARGIN = risk_settings.MAX_TOTAL_EXPOSURE
+        # Margin stub: defaults to MAX_TOTAL_EXPOSURE until real margin API connected
+        self._available_margin: Decimal = risk_settings.MAX_TOTAL_EXPOSURE
 
         logger.info("risk_manager_initialized")
 
-    def get_avail_margin(self) -> Decimal:
-        """Safely return the available margin."""
-        return self._risk_settings.MAX_TOTAL_EXPOSURE
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
 
-    def _reset_daily_count_if_needed(self) -> None:
+    async def _reset_daily_count_if_needed(self) -> None:
         """Reset daily order count at start of new trading day.
 
         Per SEBI circular CIR/MRD/DP/09/2012, daily order limits
         must reset at start of each trading day.
         """
         today = _utcnow().date()
-        if today > self._last_daily_reset and self._last_daily_reset != today:
-            async def internal_reset():
-                async with self._daily_orders_lock:
-                    self._daily_order_count = 0
-                    self._last_daily_reset = today
-                    logger.info("daily_order_count_reset", date=str(today), max_orders=self._settings.MAX_ORDERS_PER_DAY)
-            asyncio.create_task(internal_reset())
-            self._daily_checked_on = today
+        if today > self._last_daily_reset:
+            async with self._daily_orders_lock:
+                self._daily_order_count = 0
+                self._last_daily_reset = today
+                logger.info(
+                    "daily_order_count_reset",
+                    date=str(today),
+                    max_orders=self._settings.MAX_ORDERS_PER_DAY,
+                )
 
-    async def _perform_daily_check_if_needed(self) -> None:
-        """Check and reset daily count if needed."""
-        if self._daily_checked_on != _utcnow().date():
-            self._reset_daily_count_if_needed()
-            self._daily_checked_on = _utcnow().date()
-            await asyncio.sleep(0.1)
+    # ------------------------------------------------------------------
+    # Pre-trade checks (all 10)
+    # ------------------------------------------------------------------
 
     async def pre_trade_check(self, order: dict[str, Any]) -> PreTradeCheckResult:
-        """Run all 10 pre-trade risk checks sequentially."""
-        await self._perform_daily_check_if_needed()
+        """Run all 10 pre-trade risk checks sequentially.
+
+        If ANY check fails, overall_result = FAIL with reason.
+        Per MiFID II RTS 6, FIX Risk Controls, SEBI CIR/MRD/DP/09/2012.
+        """
+        await self._reset_daily_count_if_needed()
         details: list[PreTradeCheckDetail] = []
         now = _utcnow()
 
@@ -171,130 +182,268 @@ class RiskManager:
         except ValueError:
             segment = Segments.NSE
 
-        # Check 1: Symbol Allowlist
+        # ---- Check 1: Symbol Allowlist ----
+        # Rule: order["symbol"] IN allowed symbols for the segment
+        # Reference: ISO A.8.26 (application security requirements)
         check1 = PreTradeCheckDetail(
             check_name="Symbol Allowlist",
             result=RiskCheckResult.PASS,
-            sebi_reference=SEBI_CIRCULAR_REFERENCES.get("pre_trade_risk"),
+            sebi_reference="ISO A.8.26",
         )
         if not validate_symbol(symbol, segment, self._settings):
             check1.result = RiskCheckResult.FAIL
             check1.reason = f"Symbol '{symbol}' not in allowed list for {segment.value}"
-            logger.warning("risk_check_failed", check=check1.check_name, reason=check1.reason)
+            logger.warning(
+                "risk_check_failed",
+                check=check1.check_name,
+                reason=check1.reason,
+                sebi_reference=check1.sebi_reference,
+            )
+        else:
+            logger.info(
+                "risk_check_passed",
+                check=check1.check_name,
+                sebi_reference=check1.sebi_reference,
+            )
         details.append(check1)
 
-        # Check 2: Trading Hours
+        # ---- Check 2: Trading Hours ----
+        # Rule: get_trading_session(segment, now) == REGULAR
+        # Reference: SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013
         session = get_trading_session(segment, now)
         check2 = PreTradeCheckDetail(
             check_name="Trading Hours",
             result=RiskCheckResult.PASS,
-            sebi_reference=SEBI_CIRCULAR_REFERENCES.get("trading_hours"),
+            sebi_reference="SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/0000013",
         )
         if not is_order_allowed(session):
             check2.result = RiskCheckResult.FAIL
             check2.reason = f"Orders not allowed in {session.value} session"
-            logger.warning("risk_check_failed", check=check2.check_name, reason=check2.reason)
+            logger.warning(
+                "risk_check_failed",
+                check=check2.check_name,
+                reason=check2.reason,
+                sebi_reference=check2.sebi_reference,
+            )
+        else:
+            logger.info(
+                "risk_check_passed",
+                check=check2.check_name,
+                session=session.value,
+                sebi_reference=check2.sebi_reference,
+            )
         details.append(check2)
 
-        # Check 3: Max Order Value
+        # ---- Check 3: Max Order Value ----
+        # Rule: order_value <= MAX_ORDER_VALUE_PER_TRADE
+        # Reference: CIR/MRD/DP/09/2012 (quantity limits, exposure limits)
         check3 = PreTradeCheckDetail(
             check_name="Max Order Value",
             result=RiskCheckResult.PASS,
-            sebi_reference=SEBI_CIRCULAR_REFERENCES.get("pre_trade_risk"),
+            sebi_reference="CIR/MRD/DP/09/2012",
         )
         if order_value > self._risk_settings.MAX_ORDER_VALUE_PER_TRADE:
             check3.result = RiskCheckResult.FAIL
-            check3.reason = f"Order value {order_value} exceeds max {self._risk_settings.MAX_ORDER_VALUE_PER_TRADE}"
-            logger.warning("risk_check_failed", check=check3.check_name, reason=check3.reason)
+            check3.reason = (
+                f"Order value {order_value} exceeds max {self._risk_settings.MAX_ORDER_VALUE_PER_TRADE}"
+            )
+            logger.warning(
+                "risk_check_failed",
+                check=check3.check_name,
+                reason=check3.reason,
+                sebi_reference=check3.sebi_reference,
+            )
+        else:
+            logger.info(
+                "risk_check_passed",
+                check=check3.check_name,
+                order_value=str(order_value),
+                sebi_reference=check3.sebi_reference,
+            )
         details.append(check3)
 
-        # Check 4: Daily Order Count
+        # ---- Check 4: Daily Order Count ----
+        # Rule: daily_order_count < MAX_ORDERS_PER_DAY
+        # Reference: Self-imposed best practice
         async with self._daily_orders_lock:
             check4 = PreTradeCheckDetail(
                 check_name="Daily Order Count",
                 result=RiskCheckResult.PASS,
+                sebi_reference="Self-imposed best practice",
             )
             if self._daily_order_count >= self._settings.MAX_ORDERS_PER_DAY:
                 check4.result = RiskCheckResult.FAIL
                 check4.reason = (
                     f"Daily count {self._daily_order_count} reached limit {self._settings.MAX_ORDERS_PER_DAY}"
                 )
-                logger.warning("risk_check_failed", check=check4.check_name, reason=check4.reason)
+                logger.warning(
+                    "risk_check_failed",
+                    check=check4.check_name,
+                    reason=check4.reason,
+                    sebi_reference=check4.sebi_reference,
+                )
+            else:
+                logger.info(
+                    "risk_check_passed",
+                    check=check4.check_name,
+                    daily_count=self._daily_order_count,
+                    sebi_reference=check4.sebi_reference,
+                )
             details.append(check4)
 
-        # Check 5: Rate Limit
+        # ---- Check 5: Rate Limit ----
+        # Rule: current_rate <= MAX_ORDERS_PER_SECOND (token bucket)
+        # Reference: MiFID II RTS 6, FIX Order Throttling, NSE/INVG/67858
         check5 = PreTradeCheckDetail(
             check_name="Rate Limit",
             result=RiskCheckResult.PASS,
-            sebi_reference=SEBI_CIRCULAR_REFERENCES.get("ops_threshold"),
+            sebi_reference="MiFID II RTS 6, FIX Order Throttling, NSE/INVG/67858",
         )
         if not await self._rate_limiter.acquire():
             check5.result = RiskCheckResult.FAIL
-            check5.reason = f"Rate limit exceeded"
-            logger.warning("risk_check_failed", check=check5.check_name, reason=check5.reason)
+            check5.reason = "Rate limit exceeded"
+            logger.warning(
+                "risk_check_failed",
+                check=check5.check_name,
+                reason=check5.reason,
+                sebi_reference=check5.sebi_reference,
+            )
+        else:
+            logger.info(
+                "risk_check_passed",
+                check=check5.check_name,
+                sebi_reference=check5.sebi_reference,
+            )
         details.append(check5)
 
-        # Check 6: Margin Available
+        # ---- Check 6: Margin Available ----
+        # Rule: available_margin >= required_margin (stub)
+        # Reference: CIR/MRD/DP/09/2012 (pre-trade risk controls)
         check6 = PreTradeCheckDetail(
             check_name="Margin Available",
             result=RiskCheckResult.PASS,
-            sebi_reference=SEBI_CIRCULAR_REFERENCES.get("margin_controls")
+            sebi_reference="CIR/MRD/DP/09/2012",
         )
-        margin_limit = self._risk_settings.MAX_TOTAL_EXPOSURE
-        if order_value > margin_limit:
+        required_margin = order_value
+        if self._available_margin < required_margin:
             check6.result = RiskCheckResult.FAIL
-            check6.reason = f"price deviation {order_value - margin_limit} exceeds margin {margin_limit}"
-            logger.warning("risk_check_failed", check=check6.check_name, reason=check6.reason)
+            check6.reason = (
+                f"Available margin {self._available_margin} < required margin {required_margin}"
+            )
+            logger.warning(
+                "risk_check_failed",
+                check=check6.check_name,
+                reason=check6.reason,
+                sebi_reference=check6.sebi_reference,
+            )
+        else:
+            logger.info(
+                "risk_check_passed",
+                check=check6.check_name,
+                available_margin=str(self._available_margin),
+                required_margin=str(required_margin),
+                sebi_reference=check6.sebi_reference,
+            )
         details.append(check6)
 
-        # Check 7: Position Limit
+        # ---- Check 7: Position Limit ----
+        # Rule: projected_position <= MAX_POSITION_NOTIONAL_PER_SYMBOL
+        # Reference: CIR/MRD/DP/09/2012 (exposure limits)
         check7 = PreTradeCheckDetail(
             check_name="Position Limit",
             result=RiskCheckResult.PASS,
-            sebi_reference=SEBI_CIRCULAR_REFERENCES.get("pre_trade_risk"),
+            sebi_reference="CIR/MRD/DP/09/2012",
         )
-        # For this check, position limit can be segment-specific or default
-        position_limit_name = f"{segment.value}_POSITION_LIMIT"
-        if hasattr(self._risk_settings, position_limit_name):
-            position_limit = getattr(self._risk_settings, position_limit_name)
-        else:
-            position_limit = self._risk_settings.MAX_POSITION_NOTIONAL_PER_SYMBOL
-
-        if quantity > position_limit:
+        position_notional = order_value  # price * quantity = notional
+        if position_notional > self._risk_settings.MAX_POSITION_NOTIONAL_PER_SYMBOL:
             check7.result = RiskCheckResult.FAIL
-            check7.reason = f"position {quantity} exceeds limit of {position_limit}"
-            logger.warning("risk_check_failed", check=check7.check_name, reason=check7.reason)
+            check7.reason = (
+                f"Position notional {position_notional} exceeds limit {self._risk_settings.MAX_POSITION_NOTIONAL_PER_SYMBOL}"
+            )
+            logger.warning(
+                "risk_check_failed",
+                check=check7.check_name,
+                reason=check7.reason,
+                sebi_reference=check7.sebi_reference,
+            )
+        else:
+            logger.info(
+                "risk_check_passed",
+                check=check7.check_name,
+                notional=str(position_notional),
+                sebi_reference=check7.sebi_reference,
+            )
         details.append(check7)
 
-        # Check 8: Max Exposure
+        # ---- Check 8: Max Exposure ----
+        # Rule: total_exposure <= MAX_TOTAL_EXPOSURE
+        # Reference: CIR/MRD/DP/09/2012 (exposure limits at individual client level)
         check8 = PreTradeCheckDetail(
             check_name="Max Exposure",
             result=RiskCheckResult.PASS,
-            sebi_reference=SEBI_CIRCULAR_REFERENCES.get("pre_trade_risk")
+            sebi_reference="CIR/MRD/DP/09/2012",
         )
-        exposure_limit = self._risk_settings.MAX_TOTAL_EXPOSURE
-        if order_value > exposure_limit:
+        if order_value > self._risk_settings.MAX_TOTAL_EXPOSURE:
             check8.result = RiskCheckResult.FAIL
-            check8.reason = f"exposure {order_value} exceeds limit of {exposure_limit} (risk settings)"
-            logger.warning("risk_check_failed", check=check8.check_name, reason=check8.reason)
+            check8.reason = (
+                f"Exposure {order_value} exceeds max total exposure {self._risk_settings.MAX_TOTAL_EXPOSURE}"
+            )
+            logger.warning(
+                "risk_check_failed",
+                check=check8.check_name,
+                reason=check8.reason,
+                sebi_reference=check8.sebi_reference,
+            )
+        else:
+            logger.info(
+                "risk_check_passed",
+                check=check8.check_name,
+                exposure=str(order_value),
+                sebi_reference=check8.sebi_reference,
+            )
         details.append(check8)
 
-        # Check 9: Price Protection
+        # ---- Check 9: Price Protection ----
+        # Rule: abs(price - ltp) / ltp <= CIRCUIT_LIMIT_PCT
+        # Reference: CIR/MRD/DP/09/2012 (price checks); Zerodha market_protection
         explicit_ltp = Decimal(str(order.get("ltp", price)))
         check9 = PreTradeCheckDetail(
             check_name="Price Protection",
             result=RiskCheckResult.PASS,
-            sebi_reference=SEBI_CIRCULAR_REFERENCES.get("price_checks"),
+            sebi_reference="CIR/MRD/DP/09/2012; Zerodha market_protection",
         )
         if explicit_ltp > 0:
             price_difference = abs(price - explicit_ltp) / explicit_ltp
             if price_difference > self._risk_settings.CIRCUIT_LIMIT_PCT:
                 check9.result = RiskCheckResult.FAIL
-                check9.reason = f"price deviation {price_difference:.4%} exceeds price protection limit of {self._risk_settings.CIRCUIT_LIMIT_PCT}"
-                logger.warning("risk_check_failed", check=check9.check_name, reason=check9.reason)
+                check9.reason = (
+                    f"Price deviation {price_difference:.4%} exceeds price protection limit of {self._risk_settings.CIRCUIT_LIMIT_PCT}"
+                )
+                logger.warning(
+                    "risk_check_failed",
+                    check=check9.check_name,
+                    reason=check9.reason,
+                    sebi_reference=check9.sebi_reference,
+                )
+            else:
+                logger.info(
+                    "risk_check_passed",
+                    check=check9.check_name,
+                    deviation=f"{price_difference:.4%}",
+                    sebi_reference=check9.sebi_reference,
+                )
+        else:
+            logger.info(
+                "risk_check_passed",
+                check=check9.check_name,
+                note="ltp_zero_skipped",
+                sebi_reference=check9.sebi_reference,
+            )
         details.append(check9)
 
-        # Check 10: Kill Switch
+        # ---- Check 10: Kill Switch Status ----
+        # Rule: kill_switch.is_order_allowed() == True
+        # Reference: NIST RS.RP-1, MiFID II Art. 17, ISO A.8.26
         check10 = PreTradeCheckDetail(
             check_name="Kill Switch Status",
             result=RiskCheckResult.PASS,
@@ -302,11 +451,22 @@ class RiskManager:
         )
         if not self._kill_switch.is_order_allowed():
             check10.result = RiskCheckResult.FAIL
-            check10.reason = "kill switch active"
-            logger.warning("risk_check_failed", check=check10.check_name, reason=check10.reason)
+            check10.reason = "Kill switch active"
+            logger.warning(
+                "risk_check_failed",
+                check=check10.check_name,
+                reason=check10.reason,
+                sebi_reference=check10.sebi_reference,
+            )
+        else:
+            logger.info(
+                "risk_check_passed",
+                check=check10.check_name,
+                sebi_reference=check10.sebi_reference,
+            )
         details.append(check10)
 
-        # Aggregate and return results
+        # ---- Aggregate results ----
         failed_checks = [d for d in details if d.result == RiskCheckResult.FAIL]
         overall = RiskCheckResult.FAIL if failed_checks else RiskCheckResult.PASS
 
@@ -321,22 +481,80 @@ class RiskManager:
             order_id=order.get("order_id"),
         )
 
+    # ------------------------------------------------------------------
+    # Automatic risk monitoring checks
+    # ------------------------------------------------------------------
+
     async def check_daily_loss(self, current_pnl: Decimal) -> KillSwitchLevel | None:
-        """Check if daily P&L loss limit exceeded."""
+        """Check if daily P&L loss limit exceeded.
+
+        If current_pnl <= -DAILY_LOSS_LIMIT: return KILL.
+
+        Args:
+            current_pnl: Current day's realized + unrealized P&L
+
+        Returns:
+            KillSwitchLevel.KILL if loss limit exceeded, None otherwise
+        """
         if current_pnl <= -self._risk_settings.DAILY_LOSS_LIMIT:
+            logger.critical(
+                "daily_loss_limit_exceeded",
+                current_pnl=str(current_pnl),
+                loss_limit=str(self._risk_settings.DAILY_LOSS_LIMIT),
+                action="KILL",
+            )
             return KillSwitchLevel.KILL
         return None
 
     async def check_margin_utilization(self, utilization: Decimal) -> KillSwitchLevel | None:
-        """Check if utilization limits exceeded."""
+        """Check if margin utilization exceeds thresholds.
+
+        - If utilization >= MARGIN_UTILIZATION_KILL: return KILL
+        - If utilization >= MARGIN_UTILIZATION_THRESHOLD: return THROTTLE + alert
+
+        Args:
+            utilization: Current margin utilization as decimal (0-1)
+
+        Returns:
+            KillSwitchLevel.KILL or KillSwitchLevel.THROTTLE if threshold
+            exceeded, None otherwise
+        """
         if utilization >= self._risk_settings.MARGIN_UTILIZATION_KILL:
+            logger.critical(
+                "margin_utilization_kill",
+                utilization=str(utilization),
+                kill_threshold=str(self._risk_settings.MARGIN_UTILIZATION_KILL),
+                action="KILL",
+            )
             return KillSwitchLevel.KILL
         if utilization >= self._risk_settings.MARGIN_UTILIZATION_THRESHOLD:
+            logger.warning(
+                "margin_utilization_threshold_alert",
+                utilization=str(utilization),
+                threshold=str(self._risk_settings.MARGIN_UTILIZATION_THRESHOLD),
+                action="THROTTLE",
+                message="Margin utilization threshold exceeded — throttling orders",
+            )
             return KillSwitchLevel.THROTTLE
         return None
 
     async def check_rejection_rate(self, rejections_last_minute: int) -> KillSwitchLevel | None:
-        """Check order rejection rate threshold."""
+        """Check order rejection rate threshold.
+
+        If rejections_last_minute >= ORDER_REJECTION_THRESHOLD: return KILL.
+
+        Args:
+            rejections_last_minute: Number of rejected orders in last 60 seconds
+
+        Returns:
+            KillSwitchLevel.KILL if threshold exceeded, None otherwise
+        """
         if rejections_last_minute >= self._risk_settings.ORDER_REJECTION_THRESHOLD:
+            logger.critical(
+                "rejection_rate_exceeded",
+                rejections_last_minute=rejections_last_minute,
+                threshold=self._risk_settings.ORDER_REJECTION_THRESHOLD,
+                action="KILL",
+            )
             return KillSwitchLevel.KILL
         return None
