@@ -32,8 +32,5 @@ repos:
     hooks:
       - id: gitleaks
 
-  - repo: https://github.com/PyCQA/docformatter
-    rev: v1.7.5
-    hooks:
-      - id: docformatter
-        args: ['--in-place', '--style', 'google']
+  # NOTE: docformatter removed - requires python_venv which is not supported
+  # Use manual docformatter if needed: pip install docformatter && docformatter --in-place --style google
