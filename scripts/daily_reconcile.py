@@ -462,7 +462,9 @@ def print_reconciliation_report(report: ReconciliationReport) -> None:
     if report.is_compliant:
         console.print("[bold green]OK: COMPLIANT - Daily reconciliation passed[/bold green]")
     else:
-        console.print(f"[bold red]FAIL: NON-COMPLIANT - {len(report.mismatches)} issue(s) require investigation[/bold red]")
+        console.print(
+            f"[bold red]FAIL: NON-COMPLIANT - {len(report.mismatches)} issue(s) require investigation[/bold red]"
+        )
 
     # Phase notes
     for note in report.notes:

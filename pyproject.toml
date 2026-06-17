@@ -25,6 +25,11 @@ classifiers = [
 include_layout = ["ruff"]
 format = "black"
 
+dependencies = [
+    "setuptools>=61.0",
+    "wheel>=0.40.0",
+]
+
 [tool.setuptools.packages.find]
 exclude = [
     "deployment*",
@@ -36,8 +41,28 @@ exclude = [
 ]
 where = ["src"]
 
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+    "pytest-xdist>=3.5.0",
+    "pytest-timeout>=2.2.0",
+    "pytest-randomly>=3.15.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "bandit>=1.7.9",
+    "pip-audit>=2.7.0",
+    "safety>=3.0.0",
+    "pre-commit>=3.6.0",
+    "hypothesis>=6.100.0",
+]
+# NOTE: gitleaks, detect-secrets, and trivy are NOT Python packages
+# They are standalone binaries and must be installed separately:
+# - gitleaks: https://github.com/gitleaks/gitleaks/releases
+# - detect-secrets: pip install detect-secrets (standalone CLI)
+# - trivy: https://aquasecurity.github.io/trivy/latest/getting-started/installation/
 
 [tool.ruff]
 line-length = 120

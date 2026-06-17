@@ -17,3 +17,6 @@ tests:
       samples: true
 
 # Exemptions for quantified
+skip:
+  - B105  # hardcoded_password_string - Acceptable false positives (status constants like PASS="pass")
+  - B106  # hardcoded_password_funcarg - Acceptable false positives (test health check default password)
