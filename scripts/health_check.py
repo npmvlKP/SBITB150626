@@ -17,6 +17,7 @@ Per SEBI: 5+ year retention (we retain 7 years).
 from __future__ import annotations
 
 import asyncio
+import io
 import shutil
 import sys
 from dataclasses import dataclass
@@ -30,6 +31,18 @@ if TYPE_CHECKING:
     pass
 
 logger = structlog.get_logger(__name__)
+
+
+def _setup_windows_utf8() -> None:
+    """Set UTF-8 encoding for Windows console output.
+
+    This ensures special characters (check marks, warnings) display correctly
+    on Windows terminals that default to 'charmap' encoding.
+    """
+    if sys.platform == "win32":
+        # Reconfigure stdout/stderr to use UTF-8 encoding
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 
 class HealthStatus(Enum):
@@ -188,7 +201,7 @@ async def check_ntp_clock(max_offset_ms: int = 500) -> HealthCheckResult:
             name="NTP Clock",
             status=status,
             message=message,
-            details=f"Offset: {offset_ms:.1f}ms (max: ±{settings['MAX_NTP_OFFSET_MS']}ms)",
+            details=f"Offset: {offset_ms:.1f}ms (max: +/-{settings['MAX_NTP_OFFSET_MS']}ms)",
         )
     except ImportError:
         return HealthCheckResult(
@@ -347,31 +360,65 @@ async def run_health_check() -> int:
     else:
         console_available = True
 
-    # Run all checks concurrently
-    results = await asyncio.gather(
-        check_ntp_clock(max_offset_ms=500),
+    # Run sync checks (they execute immediately)
+    sync_results = [
         check_disk_space(min_free_gb=10),
         check_memory_usage(warn_threshold=80.0),
         check_kill_switch_state(),
+    ]
+
+    # Run async checks concurrently
+    async_results = await asyncio.gather(
+        check_ntp_clock(max_offset_ms=500),
         check_db_connectivity(),
         check_redis_connectivity(),
+        return_exceptions=True,  # Don't let one failure crash everything
     )
 
-    # Convert kill switch check result if returned as tuple
+    # Combine all results
     processed_results: list[HealthCheckResult] = []
-    for result in results:
-        if isinstance(result, tuple):
-            # Legacy tuple format conversion
-            ok, message = result
+
+    # Add sync results (already executed)
+    for result in sync_results:
+        if isinstance(result, HealthCheckResult):
+            processed_results.append(result)
+        else:
+            # Handle unexpected types
             processed_results.append(
                 HealthCheckResult(
                     name="Unknown",
-                    status=HealthStatus.HEALTHY if ok else HealthStatus.CRITICAL,
-                    message=message,
+                    status=HealthStatus.CRITICAL,
+                    message=f"Unexpected result type: {type(result).__name__}",
+                )
+            )
+
+    # Add async results (already awaited by gather)
+    for result in async_results:
+        if isinstance(result, HealthCheckResult):
+            processed_results.append(result)
+        elif isinstance(result, Exception):
+            # Log exception from gather but don't crash
+            logger.warning(
+                "health_check_async_exception",
+                error=str(result),
+                error_type=type(result).__name__,
+            )
+            processed_results.append(
+                HealthCheckResult(
+                    name="Async Check",
+                    status=HealthStatus.WARNING,
+                    message=f"Check failed: {type(result).__name__}",
+                    details=str(result),
                 )
             )
         else:
-            processed_results.append(result)
+            processed_results.append(
+                HealthCheckResult(
+                    name="Unknown",
+                    status=HealthStatus.CRITICAL,
+                    message=f"Unexpected result type: {type(result).__name__}",
+                )
+            )
 
     # Count critical issues
     critical_count = sum(1 for r in processed_results if r.is_critical())
@@ -402,9 +449,9 @@ def _print_rich_report(results: list[HealthCheckResult], critical_count: int) ->
     console = Console()
 
     console.print()
-    console.print("[bold blue]═══════════════════════════════════════════════════[/bold blue]")
-    console.print("[bold blue]          SBITB-150626 Health Check Report          [/bold blue]")
-    console.print("[bold blue]═══════════════════════════════════════════════════[/bold blue]")
+    console.print("[bold blue]============================================================[/bold blue]")
+    console.print("[bold blue]          SBITB-150626 Health Check Report                  [/bold blue]")
+    console.print("[bold blue]============================================================[/bold blue]")
     console.print(f"Timestamp : {_get_ist_timestamp()}")
     console.print(f"Checks    : {len(results)} total")
     console.print()
@@ -427,10 +474,10 @@ def _print_rich_report(results: list[HealthCheckResult], critical_count: int) ->
 
     # Summary
     if critical_count > 0:
-        console.print(f"[bold red]⚠ CRITICAL: {critical_count} issue(s) found — DO NOT TRADE[/bold red]")
+        console.print(f"[bold red]WARNING: {critical_count} critical issue(s) found - DO NOT TRADE[/bold red]")
         console.print("[yellow]Fix all critical issues before proceeding.[/yellow]")
     else:
-        console.print("[bold green]✓ All checks passed — System ready for trading[/bold green]")
+        console.print("[bold green]OK: All checks passed - System ready for trading[/bold green]")
 
     console.print()
 
@@ -450,7 +497,7 @@ def _print_console_report(results: list[HealthCheckResult], critical_count: int)
     print()
 
     for result in results:
-        icon = _get_status_icon(result.status)
+        icon = _get_status_icon_console(result.status)
         print(f"[{result.status.value.upper():9}] {icon} {result.name}")
         print(f"            {result.details or result.message}")
         print()
@@ -458,7 +505,7 @@ def _print_console_report(results: list[HealthCheckResult], critical_count: int)
     if critical_count > 0:
         print(f"WARNING: {critical_count} critical issue(s) found - DO NOT TRADE")
     else:
-        print("SUCCESS: All checks passed - System ready")
+        print("OK: All checks passed - System ready")
     print()
 
 
@@ -481,7 +528,7 @@ def _get_status_color(status: HealthStatus) -> str:
 
 
 def _get_status_icon(status: HealthStatus) -> str:
-    """Get icon for status.
+    """Get icon for status (for rich console output).
 
     Args:
         status: HealthStatus enum value
@@ -490,10 +537,28 @@ def _get_status_icon(status: HealthStatus) -> str:
         Status icon character
     """
     icons = {
-        HealthStatus.HEALTHY: "✓",
-        HealthStatus.WARNING: "⚠",
-        HealthStatus.CRITICAL: "✗",
-        HealthStatus.SKIPPED: "○",
+        HealthStatus.HEALTHY: "[OK]",
+        HealthStatus.WARNING: "[WARN]",
+        HealthStatus.CRITICAL: "[FAIL]",
+        HealthStatus.SKIPPED: "[SKIP]",
+    }
+    return icons.get(status, "?")
+
+
+def _get_status_icon_console(status: HealthStatus) -> str:
+    """Get ASCII icon for status (for plain console output on Windows).
+
+    Args:
+        status: HealthStatus enum value
+
+    Returns:
+        ASCII status icon
+    """
+    icons = {
+        HealthStatus.HEALTHY: "[OK]",
+        HealthStatus.WARNING: "[WARN]",
+        HealthStatus.CRITICAL: "[FAIL]",
+        HealthStatus.SKIPPED: "[SKIP]",
     }
     return icons.get(status, "?")
 
@@ -516,4 +581,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Setup UTF-8 encoding on Windows BEFORE any other imports/output
+    _setup_windows_utf8()
     sys.exit(main())

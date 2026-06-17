@@ -1,4 +1,4 @@
-"""End-of-day reconciliation — compare broker order book with local audit
+"""End-of-day reconciliation - compare broker order book with local audit
 trail.
 
 Per ISO A.8.15: daily reconciliation is a compliance requirement.
@@ -10,7 +10,7 @@ Full broker API integration will be implemented in Phase 3.
 
 Note:
     Zerodha specifics:
-    - Order book is transient (daily) — must reconcile before market close
+    - Order book is transient (daily) - must reconcile before market close
     - Positions reset for intraday accounts
     - Kite API: /orders, /triggers for bracket orders (disabled since 2021)
     - Daily access token refresh required at 6:00 AM IST
@@ -19,6 +19,7 @@ Note:
 from __future__ import annotations
 
 import asyncio
+import io
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -30,7 +31,19 @@ import structlog
 if TYPE_CHECKING:
     pass
 
-logger = structlog.get_logger(__name__)
+audit_logger = structlog.get_logger(__name__)
+
+
+def _setup_windows_utf8() -> None:
+    """Set UTF-8 encoding for Windows console output.
+
+    This ensures special characters (check marks, warnings) display correctly
+    on Windows terminals that default to 'charmap' encoding.
+    """
+    if sys.platform == "win32":
+        # Reconfigure stdout/stderr to use UTF-8 encoding
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 
 class ReconciliationStatus(Enum):
@@ -188,6 +201,7 @@ async def fetch_local_orders(start: datetime, end: datetime) -> list[OrderRecord
         List of OrderRecord from local audit trail
     """
     try:
+        from config.settings import AuditSettings
         from src.risk.audit import (
             ORDER_CANCELLED,
             ORDER_FILLED,
@@ -195,14 +209,13 @@ async def fetch_local_orders(start: datetime, end: datetime) -> list[OrderRecord
             ORDER_PLACED,
             ORDER_REJECTED,
             AuditLogger,
-            AuditSettings,
         )
 
         settings = AuditSettings()
-        logger = AuditLogger(settings)
+        audit_logger_instance = AuditLogger(settings)
 
         # Query all order-related events for the period
-        events = await logger.query_events(start=start, end=end, limit=10000)
+        events = await audit_logger_instance.query_events(start=start, end=end, limit=10000)
 
         orders: dict[str, OrderRecord] = {}
 
@@ -238,7 +251,7 @@ async def fetch_local_orders(start: datetime, end: datetime) -> list[OrderRecord
         return list(orders.values())
 
     except Exception as e:  # noqa: BLE001
-        logger.error("failed_to_fetch_local_orders", error=str(e))
+        audit_logger.error("failed_to_fetch_local_orders", error=str(e))
         return []
 
 
@@ -340,7 +353,7 @@ async def run_daily_reconciliation() -> ReconciliationReport:
     Returns:
         ReconciliationReport with all findings
     """
-    logger.info("reconciliation_started", phase="phase_0_skeleton")
+    audit_logger.info("reconciliation_started", phase="phase_0_skeleton")
 
     period_start, period_end = _get_trading_day()
 
@@ -352,9 +365,9 @@ async def run_daily_reconciliation() -> ReconciliationReport:
         broker_orders = await fetch_broker_orders()
     except NotImplementedError:
         # Phase 0: Log and use empty broker orders for local-only check
-        logger.warning(
+        audit_logger.warning(
             "reconciliation_broker_not_available",
-            message="Reconciliation not yet implemented — broker API integration required (Phase 3)",
+            message="Reconciliation not yet implemented - broker API integration required (Phase 3)",
         )
         broker_orders = []
 
@@ -368,7 +381,8 @@ async def run_daily_reconciliation() -> ReconciliationReport:
 
     # Log reconciliation event to audit trail
     try:
-        from src.risk.audit import DAILY_RECONCILIATION, AuditLogger, AuditSettings
+        from config.settings import AuditSettings
+        from src.risk.audit import DAILY_RECONCILIATION, AuditLogger
 
         settings = AuditSettings()
         audit = AuditLogger(settings)
@@ -385,7 +399,7 @@ async def run_daily_reconciliation() -> ReconciliationReport:
             },
         )
     except Exception as e:  # noqa: BLE001
-        logger.warning("failed_to_log_reconciliation_event", error=str(e))
+        audit_logger.warning("failed_to_log_reconciliation_event", error=str(e))
 
     return report
 
@@ -406,9 +420,9 @@ def print_reconciliation_report(report: ReconciliationReport) -> None:
     console = Console()
 
     console.print()
-    console.print("[bold blue]═══════════════════════════════════════════════════[/bold blue]")
-    console.print("[bold blue]          Daily Reconciliation Report               [/bold blue]")
-    console.print("[bold blue]═══════════════════════════════════════════════════[/bold blue]")
+    console.print("[bold blue]============================================================[/bold blue]")
+    console.print("[bold blue]          Daily Reconciliation Report                        [/bold blue]")
+    console.print("[bold blue]============================================================[/bold blue]")
     console.print(f"Report ID  : {report.report_id}")
     console.print(f"Timestamp  : {report.timestamp}")
     console.print(f"Period     : {report.period_start} to {report.period_end}")
@@ -441,14 +455,14 @@ def print_reconciliation_report(report: ReconciliationReport) -> None:
         console.print(table)
         console.print()
     else:
-        console.print("[bold green]✓ No discrepancies found[/bold green]")
+        console.print("[bold green]OK: No discrepancies found[/bold green]")
         console.print()
 
     # Compliance status
     if report.is_compliant:
-        console.print("[bold green]✓ COMPLIANT - Daily reconciliation passed[/bold green]")
+        console.print("[bold green]OK: COMPLIANT - Daily reconciliation passed[/bold green]")
     else:
-        console.print(f"[bold red]✗ NON-COMPLIANT - {len(report.mismatches)} issue(s) require investigation[/bold red]")
+        console.print(f"[bold red]FAIL: NON-COMPLIANT - {len(report.mismatches)} issue(s) require investigation[/bold red]")
 
     # Phase notes
     for note in report.notes:
@@ -487,9 +501,9 @@ def _print_reconciliation_report_console(report: ReconciliationReport) -> None:
         print("No discrepancies found.\n")
 
     if report.is_compliant:
-        print("COMPLIANT - Daily reconciliation passed")
+        print("OK: COMPLIANT - Daily reconciliation passed")
     else:
-        print(f"NON-COMPLIANT - {len(report.mismatches)} issue(s) require investigation")
+        print(f"FAIL: NON-COMPLIANT - {len(report.mismatches)} issue(s) require investigation")
 
     for note in report.notes:
         print(f"Note: {note}")
@@ -507,24 +521,26 @@ async def main() -> int:
         print_reconciliation_report(report)
 
         if not report.is_compliant:
-            logger.error(
+            audit_logger.error(
                 "reconciliation_non_compliant",
                 report_id=report.report_id,
                 issues=len(report.mismatches),
             )
             return 1
 
-        logger.info("reconciliation_completed", report_id=report.report_id)
+        audit_logger.info("reconciliation_completed", report_id=report.report_id)
         return 0
 
     except KeyboardInterrupt:
         print("\nReconciliation interrupted by user.")
         return 1
     except Exception as e:
-        logger.critical("reconciliation_unexpected_error", error=str(e), error_type=type(e).__name__)
+        audit_logger.critical("reconciliation_unexpected_error", error=str(e), error_type=type(e).__name__)
         print(f"\nFATAL: Reconciliation failed unexpectedly: {e}")
         return 1
 
 
 if __name__ == "__main__":
+    # Setup UTF-8 encoding on Windows BEFORE any other imports/output
+    _setup_windows_utf8()
     sys.exit(asyncio.run(main()))
