@@ -12,7 +12,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -25,7 +25,7 @@ logger = structlog.get_logger(__name__)
 
 def _utcnow() -> datetime:
     """Get current UTC time as timezone-aware datetime."""
-    return datetime.now(UTC).replace(microsecond=0)
+    return datetime.now(timezone.utc).replace(microsecond=0)
 
 
 # Event type constants
@@ -90,6 +90,7 @@ class NTPClock:
     def __init__(self, settings: AuditSettings) -> None:
         self._settings = settings
         self._last_offset_ms: float = 0.0
+        self._ntplib_available: bool = True
 
     async def get_time(self) -> datetime:
         """Return system time with NTP offset applied.
@@ -126,6 +127,11 @@ class NTPClock:
 
             return self._last_offset_ms
 
+        except ImportError:
+            logger.debug("ntp_clock_library_not_available", reason="ntplib not installed")
+            self._ntplib_available = False
+            self._last_offset_ms = 0.0
+            return 0.0
         except Exception as e:
             logger.debug("ntp_clock_unavailable", error=str(e))
             self._last_offset_ms = 0.0

@@ -12,6 +12,13 @@ if TYPE_CHECKING:
     import pandas as pd
 
 
+# Stub for pandas DataFrame to avoid import issues in non-strict mode
+class DataFrame:
+    """Stub for pandas DataFrame."""
+
+    pass
+
+
 class MarketDataProvider(ABC):
     """Abstract market data provider interface.
 

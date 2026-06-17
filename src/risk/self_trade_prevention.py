@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from src.risk.audit import AuditLogger
@@ -40,7 +40,7 @@ class SelfTradePrevention:
         self._audit = audit_logger
         self._open_orders: dict[str, dict] = {}  # order_id -> order_dict
 
-    def check_order(self, new_order: dict) -> SelfTradeCheckResult:
+    def check_order(self, new_order: dict[str, Any]) -> SelfTradeCheckResult:
         """Check if new_order would self-trade against existing open orders.
 
         Matching criteria:
@@ -52,13 +52,21 @@ class SelfTradePrevention:
         Log result via audit_logger.
         """
         symbol = new_order.get("tradingsymbol")
-        transaction_type = new_order.get("transaction_type").upper()
+        transaction_type_raw = new_order.get("transaction_type")
+        if transaction_type_raw is None:
+            transaction_type = "UNKNOWN"
+        else:
+            transaction_type = transaction_type_raw.upper()
         price = Decimal(str(new_order.get("price", "0")))
 
         # Iterate through all open orders
         for order_id, existing_order in self._open_orders.items():
             existing_symbol = existing_order.get("tradingsymbol")
-            existing_side = existing_order.get("transaction_type").upper()
+            existing_side_raw = existing_order.get("transaction_type")
+            if existing_side_raw is None:
+                existing_side = "UNKNOWN"
+            else:
+                existing_side = existing_side_raw.upper()
             existing_price = Decimal(str(existing_order.get("price", "0")))
 
             # Check if same symbol and opposite sides
@@ -81,7 +89,12 @@ class SelfTradePrevention:
                         reason=f"New SELL price {price} crosses existing BUY price {existing_price}",
                     )
 
-        return SelfTradeCheckResult(is_self_trade=False)
+        return SelfTradeCheckResult(
+            is_self_trade=False,
+            matching_order_id=None,
+            matching_side=None,
+            reason="No matching open orders found",
+        )
 
     def register_order(self, order_id: str, order: dict) -> None:
         """Add order to tracking after it's placed."""

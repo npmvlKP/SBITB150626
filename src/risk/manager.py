@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -30,7 +30,7 @@ logger = structlog.get_logger(__name__)
 
 def _utcnow() -> datetime:
     """Get current UTC time as timezone-aware datetime."""
-    return datetime.now(UTC).replace(microsecond=0)
+    return datetime.now(timezone.utc).replace(microsecond=0)
 
 
 class RiskCheckResult(Enum):

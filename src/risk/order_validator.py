@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from src.brokers.kite_client import ALLOWED_SEGMENTS
 
@@ -24,7 +24,7 @@ class OrderValidationResult:
     is_valid: bool
     errors: list[str]
     warnings: list[str]
-    modified_order: dict | None  # None if invalid, sanitized order if valid with warnings
+    modified_order: dict[str, Any] | None  # None if invalid, sanitized order if valid with warnings
 
 
 ORDER_MODIFICATION_LIMIT = 25  # Zerodha API limit: 25 mods per order
@@ -64,7 +64,7 @@ class OrderValidator:
         Returns OrderValidationResult with errors for missing/invalid fields.
         """
         errors = []
-        warnings = []
+        warnings: list[str] = []
 
         exchange = order.get("exchange", "")
         if not exchange:
@@ -143,7 +143,11 @@ class OrderValidator:
 
         # quantity multiple of lot size
         if not errors and seg in ["NFO", "MCX"] and exchange:
-            result = self.validate_lot_size(tradingsymbol, quantity)
+            try:
+                qty = int(quantity) if quantity is not None else 0
+            except (ValueError, TypeError):
+                qty = 0
+            result = self.validate_lot_size(tradingsymbol, qty)
             if not result.is_valid:
                 errors.append(result.errors[0])
 

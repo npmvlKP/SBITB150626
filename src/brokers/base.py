@@ -27,7 +27,7 @@ class BrokerInterface(ABC):
         pass
 
     @abstractmethod
-    async def place_order(self, params: dict) -> dict:
+    async def place_order(self, params: dict[str, Any]) -> dict[str, Any]:
         """Place a new order with the broker.
 
         Args:
@@ -39,7 +39,7 @@ class BrokerInterface(ABC):
         pass
 
     @abstractmethod
-    async def cancel_order(self, order_id: str) -> dict:
+    async def cancel_order(self, order_id: str) -> dict[str, Any]:
         """Cancel an existing order.
 
         Args:

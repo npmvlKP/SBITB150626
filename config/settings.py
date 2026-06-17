@@ -116,6 +116,49 @@ class AuditSettings(BaseSettings):
     MAX_NTP_OFFSET_MS: int = Field(default=500, ge=100)
 
 
+class PositionLimitSettings(BaseSettings):
+    """Position limit settings — per SEBI/EXCHANGE requirements."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="POSITION_",
+        env_file=".env",
+        extra="ignore",
+    )
+
+    NIFTY_LOT_SIZE: int = Field(default=25, ge=1)
+    BANKNIFY_LOT_SIZE: int = Field(default=15, ge=1)
+    MAX_LOT_SIZE_PER_ORDER: int = Field(default=100, ge=1)
+    MAX_POSITIONS_PER_SYMBOL: int = Field(default=10, ge=1)
+
+
+class QuantitativeRiskSettings(BaseSettings):
+    """Quantitative risk engine settings — VaR/GARCH/EVT parameters."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="QUANT_",
+        env_file=".env",
+        extra="ignore",
+    )
+
+    VAR_CONFIDENCE_LEVEL: float = Field(default=0.99, ge=0.9, le=0.999)
+    VAR_LOOKBACK_DAYS: int = Field(default=252, ge=30)
+    VAR_HOLDING_PERIOD_DAYS: int = Field(default=1, ge=1)
+    VAR_MAX_PORTFOLIO_VAR: Decimal = Field(default=Decimal("100000"), ge=Decimal("0"))
+    VAR_MAX_PORTFOLIO_CVAR: Decimal = Field(default=Decimal("150000"), ge=Decimal("0"))
+    VAR_ENGINE_TIMEOUT_SECONDS: float = Field(default=30.0, ge=1)
+    VAR_ENGINE_FALLBACK_ON_TIMEOUT: bool = True
+    VAR_METHOD: str = Field(default="garch")
+    GARCH_MODEL_TYPE: str = Field(default="GARCH")
+    GARCH_P: int = Field(default=1, ge=1, le=3)
+    GARCH_Q: int = Field(default=1, ge=1, le=3)
+    GARCH_DISTRIBUTION: str = Field(default="normal")
+    GARCH_REFIT_FREQUENCY_DAYS: int = Field(default=7, ge=1)
+    EVT_THRESHOLD_PERCENTILE: float = Field(default=0.95, ge=0.8, le=0.99)
+    EVT_MIN_TAIL_SAMPLES: int = Field(default=30, ge=10)
+    STRESS_SCENARIO_PCT_DROP: list[float] = Field(default_factory=lambda: [-0.05, -0.10, -0.15, -0.20, -0.25, -0.30])
+    MONTE_CARLO_SIMULATIONS: int = Field(default=10000, ge=1000)
+
+
 class BrokerSettings(BaseSettings):
     """Per-broker configurations — Zerodha primary, Angel One fallback."""
 

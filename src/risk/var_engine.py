@@ -9,7 +9,7 @@ Reference: McNeil/Frey/Embrechts "Quantitative Risk Management", Ch.2-5
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -27,24 +27,12 @@ if TYPE_CHECKING:
         QuantitativeRiskSettings,
         RiskSettings,
     )
-
-
-class AuditLogger:  # Stub - replace with actual implementation
-    """Placeholder for audit logging functionality."""
-
-    def info(self, event: str, **kwargs: Any) -> None:
-        pass
-
-    def warning(self, event: str, **kwargs: Any) -> None:
-        pass
-
-    def error(self, event: str, **kwargs: Any) -> None:
-        pass
+    from src.risk.audit import AuditLogger
 
 
 def _utcnow() -> datetime:
     """Get current UTC time as timezone-aware datetime."""
-    return datetime.now(UTC).replace(microsecond=0)
+    return datetime.now(timezone.utc).replace(microsecond=0)
 
 
 class VarMethod(Enum):
@@ -203,7 +191,7 @@ class HistoricalVarEngine:
 
     def _time_scale(self, value: float, holding_period: int) -> float:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""
-        return value * np.sqrt(holding_period)
+        return float(value * np.sqrt(holding_period))
 
 
 class ParametricVarEngine:
@@ -312,7 +300,7 @@ class ParametricVarEngine:
 
     def _time_scale(self, value: float, holding_period: int) -> float:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""
-        return value * np.sqrt(holding_period)
+        return float(value) * float(np.sqrt(holding_period))
 
 
 class MonteCarloVarEngine:
@@ -611,11 +599,17 @@ class GarchVarEngine:
 
     def _cvar_closed_form_garch(self, mu: float, sigma: float, z_alpha: float) -> float:
         """CVaR closed-form for GARCH-adjusted parametric VaR."""
-        return mu - sigma * scipy.stats.norm.pdf(z_alpha) / scipy.stats.norm.cdf(z_alpha) if sigma != 0 else mu
+        pdf_val = float(scipy.stats.norm.pdf(z_alpha))
+        cdf_val = float(scipy.stats.norm.cdf(z_alpha))
+        return float(mu - sigma * pdf_val / cdf_val) if sigma != 0 else float(mu)
 
     def _time_scale(self, value: float, holding_period: int) -> float:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""
-        return value * np.sqrt(holding_period)
+        return float(value) * float(np.sqrt(holding_period))
+
+    def _time_scale(self, value: float, holding_period: int) -> float:
+        """Square-root-of-time scaling: value * sqrt(holding_period)."""
+        return float(value) * float(np.sqrt(holding_period))
 
     def _diagnose_fit(self, result: Any) -> dict:
         """Compute ACF/PACF of standardized residuals (McNeil Ch.4.5).
@@ -791,17 +785,17 @@ class StressTestEngine:
         6. Return StressTestResult
         """
         results = []
-        portfolio_value = float(portfolio_value)
-        margin_utilization = float(margin_utilization)
+        portfolio_value_float: float = float(portfolio_value)
+        margin_utilization_float: float = float(margin_utilization)
 
         for pct_drop in self._quant_settings.STRESS_SCENARIO_PCT_DROP:
             scenario_name = f"{float(pct_drop) * -100:.0f}% drop"
-            pct_drop_float = float(pct_drop)
-            portfolio_loss = Decimal(str(portfolio_value * abs(pct_drop_float)))
+            pct_drop_float: float = float(pct_drop)
+            portfolio_loss: Decimal = Decimal(str(portfolio_value_float * abs(pct_drop_float)))
 
             # Projected margin utilization after scenario (simplified)
-            margin_impact_ratio = 1.0 - pct_drop_float  # Assume linear impact
-            projected_margin_utilization = Decimal(str(margin_utilization * margin_impact_ratio))
+            margin_impact_ratio: float = 1.0 - pct_drop_float  # Assume linear impact
+            projected_margin_utilization: Decimal = Decimal(str(margin_utilization_float * margin_impact_ratio))
 
             # Check if would trigger kill switch
             would_trigger_kill_switch = projected_margin_utilization >= self._risk_settings.MARGIN_UTILIZATION_KILL
@@ -816,7 +810,7 @@ class StressTestEngine:
             results.append(
                 StressTestResult(
                     scenario_name=scenario_name,
-                    pct_drop=pct_drop,
+                    pct_drop=Decimal(str(pct_drop)),
                     portfolio_loss=portfolio_loss,
                     projected_margin_utilization=projected_margin_utilization,
                     would_trigger_kill_switch=would_trigger_kill_switch,
@@ -840,12 +834,13 @@ class StressTestEngine:
         If ratio > CORRELATION_BREAK_THRESHOLD: flag as correlation break risk.
         """
         # Simplified implementation: correlation break scenario
-        portfolio_value = sum(pos["value"] for pos in current_positions)
+        portfolio_value_float: float = sum(pos["value"] for pos in current_positions)
+        pct_drop_decimal = Decimal("-0.30")
 
         return StressTestResult(
             scenario_name="correlation_break",
-            pct_drop=Decimal("-0.30"),  # 30% drop scenario
-            portfolio_loss=Decimal(str(float(portfolio_value) * 0.30)),
+            pct_drop=pct_drop_decimal,
+            portfolio_loss=Decimal(str(portfolio_value_float * 0.30)),
             projected_margin_utilization=Decimal("1.0"),  # Assume margin wiped out
             would_trigger_kill_switch=True,
             would_breach_var_limit=True,

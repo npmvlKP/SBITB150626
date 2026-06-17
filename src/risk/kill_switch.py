@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -30,7 +30,7 @@ logger = structlog.get_logger(__name__)
 
 def _utcnow() -> datetime:
     """Get current UTC time as timezone-aware datetime."""
-    return datetime.now(UTC).replace(microsecond=0)
+    return datetime.now(timezone.utc).replace(microsecond=0)
 
 
 class KillSwitchLevel(Enum):
@@ -323,7 +323,9 @@ def register_keyboard_kill_switch(ks: KillSwitch) -> None:
         Must be called from main thread.
     """
     try:
-        from pynput import keyboard
+        # Import pynput with type stub handling
+        import pynput
+        import pynput.keyboard
 
         def on_activate_kill() -> None:
             """Callback on Ctrl+Shift+K detection."""
@@ -336,7 +338,7 @@ def register_keyboard_kill_switch(ks: KillSwitch) -> None:
                 )
             )
 
-        with keyboard.GlobalHotKeys({"<ctrl>+<shift>+k": on_activate_kill}) as h:
+        with pynput.keyboard.GlobalHotKeys({"<ctrl>+<shift>+k": on_activate_kill}) as h:
             logger.info("keyboard_kill_switch_registered", hotkey="Ctrl+Shift+K")
             h.join()
 
