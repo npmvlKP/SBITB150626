@@ -36,8 +36,8 @@ def _utcnow() -> datetime:
 class RiskCheckResult(Enum):
     """Result of a single risk check."""
 
-    PASS = "pass"
-    FAIL = "fail"
+    PASS = "pass"  # nosec B105 - Enum value, not a password
+    FAIL = "fail"  # nosec B105 - Enum value, not a password
     THROTTLED = "throttled"
     KILLED = "killed"
 

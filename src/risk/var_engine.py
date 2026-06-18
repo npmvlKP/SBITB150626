@@ -289,14 +289,13 @@ class ParametricVarEngine:
         if df is None:
             # Normal distribution
             z_alpha = -scipy.stats.norm.ppf(1 - alpha)
-            return mu - sigma * scipy.stats.norm.pdf(z_alpha) / (1 - alpha)
+            return float(mu - sigma * scipy.stats.norm.pdf(z_alpha) / (1 - alpha))
         else:
             # t-distribution
             z_alpha = -scipy.stats.t.ppf(1 - alpha, df)
             # Approximate CVaR for t-distribution
-            return mu - sigma * scipy.stats.t.expect(lambda x: x, args=(df,), lb=np.inf if z_alpha > 0 else z_alpha) / (
-                1 - alpha
-            )
+            expect_val = float(scipy.stats.t.expect(lambda x: x, args=(df,), lb=np.inf if z_alpha > 0 else z_alpha))
+            return float(mu - sigma * expect_val / (1 - alpha))
 
     def _time_scale(self, value: float, holding_period: int) -> float:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""
@@ -385,7 +384,7 @@ class MonteCarloVarEngine:
 
     def _time_scale(self, value: float, holding_period: int) -> float:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""
-        return value * np.sqrt(holding_period)
+        return float(value) * float(np.sqrt(holding_period))
 
 
 class GarchVarEngine:
@@ -602,10 +601,6 @@ class GarchVarEngine:
         pdf_val = float(scipy.stats.norm.pdf(z_alpha))
         cdf_val = float(scipy.stats.norm.cdf(z_alpha))
         return float(mu - sigma * pdf_val / cdf_val) if sigma != 0 else float(mu)
-
-    def _time_scale(self, value: float, holding_period: int) -> float:
-        """Square-root-of-time scaling: value * sqrt(holding_period)."""
-        return float(value) * float(np.sqrt(holding_period))
 
     def _time_scale(self, value: float, holding_period: int) -> float:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""

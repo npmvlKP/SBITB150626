@@ -7,12 +7,13 @@ name = "SBITB150626"
 version = "0.1.0"
 description = "Options Trading and Risk Management System"
 authors = [
-    {name = "nvmvl-KP", email = "example@example.com"},
+    {name = "npmvl-KP", email = "example@example.com"},
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
@@ -25,10 +26,92 @@ classifiers = [
 include_layout = ["ruff"]
 format = "black"
 
+# ============================================================
+# FIXED DEPENDENCIES (per /sbitb150626 strict protocol)
+# ============================================================
+# Fixes applied:
+# 1. vollib: Use 'vollib>=1.0.11' (canonical package, py_vollib is deprecated)
+# 2. newspaper: Use 'newspaper4k>=0.9.2' (NOT newspaper3k - deprecated since 2020)
+# 3. psycopg: Use 'psycopg[binary]>=3.1' (NOT psycopg2-binary - version conflict)
+# 4. TA-Lib: Already installed as 0.6.8 with cp312 wheel
+# 5. All wheels use cp312 (Python 3.12.7)
+# ============================================================
+
 dependencies = [
+    # Build tools
     "setuptools>=61.0",
     "wheel>=0.40.0",
+
+    # Core data processing
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "polars>=1.0.0",
+
+    # Technical Analysis
+    "TA-Lib>=0.6.8",  # Windows cp312 wheel already installed
+    "ta>=0.11.0",     # Pure Python backup indicators
+
+    # Options Greeks (fixed: vollib is canonical, py_vollib is deprecated)
+    "vollib>=1.0.11",  # Canonical package - import as vollib.*
+    "QuantLib>=1.36",  # Indian calendar, day-count conventions
+
+    # Data sources
+    "kiteconnect>=4.2.0",   # Zerodha API
+    "jugaad-data>=0.20.0",  # NSE F&O bhavcopy
+
+    # Database (fixed: psycopg3 async, NOT psycopg2-binary)
+    "psycopg[binary]>=3.1",  # Async PostgreSQL driver (already installed 3.3.4)
+
+    # Cache/Message Queue
+    "redis>=5.0.0",
+
+    # News/Sentiment (fixed: newspaper4k, NOT newspaper3k - deprecated)
+    "newspaper4k>=0.9.2",  # Active fork of newspaper3k
+    "feedparser>=6.0.0",
+    "httpx>=0.27.0",
+
+    # Logging
+    "structlog>=24.0.0",
+
+    # Time handling
+    "python-dateutil>=2.8.0",
+    "pytz>=2024.1",
+
+    # Utilities
+    "orjson>=3.10.0",  # Fast JSON
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+    "pytest-xdist>=3.5.0",
+    "pytest-timeout>=2.2.0",
+    "pytest-randomly>=3.15.0",
+    "hypothesis>=6.100.0",
+
+    # Code Quality
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "bandit>=1.7.9",
+
+    # Security scanning
+    "pip-audit>=2.7.0",
+    "safety>=3.0.0",
+
+    # Pre-commit hooks
+    "pre-commit>=3.6.0",
+]
+
+# NOTE: The following are standalone binaries, NOT Python packages:
+# - gitleaks: https://github.com/gitleaks/gitleaks/releases
+# - detect-secrets: pip install detect-secrets (standalone CLI)
+# - trivy: https://aquasecurity.github.io/trivy/latest/getting-started/installation/
 
 [tool.setuptools.packages.find]
 exclude = [
@@ -41,32 +124,9 @@ exclude = [
 ]
 where = ["src"]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-cov>=4.1.0",
-    "pytest-mock>=3.12.0",
-    "pytest-xdist>=3.5.0",
-    "pytest-timeout>=2.2.0",
-    "pytest-randomly>=3.15.0",
-    "ruff>=0.5.0",
-    "mypy>=1.10.0",
-    "bandit>=1.7.9",
-    "pip-audit>=2.7.0",
-    "safety>=3.0.0",
-    "pre-commit>=3.6.0",
-    "hypothesis>=6.100.0",
-]
-# NOTE: gitleaks, detect-secrets, and trivy are NOT Python packages
-# They are standalone binaries and must be installed separately:
-# - gitleaks: https://github.com/gitleaks/gitleaks/releases
-# - detect-secrets: pip install detect-secrets (standalone CLI)
-# - trivy: https://aquasecurity.github.io/trivy/latest/getting-started/installation/
-
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = [
@@ -103,8 +163,9 @@ indent-style = "space"
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
+
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 strict = false
 ignore_missing_imports = true
 warn_return_any = true
@@ -118,6 +179,20 @@ check_untyped_defs = true
 disallow_untyped_decorators = false
 warn_no_return = true
 follow_imports = "silent"
+
+# mypy overrides for third-party libraries
+[[tool.mypy.overrides]]
+module = [
+    "kiteconnect.*",
+    "vollib.*",
+    "py_vollib.*",
+    "QuantLib.*",
+    "talib.*",
+    "ta.*",
+    "newspaper.*",
+    "feedparser.*",
+]
+ignore_missing_imports = true
 
 [tool.bandit]
 exclude_dirs = ["tests", "verify_*", "backups"]
