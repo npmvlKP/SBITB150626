@@ -1,0 +1,28 @@
+# Gitleaks configuration for SBITB-150626
+# SEBI-compliant Indian algorithmic trading bot
+
+[output]
+format = "json"
+
+# Exclude non-source directories
+[exclude]
+paths = [
+    "SBITB-150626-Plan/",
+    "tests/",
+    "verify_",
+    "config/secrets.env.example",
+    ".git/",
+    "deployment/",
+]
+
+# Allowlist patterns for false positives
+[allowlist]
+regexes = [
+    "(?i)placeholder",
+    "(?i)xoxb-placeholder",
+    "(?i)example\\.com",
+    "(?i)YOUR_.*_KEY",
+    "localhost",
+]
+
+# Gitleaks uses default ruleset for secrets detection

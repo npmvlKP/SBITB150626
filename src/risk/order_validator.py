@@ -49,6 +49,80 @@ class OrderValidator:
         self._position_settings = position_settings
         self._audit = audit_logger
 
+    def _validate_required_fields(self, order: dict[str, Any]) -> tuple[list[str], str, str]:
+        """Validate required string fields: exchange, tradingsymbol, transaction_type, product, order_type.
+
+        Returns: (errors, exchange, order_type)
+        """
+        errors = []
+        exchange = order.get("exchange", "")
+        if not exchange:
+            errors.append("exchange is required")
+        elif exchange.upper() not in ALLOWED_SEGMENTS:
+            errors.append(f"exchange must be one of {ALLOWED_SEGMENTS}, got '{exchange}'")
+        seg = exchange.upper()
+
+        tradingsymbol = order.get("tradingsymbol", "")
+        if not tradingsymbol:
+            errors.append("tradingsymbol is required")
+
+        transaction_type = order.get("transaction_type", "")
+        if not transaction_type:
+            errors.append("transaction_type is required")
+        elif transaction_type.upper() not in ["BUY", "SELL"]:
+            errors.append("transaction_type must be 'BUY' or 'SELL'")
+
+        product = order.get("product", "")
+        if not product:
+            errors.append("product is required")
+        elif product.upper() not in ["MIS", "NRML"]:
+            errors.append("product must be 'MIS' or 'NRML'")
+
+        order_type = order.get("order_type", "")
+        if not order_type:
+            errors.append("order_type is required")
+        elif order_type.upper() not in ["MARKET", "LIMIT", "SL", "SL-M"]:
+            errors.append("order_type must be 'MARKET', 'LIMIT', 'SL' or 'SL-M'")
+
+        return errors, seg, order_type.upper()
+
+    def _validate_quantity_and_price(self, order: dict[str, Any], order_type: str) -> list[str]:
+        """Validate quantity, price, and trigger_price fields."""
+        errors = []
+
+        quantity = order.get("quantity")
+        if quantity is None:
+            errors.append("quantity is required")
+        else:
+            try:
+                qty = int(quantity)
+                if qty <= 0:
+                    errors.append("quantity must be positive")
+            except (ValueError, TypeError):
+                errors.append("quantity must be an integer")
+
+        price = order.get("price")
+        if order_type in ["LIMIT", "SL"]:
+            if price is None:
+                errors.append(f"{order_type} order requires price")
+            else:
+                try:
+                    Decimal(str(price))
+                except (ValueError, TypeError):
+                    errors.append(f"{order_type} price must be a number")
+
+        trigger_price = order.get("trigger_price")
+        if order_type == "SL-M":
+            if trigger_price is None:
+                errors.append("SL-M order requires trigger_price")
+            else:
+                try:
+                    Decimal(str(trigger_price))
+                except (ValueError, TypeError):
+                    errors.append("SL-M trigger_price must be a number")
+
+        return errors
+
     def validate_order_structure(self, order: dict[str, Any]) -> OrderValidationResult:
         """Validate order has all required fields with correct types.
 
@@ -63,105 +137,38 @@ class OrderValidator:
         - trigger_price: float | None (required for SL/SL-M)
         Returns OrderValidationResult with errors for missing/invalid fields.
         """
-        errors = []
-        warnings: list[str] = []
+        errors: list[str] = []
 
-        exchange = order.get("exchange", "")
-        if not exchange:
-            errors.append("exchange is required")
-        else:
-            if exchange.upper() not in ALLOWED_SEGMENTS:
-                errors.append(f"exchange must be one of {ALLOWED_SEGMENTS}, got '{exchange}'")
-            seg = exchange.upper()
+        # Validate required fields
+        field_errors, seg, order_type = self._validate_required_fields(order)
+        errors.extend(field_errors)
 
-        # tradingsymbol
-        tradingsymbol = order.get("tradingsymbol", "")
-        if not tradingsymbol:
-            errors.append("tradingsymbol is required")
+        # Validate quantity and price fields
+        price_errors = self._validate_quantity_and_price(order, order_type)
+        errors.extend(price_errors)
 
-        # transaction_type
-        transaction_type = order.get("transaction_type", "")
-        if not transaction_type:
-            errors.append("transaction_type is required")
-        else:
-            tt = transaction_type.upper()
-            if tt not in ["BUY", "SELL"]:
-                errors.append("transaction_type must be 'BUY' or 'SELL'")
-
-        # quantity
-        quantity = order.get("quantity")
-        if quantity is None:
-            errors.append("quantity is required")
-        else:
+        # Lot size validation (if basic structure valid)
+        if not errors and seg in ["NFO", "MCX"]:
+            tradingsymbol = order.get("tradingsymbol", "")
             try:
-                qty = int(quantity)
-                if qty <= 0:
-                    errors.append("quantity must be positive")
-            except (ValueError, TypeError):
-                errors.append("quantity must be an integer")
-
-        # product
-        product = order.get("product", "")
-        if not product:
-            errors.append("product is required")
-        else:
-            p = product.upper()
-            if p not in ["MIS", "NRML"]:
-                errors.append("product must be 'MIS' or 'NRML'")
-
-        # order_type
-        order_type = order.get("order_type", "")
-        if not order_type:
-            errors.append("order_type is required")
-        else:
-            ot = order_type.upper()
-            if ot not in ["MARKET", "LIMIT", "SL", "SL-M"]:
-                errors.append("order_type must be 'MARKET', 'LIMIT', 'SL' or 'SL-M'")
-
-        # price (required for LIMIT/SL)
-        price = order.get("price")
-        ot = order_type.upper()
-        if ot in ["LIMIT", "SL"]:
-            if price is None:
-                errors.append(f"{ot} order requires price")
-            else:
-                try:
-                    Decimal(str(price))
-                except (ValueError, TypeError):
-                    errors.append(f"{ot} price must be a number")
-
-        # trigger_price (required for SL/SL-M)
-        trigger_price = order.get("trigger_price")
-        if ot == "SL-M":
-            if trigger_price is None:
-                errors.append("SL-M order requires trigger_price")
-            else:
-                try:
-                    Decimal(str(trigger_price))
-                except (ValueError, TypeError):
-                    errors.append("SL-M trigger_price must be a number")
-
-        # quantity multiple of lot size
-        if not errors and seg in ["NFO", "MCX"] and exchange:
-            try:
-                qty = int(quantity) if quantity is not None else 0
+                qty = int(order.get("quantity", 0))
             except (ValueError, TypeError):
                 qty = 0
-            result = self.validate_lot_size(tradingsymbol, qty)
-            if not result.is_valid:
-                errors.append(result.errors[0])
+            lot_result = self.validate_lot_size(tradingsymbol, qty)
+            if not lot_result.is_valid:
+                errors.append(lot_result.errors[0])
 
-        # tradingsymbol format validation
+        # Symbol format validation (if basic structure valid)
         if not errors:
-            result = self.validate_tradingsymbol_format(tradingsymbol, seg)
-            if not result.is_valid:
-                errors.append(result.errors[0])
+            tradingsymbol = order.get("tradingsymbol", "")
+            sym_result = self.validate_tradingsymbol_format(tradingsymbol, seg)
+            if not sym_result.is_valid:
+                errors.append(sym_result.errors[0])
 
-        is_valid = len(errors) == 0
         return OrderValidationResult(
-            is_valid=is_valid,
+            is_valid=len(errors) == 0,
             errors=errors,
-            warnings=warnings,
+            warnings=[],
             modified_order=order,
         )
 

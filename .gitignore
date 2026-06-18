@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 SBITB150626/
 .env
+.env.docker
 secrets.env
 *.egg-info/
 dist/

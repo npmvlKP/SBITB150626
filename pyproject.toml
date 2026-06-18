@@ -108,6 +108,28 @@ dev = [
     "pre-commit>=3.6.0",
 ]
 
+# Phase 8-9: Sentiment Analysis + RAG (installed only when needed, not in Phase 1)
+# This keeps Phase 1 setup fast by deferring ~8GB ML dependencies
+ml = [
+    "torch>=2.2.0",           # Deep learning framework (CPU version; GPU needs CUDA-specific install)
+    "transformers>=4.40.0",   # HuggingFace transformers for NLP
+    "sentence-transformers>=2.5.0",  # embeddings for RAG
+    "faiss-cpu>=1.8.0",       # Vector similarity search
+    "accelerate>=0.28.0",     # Training acceleration
+]
+
+# Phase 9: RAG Knowledge Engine (optional, requires ml group)
+rag = [
+    "chromadb>=0.4.22",       # Vector database for RAG
+    "langchain>=0.1.0",       # RAG orchestration
+    "langchain-community>=0.0.20",  # Community integrations
+]
+
+# Phase 9: Feature Store (optional, for production RAG pipelines)
+feast = [
+    "feast>=0.37.0",          # Feature store (requires running server; deferred to Phase 9)
+]
+
 # NOTE: The following are standalone binaries, NOT Python packages:
 # - gitleaks: https://github.com/gitleaks/gitleaks/releases
 # - detect-secrets: pip install detect-secrets (standalone CLI)

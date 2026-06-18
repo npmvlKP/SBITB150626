@@ -66,7 +66,7 @@ class GarchResult:
     model_type: str  # "GARCH", "EGARCH", "GJR"
     p: int
     q: int
-    conditional_volatility: np.ndarray
+    conditional_volatility: np.ndarray[Any, np.dtype[np.float64]]
     annualized_volatility: float
     persistence: float  # alpha + beta (stationarity condition: < 1)
     log_likelihood: float
@@ -75,7 +75,7 @@ class GarchResult:
     last_forecast: float  # 1-step ahead variance forecast
     forecast_annualized: float  # Annualized volatility forecast
     fitted_date: datetime
-    residuals: np.ndarray
+    residuals: np.ndarray[Any, np.dtype[np.float64]]
 
 
 @dataclass(frozen=True)
@@ -132,7 +132,7 @@ class HistoricalVarEngine:
         Square-root-of-time scaling per McNeil Ch.2.3 (assumes i.i.d. returns).
         For GARCH-adjusted VaR, use GarchVarEngine instead.
         """
-        start_time = datetime.now()
+        start_time = _utcnow()
 
         # Validate data
         self._validate_data(pnl_series)
@@ -161,7 +161,7 @@ class HistoricalVarEngine:
         var_pct = float(var_time_scaled)
         cvar_pct = float(cvar_time_scaled)
 
-        computation_time = (datetime.now() - start_time).total_seconds() * 1000
+        computation_time = (_utcnow() - start_time).total_seconds() * 1000
 
         return VarResult(
             method=VarMethod.HISTORICAL,
@@ -219,7 +219,7 @@ class ParametricVarEngine:
         5. Return VarResult
         """
         try:
-            start_time = datetime.now()
+            start_time = _utcnow()
 
             # Extract lookback period
             lookback_pnl = pnl_series.iloc[-self._settings.VAR_LOOKBACK_DAYS :].copy()
@@ -253,7 +253,7 @@ class ParametricVarEngine:
             var_pct = float(abs(var_time_scaled))
             cvar_pct = float(abs(cvar_time_scaled))
 
-            computation_time = (datetime.now() - start_time).total_seconds() * 1000
+            computation_time = (_utcnow() - start_time).total_seconds() * 1000
 
             return VarResult(
                 method=VarMethod.PARAMETRIC,
@@ -329,7 +329,7 @@ class MonteCarloVarEngine:
         Seed: use numpy.random.default_rng(42) for reproducibility in tests.
         Production: no seed (random).
         """
-        start_time = datetime.now()
+        start_time = _utcnow()
 
         # Set up random number generator (no seed in production)
         rng = np.random.default_rng()
@@ -367,7 +367,7 @@ class MonteCarloVarEngine:
         var_pct = float(var_time_scaled)
         cvar_pct = float(cvar_time_scaled)
 
-        computation_time = (datetime.now() - start_time).total_seconds() * 1000
+        computation_time = (_utcnow() - start_time).total_seconds() * 1000
 
         return VarResult(
             method=VarMethod.MONTE_CARLO,
@@ -404,6 +404,60 @@ class GarchVarEngine:
         self._result: GarchResult | None = None
         self._last_fit_date: datetime | None = None
 
+    def _validate_garch_data(self, return_series: pd.Series) -> None:
+        """Validate data has sufficient length for GARCH fitting."""
+        if len(return_series) < 2 * self._settings.VAR_LOOKBACK_DAYS:
+            required = 2 * self._settings.VAR_LOOKBACK_DAYS
+            available = len(return_series)
+            logger.error(
+                "garch_invalid_data",
+                required=required,
+                available=available,
+                error="insufficient_data_for_garch_fit",
+            )
+            raise ValueError(f"Insufficient data for GARCH: need {required}, have {available}")
+
+    def _get_persistence(self, fit_result: Any, p: int, q: int) -> float:
+        """Extract persistence (alpha + beta) from fitted model."""
+
+        def get_param(name: str, default: float = 0.0) -> float:
+            try:
+                return float(fit_result.params.get(name, default))
+            except Exception:
+                return default
+
+        alpha = sum([get_param(f"alpha[{i}]") for i in range(1, p + 1)])
+        beta = sum([get_param(f"beta[{i}]") for i in range(1, q + 1)])
+        return alpha + beta
+
+    def _build_garch_result(
+        self,
+        fit_result: Any,
+        model_type: str,
+        p: int,
+        q: int,
+        persistence: float,
+        conditional_volatility: np.ndarray,
+        last_forecast: float,
+    ) -> GarchResult:
+        """Build GarchResult from fitted model and computed values."""
+        forecast_annualized = np.sqrt(last_forecast * 252)
+        return GarchResult(
+            model_type=model_type,
+            p=p,
+            q=q,
+            conditional_volatility=conditional_volatility,
+            annualized_volatility=float(conditional_volatility.mean() * np.sqrt(252)),
+            persistence=persistence,
+            log_likelihood=fit_result.loglikelihood,
+            aic=fit_result.aic,
+            bic=fit_result.bic,
+            last_forecast=float(last_forecast),
+            forecast_annualized=float(forecast_annualized),
+            fitted_date=_utcnow(),
+            residuals=fit_result.resid,
+        )
+
     async def fit(self, return_series: pd.Series) -> GarchResult | None:
         """Fit GARCH model to return series.
 
@@ -419,19 +473,10 @@ class GarchVarEngine:
         8. Return GarchResult (or None if fit fails)
         """
         try:
-            start_time = datetime.now()
+            start_time = _utcnow()
 
             # Validate data
-            if len(return_series) < 2 * self._settings.VAR_LOOKBACK_DAYS:
-                required = 2 * self._settings.VAR_LOOKBACK_DAYS
-                available = len(return_series)
-                logger.error(
-                    "garch_invalid_data",
-                    required=required,
-                    available=available,
-                    error="insufficient_data_for_garch_fit",
-                )
-                raise ValueError(f"Insufficient data for GARCH: need {required}, have {available}")
+            self._validate_garch_data(return_series)
 
             # Import arch package here to avoid circular import issues
             import arch
@@ -452,18 +497,8 @@ class GarchVarEngine:
             fit_result = model.fit(disp="off", options={"maxiter": 1000, "warn.no.convergence": False})
 
             # Check stationarity condition (alpha + beta < 1)
-            def get_param(name: str, default: float = 0.0) -> float:
-                """Get parameter value or default if not present."""
-                try:
-                    return float(fit_result.params.get(name, default))
-                except Exception:
-                    return default
-
-            # omega parameter stored for potential future logging
-            fit_result.params["omega"]
-            alpha = sum([get_param(f"alpha[{i}]") for i in range(1, p + 1)])
-            beta = sum([get_param(f"beta[{i}]") for i in range(1, q + 1)])
-            persistence = alpha + beta
+            fit_result.params["omega"]  # omega parameter stored for potential future logging
+            persistence = self._get_persistence(fit_result, p, q)
 
             if persistence >= 1:
                 logger.warning(
@@ -476,23 +511,10 @@ class GarchVarEngine:
             # Compute conditional volatility and forecasts
             conditional_volatility = np.sqrt(fit_result.conditional_volatility)
             last_forecast = fit_result.forecast(horizon=1).variance.values[-1][0]
-            forecast_annualized = np.sqrt(last_forecast * 252)  # Annualize 1-day forecast
 
-            # Build GarchResult
-            result = GarchResult(
-                model_type=model_type,
-                p=p,
-                q=q,
-                conditional_volatility=conditional_volatility,
-                annualized_volatility=float(conditional_volatility.mean() * np.sqrt(252)),
-                persistence=persistence,
-                log_likelihood=fit_result.loglikelihood,
-                aic=fit_result.aic,
-                bic=fit_result.bic,
-                last_forecast=float(last_forecast),
-                forecast_annualized=float(forecast_annualized),
-                fitted_date=_utcnow(),
-                residuals=fit_result.resid,
+            # Build result
+            result = self._build_garch_result(
+                fit_result, model_type, p, q, persistence, conditional_volatility, last_forecast
             )
 
             # Cache results
@@ -507,7 +529,7 @@ class GarchVarEngine:
                 q=q,
                 persistence=persistence,
                 annualized_volatility=result.annualized_volatility,
-                computation_time_ms=(datetime.now() - start_time).total_seconds() * 1000,
+                computation_time_ms=(_utcnow() - start_time).total_seconds() * 1000,
             )
 
             return result
@@ -516,7 +538,6 @@ class GarchVarEngine:
             self._model = None
             self._result = None
             if self._last_fit_date is not None:
-                # Use last valid fit if available
                 logger.warning("garch_fit_failed_using_cache_if_available")
                 return self._result
             return None
@@ -553,7 +574,7 @@ class GarchVarEngine:
             return None
 
         try:
-            start_time = datetime.now()
+            start_time = _utcnow()
 
             # Get GARCH results
             result = self._result
@@ -578,7 +599,7 @@ class GarchVarEngine:
             var_pct = float(abs(var_time_scaled))
             cvar_pct = float(abs(cvar_time_scaled))
 
-            computation_time = (datetime.now() - start_time).total_seconds() * 1000
+            computation_time = (_utcnow() - start_time).total_seconds() * 1000
 
             return VarResult(
                 method=VarMethod.PARAMETRIC,
@@ -651,7 +672,7 @@ class EvtEngine:
         9. Return EvtResult
         """
         try:
-            start_time = datetime.now()
+            start_time = _utcnow()
 
             # Prepare data: convert pnl to losses
             losses = -pnl_series.iloc[-self._settings.VAR_LOOKBACK_DAYS :].copy()
@@ -717,7 +738,7 @@ class EvtEngine:
                 beta=beta,
                 n_exceedances=len(exceedances),
                 var_evt=var_evt,
-                computation_time_ms=(datetime.now() - start_time).total_seconds() * 1000,
+                computation_time_ms=(_utcnow() - start_time).total_seconds() * 1000,
             )
 
             return result
@@ -725,7 +746,7 @@ class EvtEngine:
             logger.error("evt_fit_failed", error=str(e))
             return None
 
-    def _hill_estimator(self, losses: np.ndarray) -> tuple[float, float]:
+    def _hill_estimator(self, losses: np.ndarray[Any, np.dtype[np.float64]]) -> tuple[float, float]:
         """Hill estimator for tail index xi (McNeil Ch.5.2).
 
         Returns (xi, standard_error). SE = xi / sqrt(k) where k = number
@@ -820,7 +841,7 @@ class StressTestEngine:
     def run_correlation_break(
         self,
         current_positions: list[dict[str, Any]],
-        correlation_matrix: np.ndarray,
+        correlation_matrix: np.ndarray[Any, np.dtype[np.float64]],
     ) -> StressTestResult:
         """Stress test: correlation breakdown (McNeil Ch.9.3).
         During crises, correlations spike toward 1.
