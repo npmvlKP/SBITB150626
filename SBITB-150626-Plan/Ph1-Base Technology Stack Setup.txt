@@ -38,6 +38,8 @@ trivy --version
 # EXPECTED: 0.50+
 Verification Gate: ALL 5 checks must pass before proceeding. If Docker Desktop fails to start, troubleshoot WSL2: wsl --update, restart, then restart Docker Desktop.
 
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 Instruction 2 — Create Project Virtual Environment + Install Core Dependencies
 # Step 2.1: Navigate to project root
 Set-Location -LiteralPath "G:\OC\02June26"
@@ -57,7 +59,7 @@ pip install TA-Lib==0.6.8
 # IF no wheel on PyPI for cp312: download from cgohlke, then:
 # pip install G:\path\to\TA_Lib-0.6.8-cp312-cp312-win_amd64.whl
 Verification Gate: python -c "import talib; print('OK')" must succeed inside venv.
-
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 Instruction 3 — Create pyproject.toml (Merged + Corrected from Phase 0)
 This replaces the original pip install scatter with a single declarative configuration. Key changes from original:
 
@@ -213,6 +215,8 @@ paths = ["src", "tests"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 Instruction 4 — Install Project with All Dependencies
 # Ensure venv is activated
 & "G:\OC\02June26\indian-trading-bot\.venv\Scripts\Activate.ps1"
@@ -267,7 +271,7 @@ python -c "import cyclonedx; print('cyclonedx OK')"
 python -c "import locust; print('locust OK')"
 python -c "import mypy; print('mypy OK')"
 Verification Gate: ALL imports must succeed. If QuantLib fails, install with pip install QuantLib (has pre-built cp312 wheels on PyPI since v1.36). If py_vollib fails, pip install py_vollib --upgrade.
-
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 Instruction 5 — Create Project Directory Structure (Extended from Phase 0)
 Phase 1 extends Phase 0's structure. Add these directories to the Phase 0 tree:
 

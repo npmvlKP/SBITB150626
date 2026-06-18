@@ -2,6 +2,7 @@ services:
   timescaledb:
     image: timescale/timescaledb:2.15.3-pg15
     container_name: trading_timescaledb
+    user: postgres
     environment:
       POSTGRES_USER: trading
       POSTGRES_PASSWORD: ${TIMESCALEDB_PASSWORD}
@@ -10,7 +11,7 @@ services:
       PGDATA: /var/lib/postgresql/data/pgdata
       POSTGRES_INITDB_ARGS: "--data-checksums"
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -32,25 +33,20 @@ services:
           memory: 2G
     networks:
       - trading_network
-    security_opt:
-      - no-new-privileges
-    cap_drop:
-      - ALL
-    read_only: false
 
   redis:
     image: redis:7.2.4-alpine
     container_name: trading_redis
+    user: redis
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
     command: redis-server --requirepass ${REDIS_PASSWORD}
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:6380:6379"
     volumes:
       - redis_data:/data
-      - ./redis.conf:/usr/local/etc/redis/redis.conf
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -66,11 +62,6 @@ services:
           memory: 512M
     networks:
       - trading_network
-    security_opt:
-      - no-new-privileges
-    cap_drop:
-      - ALL
-    read_only: false
 
   prometheus:
     image: prom/prometheus:v2.48.0
@@ -109,7 +100,6 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_LOG_LEVEL: info
       GF_DATE_FORMATS_TIMEZONE: UTC
-      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-worldmap-panel
     ports:
       - "127.0.0.1:3000:3000"
     volumes:

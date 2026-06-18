@@ -1,17 +1,31 @@
 -- Audit trail hypertable (TimescaleDB)
 -- 7-year retention per SEBI (5+ required)
 CREATE TABLE IF NOT EXISTS audit_events (
-    event_id UUID PRIMARY KEY,
+    event_id UUID,
     timestamp TIMESTAMPTZ NOT NULL,
-    event_type VARCHAR(50) NOT NULL,
-    source VARCHAR(100) NOT NULL,
+    event_type TEXT NOT NULL,
+    source TEXT NOT NULL,
     details JSONB NOT NULL DEFAULT '{}',
-    checksum VARCHAR(64) NOT NULL,
+    checksum TEXT NOT NULL,
     ntp_offset_ms REAL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Create hypertable (TimescaleDB requires timestamp in primary key)
 SELECT create_hypertable('audit_events', 'timestamp', if_not_exists => TRUE);
+
+-- Add primary key after hypertable creation (includes partitioning column)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'audit_events_pkey'
+    ) THEN
+        ALTER TABLE audit_events ADD PRIMARY KEY (event_id, timestamp);
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Primary key may already exist: %', SQLERRM;
+END
+$$;
 
 -- Retention policy: 7 years (SEBI requires 5+)
 SELECT add_retention_policy('audit_events', INTERVAL '7 years', if_not_exists => TRUE);

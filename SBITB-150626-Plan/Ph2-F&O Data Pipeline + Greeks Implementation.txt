@@ -84,7 +84,7 @@ print(f'Redis read-back: {r.get(\"_phase2_test\")}')
 r.delete('_phase2_test')
 "
 Verification Gate: ALL imports must succeed. TimescaleDB must return extension version. Redis must PONG. Trivy must be on PATH. If ANY fails, fix before proceeding.
-
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 INSTRUCTION 2 — Create TimescaleDB Schema for Options Data
 Create deployment/init_phase2.sql with the following schema. This extends Phase 0's init.sql.
 
@@ -330,6 +330,7 @@ for t in tables: print(t[0])
 conn.close()
 "
 # EXPECTED: audit_events, market_events, fo_options_eod, cm_spot_eod, greeks_snapshot, ws_ticks, download_checkpoint, + views
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 INSTRUCTION 3 — config/settings.py Additions for Phase 2
 Extend the existing config/settings.py with Phase 2 settings classes. Do NOT modify existing Phase 0 settings — only ADD.
 
@@ -380,6 +381,8 @@ class WebSocketSettings(BaseSettings):
     NIFTY_ATM_STRIKES_EACH_SIDE: int = 25  # 25 above + 25 below = 50 strikes
     MCX_INSTRUMENTS: list[str] = ["GOLD", "SILVER", "CRUDEOIL"]
     HEARTBEAT_TIMEOUT_SEC: float = 5.0     # Zerodha sends heartbeat every ~2-3s
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 4 — src/data/event_log.py — Immutable Event Log (Kleppmann Ch.3)
 This is the single source of truth for all market data. All pipelines write events here first; derived tables are populated from this log.
 
@@ -414,7 +417,7 @@ Schema Evolution Example (Kleppmann Ch.4):
 If v2 adds oi_change to FO_BHAVCOPY payload: migrate_v1_to_v2(payload) -> dict fills oi_change=0 for v1 events
 decode() checks schema_version; if < current, applies all migrations in sequence
 All methods fully type-hinted, async, with structlog. Every append must be idempotent (same event_id = no-op).
-
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 INSTRUCTION 5 — src/data/historical.py — Resumable Historical Data Pipeline
 Requirements
 Class BhavcopyDownloader:
@@ -464,7 +467,7 @@ Run download_cm_bhavcopies()
 Run Greeks computation (Instruction 6) on all ingested EOD data
 Return summary dict
 All methods: fully type-hinted, async, structlog on every step, retry with backoff, checkpoint every date. No assumption that downloads succeed — every failure is captured and the pipeline continues.
-
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 INSTRUCTION 6 — src/data/option_chain.py — Greeks Computation Engine
 Requirements
 Enum RFRMethod: T_BILL | FUTURES_BASIS
@@ -513,7 +516,7 @@ Uses QuantLib.India calendar for Indian holiday handling
 More accurate than jugaad-data for future/past holiday dates
 Used as fallback when jugaad-data holiday list is incomplete
 CRITICAL: as_of_date is always an explicit parameter. The original today variable is NEVER used inside compute functions. This ensures backtesting works correctly on historical data.
-
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 INSTRUCTION 7 — src/data/websocket.py — Live Data Pipeline
 Requirements
 Enum WSConnectionState: DISCONNECTED | CONNECTING | CONNECTED | RECONNECTING | REAUTHenticating
@@ -595,6 +598,8 @@ MCX Segment Support:
 MCX instruments use different exchange tokens
 Subscribe to MCX futures (Gold, Silver, Crude) in QUOTE mode
 MCX options if available (currently limited on Zerodha)
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 8 — src/data/storage.py — TimescaleDB + Redis Read/Write Layer
 Requirements
 Class TimescaleDBStore:
@@ -624,6 +629,8 @@ Both classes must handle psycopg.OperationalError and redis.ConnectionError
 On connection failure: retry up to 3 times with exponential backoff
 On persistent failure: log CRITICAL + raise (don't silently fail)
 TimescaleDBStore uses connection pool with auto-reconnect
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 9 — src/brokers/base.py + src/brokers/zerodha.py — Multi-Broker Abstraction
 9.1 Extend src/brokers/base.py from Phase 0
 The Phase 0 BrokerInterface has basic methods. Extend with Phase 2 additions:
@@ -753,6 +760,8 @@ class DhanBroker(BrokerInterface):
         raise NotImplementedError("DhanBroker not yet implemented (Phase 16)")
 
     # ... all methods raise NotImplementedError
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 10 — src/data/providers.py — Update MarketDataProvider Interface
 Extend the Phase 0 MarketDataProvider with concrete implementations:
 
@@ -792,6 +801,8 @@ class KiteDataProvider(MarketDataProvider):
     async def get_greeks(self, symbol: str, date: date, expiry: date) -> pd.DataFrame:
         # Query greeks_snapshot table
         ...
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 11 — Prometheus Metrics for Phase 2
 Add to src/data/metrics.py:
 
@@ -816,6 +827,8 @@ REDIS_HIT_RATE = Gauge('redis_hit_rate', 'Redis cache hit rate')
 
 # Risk-free rate
 RFR_COMPUTED = Counter('rfr_computed_total', 'Risk-free rate computations', ['method', 'status'])
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 12 — Test Suite
 12.1 tests/conftest.py Additions
 Add Phase 2 fixtures:
@@ -957,9 +970,11 @@ class TradingBotUser(HttpUser):
     def query_greeks(self):
         # Simulate Greeks query (3x more frequent)
         ...
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 13 — Run Full Verification
 # Ensure venv activated + Docker services running
-& "G:\OC\02June26\indian-trading-bot\.venv\Scripts\Activate.ps1"
+& "G:\OC\SBITB-150626\SBITB150626\.venv\Scripts\Activate.ps1"
 docker compose -f deployment/docker-compose.yml up -d
 
 # Tier 0 — Every PR gate
