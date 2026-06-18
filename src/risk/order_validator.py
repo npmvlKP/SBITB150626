@@ -49,7 +49,7 @@ class OrderValidator:
         self._position_settings = position_settings
         self._audit = audit_logger
 
-    def validate_order_structure(self, order: dict) -> OrderValidationResult:
+    def validate_order_structure(self, order: dict[str, Any]) -> OrderValidationResult:
         """Validate order has all required fields with correct types.
 
         Required fields (per Kite API place_order):
@@ -271,7 +271,9 @@ class OrderValidator:
             modified_order=None,
         )
 
-    def validate_full(self, order: dict, modification_counts: dict[str, int] | None = None) -> OrderValidationResult:
+    def validate_full(
+        self, order: dict[str, Any], modification_counts: dict[str, int] | None = None
+    ) -> OrderValidationResult:
         """Run all validations:
         1. Order structure
         2. Lot size

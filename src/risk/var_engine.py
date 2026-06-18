@@ -102,7 +102,7 @@ class StressTestResult:
     projected_margin_utilization: Decimal
     would_trigger_kill_switch: bool
     would_breach_var_limit: bool
-    greek_impact: dict  # {"delta": ..., "gamma": ..., "vega": ...}
+    greek_impact: dict[str, Decimal]  # {"delta": ..., "gamma": ..., "vega": ...}
 
 
 class HistoricalVarEngine:
@@ -271,15 +271,15 @@ class ParametricVarEngine:
             logger.error("var_parametric_failed", error=str(e))
             raise
 
-    def _fit_distribution(self, pnl_series: pd.Series) -> dict:
+    def _fit_distribution(self, pnl_series: pd.Series) -> dict[str, float]:
         """Fit normal or t-distribution parameters."""
         mu, sigma = pnl_series.mean(), pnl_series.std()
 
         if self._settings.GARCH_DISTRIBUTION == "t":
             df = scipy.stats.t.fit(pnl_series)[0]
-            return {"mu": mu, "sigma": sigma, "df": df}
+            return {"mu": mu, "sigma": sigma, "df": float(df)}
         else:
-            return {"mu": mu, "sigma": sigma, "df": None}
+            return {"mu": mu, "sigma": sigma, "df": 0.0}
 
     def _cvar_closed_form(self, mu: float, sigma: float, alpha: float, df: float | None) -> float:
         """CVaR closed-form: for normal, E[X|X<=VaR] = mu - sigma * phi(z)/(1-alpha).
@@ -606,7 +606,7 @@ class GarchVarEngine:
         """Square-root-of-time scaling: value * sqrt(holding_period)."""
         return float(value) * float(np.sqrt(holding_period))
 
-    def _diagnose_fit(self, result: Any) -> dict:
+    def _diagnose_fit(self, result: Any) -> dict[str, Any]:
         """Compute ACF/PACF of standardized residuals (McNeil Ch.4.5).
 
         Return {"lb_test_pvalue": ..., "acf_lag1": ...}.
@@ -765,7 +765,7 @@ class StressTestEngine:
 
     def run_scenarios(
         self,
-        current_positions: list[dict],
+        current_positions: list[dict[str, Any]],
         portfolio_value: Decimal,
         margin_utilization: Decimal,
     ) -> list[StressTestResult]:
@@ -819,7 +819,7 @@ class StressTestEngine:
 
     def run_correlation_break(
         self,
-        current_positions: list[dict],
+        current_positions: list[dict[str, Any]],
         correlation_matrix: np.ndarray,
     ) -> StressTestResult:
         """Stress test: correlation breakdown (McNeil Ch.9.3).
@@ -1051,14 +1051,14 @@ class RiskEngineOrchestrator:
 
     def run_stress_tests(
         self,
-        current_positions: list[dict],
+        current_positions: list[dict[str, Any]],
         portfolio_value: Decimal,
         margin_utilization: Decimal,
     ) -> list[StressTestResult]:
         """Run all stress test scenarios."""
         return self._stress.run_scenarios(current_positions, portfolio_value, margin_utilization)
 
-    def get_risk_summary(self) -> dict:
+    def get_risk_summary(self) -> dict[str, Any]:
         """Return current risk state: VaR, CVaR, GARCH volatility, EVT tail index, last stress test results."""
         last_stress_tests = None
         if hasattr(self._stress, "_last_stress_tests"):

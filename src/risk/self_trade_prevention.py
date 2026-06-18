@@ -38,7 +38,7 @@ class SelfTradePrevention:
 
     def __init__(self, audit_logger: AuditLogger):
         self._audit = audit_logger
-        self._open_orders: dict[str, dict] = {}  # order_id -> order_dict
+        self._open_orders: dict[str, dict[str, Any]] = {}  # order_id -> order_dict
 
     def check_order(self, new_order: dict[str, Any]) -> SelfTradeCheckResult:
         """Check if new_order would self-trade against existing open orders.
@@ -96,7 +96,7 @@ class SelfTradePrevention:
             reason="No matching open orders found",
         )
 
-    def register_order(self, order_id: str, order: dict) -> None:
+    def register_order(self, order_id: str, order: dict[str, Any]) -> None:
         """Add order to tracking after it's placed."""
         self._open_orders[order_id] = order
 
@@ -105,7 +105,7 @@ class SelfTradePrevention:
         if order_id in self._open_orders:
             del self._open_orders[order_id]
 
-    def get_open_orders(self) -> dict[str, dict]:
+    def get_open_orders(self) -> dict[str, dict[str, Any]]:
         """Return current open orders dict."""
         return self._open_orders.copy()
 
