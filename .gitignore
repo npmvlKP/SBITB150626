@@ -18,3 +18,7 @@ node_modules/
 *.log
 .trivy-cache/
 .gitleaks/
+.venv/
+venv/
+gitleaks_report.json
+gitleaks_src_report.json
