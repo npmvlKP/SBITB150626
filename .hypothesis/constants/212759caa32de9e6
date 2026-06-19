@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\numba\cpython\tupleobj.py
+# hypothesis_version: 6.142.4
+
+['<', 'TYPED_VALUE_SLOT%s', 'cmp_end', 'getiter', 'index', 'iternext', 'static_getitem', 'switch.%d', 'switch.else', 'switch.end', 'typed_getitem', 'typed_switch.%d', 'typed_switch.else', 'typed_switch.end']

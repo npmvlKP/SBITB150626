@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\httpx\_api.py
+# hypothesis_version: 6.142.4
+
+['DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PUT', 'delete', 'get', 'head', 'options', 'patch', 'post', 'put', 'request', 'stream']

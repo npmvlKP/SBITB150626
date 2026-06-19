@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\httpx\_decoders.py
+# hypothesis_version: 6.142.4
+
+['br', 'decompress', 'deflate', 'finish', 'gzip', 'identity', 'replace', 'utf-8', 'zstd']

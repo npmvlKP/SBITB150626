@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\requests_toolbelt\_compat.py
+# hypothesis_version: 6.142.4
+
+[131840, '%s(%s)', ', ', ':', 'HTTPHeaderDict', 'basestring', 'connection', 'fields', 'filepost', 'keys', 'poolmanager', 'queue', 'timeout', 'urlencode', 'urljoin']

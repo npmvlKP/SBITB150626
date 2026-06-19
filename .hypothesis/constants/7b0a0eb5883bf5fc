@@ -1,0 +1,4 @@
+# file: g:\OC\SBITB-150626\src\risk\compliance.py
+# hypothesis_version: 6.142.4
+
+['CIR/MRD/DP/09/2012', 'MCX', 'NSE', 'algo_tagging', 'closed', 'margin_controls', 'ops_threshold', 'ops_within_threshold', 'post_market', 'pre_market', 'pre_trade_risk', 'price_checks', 'registered', 'regular', 'trading_hours', 'unregistered']

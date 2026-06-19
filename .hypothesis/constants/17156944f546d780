@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\numba\np\ufunc\decorators.py
+# hypothesis_version: 6.142.4
+
+['cache', 'cpu', 'identity', 'is_dynamic', 'parallel', 'target', 'writable_args']

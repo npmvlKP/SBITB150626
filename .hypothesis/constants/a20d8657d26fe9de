@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\numba\np\npdatetime_helpers.py
+# hypothesis_version: 6.142.4
+
+[365, 400, 1000, 'D', 'M', 'W', 'Y', 'as', 'fs', 'h', 'm', 'ms', 'nat', 'ns', 'ps', 's', 'us']

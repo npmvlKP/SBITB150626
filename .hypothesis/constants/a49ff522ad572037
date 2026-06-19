@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\pandas\core\strings\object_array.py
+# hypothesis_version: 6.142.4
+
+['Invalid side', 'bool', 'both', 'find', 'int64', 'left', 'object', 'rfind', 'right', 'strict', 'width', '|']

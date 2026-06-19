@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\trio\_highlevel_generic.py
+# hypothesis_version: 6.142.4
+
+['ReceiveStreamT', 'SendStreamT', 'send_eof']

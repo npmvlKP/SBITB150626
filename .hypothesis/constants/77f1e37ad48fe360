@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\numba\__init__.py
+# hypothesis_version: 6.142.4
+
+['(\\d+)\\.(\\d+).(\\d+)', '-vector-library=SVML', '.', 'SVML', 'darwin', 'has_svml', 'libsvml.dylib', 'libsvml.so', 'linux', 'svml_dispmd', 'version', 'win', 'x86_64']

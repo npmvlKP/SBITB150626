@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\numba\core\boxing.py
+# hypothesis_version: 6.142.4
+
+['!=', '<=', '==', '>', '>=', 'PyExc_TypeError', 'PyExc_ValueError', 'bit_generator', 'c_void_p', 'cast', 'ctypes', 'fnptr', 'next_double', 'next_uint32', 'next_uint64', 'numba', 'start', 'state', 'state_address', 'step', 'stop', 'typeof', 'value']

@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\numba\core\types\iterators.py
+# hypothesis_version: 6.142.4
+
+[', ', 'A', 'enumerate(%s)', 'iter(%s)', 'range_iter_%s', 'range_state_%s', 'zip(%s)']

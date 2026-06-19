@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\pandas\_testing\_io.py
+# hypothesis_version: 6.142.4
+
+['___localpath___', '___pathlib___', 'addfile', 'bz2', 'gzip', 'py.path', 'tar', 'test', 'w', 'wb', 'write', 'writestr', 'xz', 'zip', 'zstandard', 'zstd']

@@ -1,0 +1,4 @@
+# file: g:\OC\SBITB-150626\src\risk\kill_switch.py
+# hypothesis_version: 6.142.4
+
+[0.0, 3.0, -100, 100, '<ctrl>+<shift>+k', 'Ctrl+Shift+K', 'activation_history', 'current_level', 'event_id', 'inactive', 'keyboard', 'kill', 'kill_switch', 'level', 'ok', 'pause', 'pip install pynput', 'previous_level', 'pynput not installed', 'reason', 'rest_api', 'source', 'status', 'telegram', 'throttle', 'timestamp', 'trigger_source']

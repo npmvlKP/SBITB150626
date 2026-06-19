@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\numba\core\runtime\context.py
+# hypothesis_version: 6.142.4
+
+['NRT_Allocate', 'NRT_Free', 'NRT_MemInfo_alloc', 'NRT_decref', 'NRT_get_api', 'NRT_incref', 'alloc', 'alloc_aligned', 'alloc_dtor', 'noalias', 'nocapture']

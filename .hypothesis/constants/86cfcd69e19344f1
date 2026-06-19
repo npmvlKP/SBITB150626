@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\numba\np\math\numbers.py
+# hypothesis_version: 6.142.4
+
+[0.0, 0.5, 1.0, 65536, '!=', '.exit', '.neg', '.numba.python.rem', '.pos', '.postest', '.zero', '1', '<', '<=', '==', '>', '>=', 'division by zero', 'double', 'entry', 'float', 'linkonce_odr', 'llvm.pow', 'modulo by zero', 'nan', 'nsw', 'numba_cpow', 'numba_cpowf', 'quot', 'rem']

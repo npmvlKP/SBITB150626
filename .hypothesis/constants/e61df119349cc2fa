@@ -1,0 +1,4 @@
+# file: g:\OC\SBITB-150626\src\data\option_chain.py
+# hypothesis_version: 6.142.4
+
+[0.0, 0.01, 0.15, 1.01, 10.0, 100.0, 365.0, 1000, 6379, 10000, 86400, 'CE', 'GREEKS_SNAPSHOT', 'MarketEvent', 'NIFTY', 'NIFTY 50', 'NIFTY BANK', 'OptionMetrics', 'PE', 'QuantLibCalendar', 'RFRMethod', 'RiskFreeRateProvider', 'c', 'calendar_computed', 'calendar_generated', 'compute_error', 'computed', 'date', 'delta', 'expired', 'expiry', 'futures_basis', 'gamma', 'greeks', 'greeks_aborted', 'greeks_batch_failed', 'greeks_computed', 'greeks_error', 'iv', 'iv_above_upper_bound', 'iv_below_lower_bound', 'iv_clamped', 'localhost', 'option_type', 'p', 'redis.Redis | None', 'rfr_', 'rfr_cached', 'rfr_computed', 'rfr_fallback', 'rfr_method', 'risk_free_rate', 'spot', 'spot_price_missing', 'strike', 'symbol', 't_bill', 'theta', 'ttm_years', 'vega', 'vollib_not_available']

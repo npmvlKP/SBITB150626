@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\pandas\core\groupby\numba_.py
+# hypothesis_version: 6.142.4
+
+['index', 'numba', 'values']

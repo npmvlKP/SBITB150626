@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\pandas\io\feather_format.py
+# hypothesis_version: 6.142.4
+
+['pyarrow', 'rb', 'storage_options', 'wb']

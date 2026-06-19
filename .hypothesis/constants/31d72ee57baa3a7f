@@ -1,0 +1,4 @@
+# file: g:\OC\SBITB-150626\src\risk\manager.py
+# hypothesis_version: 6.142.4
+
+[1.0, 'CIR/MRD/DP/09/2012', 'Daily Order Count', 'ISO A.8.26', 'KILL', 'Kill Switch Status', 'Kill switch active', 'Margin Available', 'Max Exposure', 'Max Order Value', 'NSE', 'Position Limit', 'Price Protection', 'Rate Limit', 'Rate limit exceeded', 'Symbol Allowlist', 'THROTTLE', 'Trading Hours', 'fail', 'killed', 'ltp', 'ltp_zero_skipped', 'order_id', 'pass', 'price', 'quantity', 'rate_limit_exceeded', 'risk_check_failed', 'risk_check_passed', 'segment', 'symbol', 'throttled']

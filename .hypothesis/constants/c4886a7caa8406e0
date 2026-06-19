@@ -1,0 +1,4 @@
+# file: C:\Users\npmvl-KP\AppData\Roaming\Python\Python312\site-packages\numba\core\callwrapper.py
+# hypothesis_version: 6.142.4
+
+['==', 'DEBUGJIT: {0}', 'arg%d.err', 'arg.end', 'entry', 'noinline', 'py_args', 'py_closure', 'py_kws']
