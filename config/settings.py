@@ -1,9 +1,10 @@
 """Application settings with Pydantic BaseSettings — SEBI compliance constants
 and risk limits."""
 
-from datetime import time
+from datetime import date, time
 from decimal import Decimal
 from enum import Enum
+from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -198,3 +199,62 @@ class BrokerSettings(BaseSettings):
     # Notifications
     TELEGRAM_BOT_TOKEN: str = Field(default="", validation_alias="TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID: str = Field(default="", validation_alias="TELEGRAM_CHAT_ID")
+
+
+# PHASE 2 ADDITIONS ─────────────────────────────────────────────────────────────────────
+
+
+class DataPipelineSettings(BaseSettings):
+    """Data pipeline configuration for market and price feed."""
+
+    model_config = SettingsConfigDict(env_prefix="PIPELINE_", env_file=".env", extra="ignore")
+
+    HISTORICAL_START_DATE: date = date(2023, 6, 1)  # 3 years back from today
+    HISTORICAL_END_DATE: date = date(2026, 6, 1)  # Today; override for incremental
+    FO_SYMBOLS: list[str] = ["NIFTY", "BANKNIFTY"]
+    CM_SYMBOLS: list[str] = ["NIFTY 50", "NIFTY BANK"]
+    MCX_SYMBOLS: list[str] = ["GOLD", "SILVER", "CRUDEOIL"]
+    DOWNLOAD_DIR: str = "data/bhavcopy"
+    CHECKPOINT_TABLE: str = "download_checkpoint"
+    BATCH_SIZE: int = 5000  # Rows per bulk INSERT
+    MAX_RETRIES: int = 3
+    RETRY_BACKOFF_SEC: float = 2.0
+    EVENT_LOG_TABLE: str = "market_events"
+
+
+class GreeksSettings(BaseSettings):
+    """Greek calculation settings for option pricing models."""
+
+    model_config = SettingsConfigDict(env_prefix="GREEKS_", env_file=".env", extra="ignore")
+
+    RFR_METHOD: Literal["t_bill", "futures_basis"] = "t_bill"
+    RFR_T_BILL_DEFAULT: float = 0.065  # RBI 91-day T-bill yield fallback
+    RFR_T_BILL_FETCH_URL: str = "https://www.rbi.org.in/scripts/BS_NSDPDisplay.aspx"  # RBI yield page
+    RFR_FUTURES_SYMBOL: str = "NIFTY"  # Use NIFTY futures for basis calculation
+    MIN_TTM_DAYS: int = 1  # Minimum time-to-maturity in calendar days
+    MIN_OPTION_PRICE: float = 0.05  # Skip IV computation for options priced below this
+    IV_MAX_ITERATIONS: int = 100  # Newton-Raphson iterations for IV
+    IV_PRECISION: float = 1e-6  # Convergence threshold
+    IV_UPPER_BOUND: float = 5.0  # Max IV = 500%
+    IV_LOWER_BOUND: float = 0.001  # Min IV = 0.1%
+    QUANTLIB_CALENDAR: str = "India"  # QuantLib calendar for Indian holidays
+
+
+class WebSocketSettings(BaseSettings):
+    """WebSocket connections for market data streaming."""
+
+    model_config = SettingsConfigDict(env_prefix="WS_", env_file=".env", extra="ignore")
+
+    RECONNECT_INITIAL_DELAY_SEC: float = 1.0
+    RECONNECT_MAX_DELAY_SEC: float = 60.0
+    RECONNECT_BACKOFF_FACTOR: float = 2.0
+    RECONNECT_MAX_ATTEMPTS: int = 100
+    REAUTH_SCHEDULE_HOUR_IST: int = 6  # Daily re-auth at 6:XX AM IST
+    REAUTH_SCHEDULE_MINUTE_IST: int = 1
+    RING_BUFFER_SIZE: int = 10000  # Max ticks held before backpressure
+    PERSIST_INTERVAL_SEC: float = 5.0  # Batch write ticks to TimescaleDB every N sec
+    REDIS_TTL_SEC: int = 86400  # 24h TTL for Redis tick cache
+    REDIS_KEY_PREFIX: str = "tick:"
+    NIFTY_ATM_STRIKES_EACH_SIDE: int = 25  # 25 above + 25 below = 50 strikes
+    MCX_INSTRUMENTS: list[str] = ["GOLD", "SILVER", "CRUDEOIL"]
+    HEARTBEAT_TIMEOUT_SEC: float = 5.0  # Zerodha sends heartbeat every ~2-3s

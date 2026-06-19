@@ -85,7 +85,7 @@ r.delete('_phase2_test')
 "
 Verification Gate: ALL imports must succeed. TimescaleDB must return extension version. Redis must PONG. Trivy must be on PATH. If ANY fails, fix before proceeding.
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-INSTRUCTION 2 — Create TimescaleDB Schema for Options Data
+Ph.2-2—Create TimescaleDB Schema for Options Data
 Create deployment/init_phase2.sql with the following schema. This extends Phase 0's init.sql.
 
 2.1 Event Log (Kleppmann Ch.3: Immutable Source of Truth)
@@ -331,7 +331,7 @@ conn.close()
 "
 # EXPECTED: audit_events, market_events, fo_options_eod, cm_spot_eod, greeks_snapshot, ws_ticks, download_checkpoint, + views
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-INSTRUCTION 3 — config/settings.py Additions for Phase 2
+Ph.2-3—config/settings.py Additions for Phase 2
 Extend the existing config/settings.py with Phase 2 settings classes. Do NOT modify existing Phase 0 settings — only ADD.
 
 3.1 DataPipelineSettings
@@ -383,7 +383,7 @@ class WebSocketSettings(BaseSettings):
     HEARTBEAT_TIMEOUT_SEC: float = 5.0     # Zerodha sends heartbeat every ~2-3s
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
-INSTRUCTION 4 — src/data/event_log.py — Immutable Event Log (Kleppmann Ch.3)
+Ph#2-4—src/data/event_log.py — Immutable Event Log (Kleppmann Ch.3)
 This is the single source of truth for all market data. All pipelines write events here first; derived tables are populated from this log.
 
 Requirements
