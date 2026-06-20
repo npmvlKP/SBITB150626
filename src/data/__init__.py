@@ -17,6 +17,9 @@ __all__ = [
     # Storage Layer (Phase 2-8)
     "TimescaleDBStore",
     "RedisCache",
+    # Data Providers (Phase 2)
+    "MarketDataProvider",
+    "KiteDataProvider",
 ]
 
 from src.data.historical import (
@@ -35,4 +38,5 @@ from src.data.option_chain import (
     RFRMethod,
     RiskFreeRateProvider,
 )
+from src.data.providers import KiteDataProvider, MarketDataProvider
 from src.data.storage import RedisCache, TimescaleDBStore
