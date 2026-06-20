@@ -27,8 +27,8 @@ class TestBrokerInterface:
         """Test that BrokerInterface is abstract."""
         assert issubclass(BrokerInterface, ABC)
 
-    def test_broker_has_all_required_methods(self):
-        """Test that BrokerInterface has all required methods."""
+    def test_broker_has_all_phase0_methods(self):
+        """Test that BrokerInterface has all Phase 0 required methods."""
         required_methods = [
             "authenticate",
             "place_order",
@@ -38,6 +38,20 @@ class TestBrokerInterface:
             "get_margins",
             "get_order_book",
             "get_instruments",
+        ]
+
+        for method in required_methods:
+            assert hasattr(BrokerInterface, method), f"Missing {method} in BrokerInterface"
+            obj = getattr(BrokerInterface, method)
+            assert obj.__isabstractmethod__, f"{method} should be abstract"
+
+    def test_broker_has_all_phase2_methods(self):
+        """Test that BrokerInterface has all Phase 2 required methods."""
+        required_methods = [
+            "get_option_chain",
+            "subscribe_ticks",
+            "get_historical_candles",
+            "get_quote",
         ]
 
         for method in required_methods:
@@ -69,6 +83,39 @@ class TestBrokerInterface:
         method = BrokerInterface.get_instruments
         sig = inspect.signature(method)
         assert "segment" in sig.parameters, "get_instruments should have 'segment' parameter"
+
+    def test_broker_get_option_chain_accepts_symbol_and_expiry(self):
+        """Test that get_option_chain method accepts required arguments."""
+        method = BrokerInterface.get_option_chain
+        sig = inspect.signature(method)
+        params = sig.parameters
+        assert "symbol" in params, "get_option_chain should have 'symbol' parameter"
+        assert "expiry" in params, "get_option_chain should have 'expiry' parameter"
+
+    def test_broker_subscribe_ticks_accepts_required_args(self):
+        """Test that subscribe_ticks method accepts required arguments."""
+        method = BrokerInterface.subscribe_ticks
+        sig = inspect.signature(method)
+        params = sig.parameters
+        assert "instruments" in params, "subscribe_ticks should have 'instruments' parameter"
+        assert "mode" in params, "subscribe_ticks should have 'mode' parameter"
+        assert "callback" in params, "subscribe_ticks should have 'callback' parameter"
+
+    def test_broker_get_historical_candles_accepts_required_args(self):
+        """Test that get_historical_candles method accepts required arguments."""
+        method = BrokerInterface.get_historical_candles
+        sig = inspect.signature(method)
+        params = sig.parameters
+        assert "instrument_token" in params, "get_historical_candles should have 'instrument_token' parameter"
+        assert "interval" in params, "get_historical_candles should have 'interval' parameter"
+        assert "from_date" in params, "get_historical_candles should have 'from_date' parameter"
+        assert "to_date" in params, "get_historical_candles should have 'to_date' parameter"
+
+    def test_broker_get_quote_accepts_instruments(self):
+        """Test that get_quote method accepts instruments argument."""
+        method = BrokerInterface.get_quote
+        sig = inspect.signature(method)
+        assert "instruments" in sig.parameters, "get_quote should have 'instruments' parameter"
 
 
 class TestStrategyInterface:
