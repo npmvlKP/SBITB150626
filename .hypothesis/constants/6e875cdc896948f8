@@ -1,0 +1,4 @@
+# file: g:\OC\SBITB-150626\src\data\event_log.py
+# hypothesis_version: 6.142.4
+
+[5000, 10000, ' AND ', ' WHERE ', 'CM_BHAVCOPY', 'EventLogWriter', 'FO_BHAVCOPY', 'GREEKS_SNAPSHOT', 'WS_OI_UPDATE', 'WS_TICK', 'end', 'epoch', 'event_id', 'event_log_flush', 'event_time', 'event_type', 'ingest_id', 'limit', 'oi_change', 'payload', 'require', 'schema_version', 'source', 'source = %(source)s', 'start']

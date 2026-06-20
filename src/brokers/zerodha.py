@@ -20,6 +20,12 @@ from .base import BrokerInterface, TickCallback
 
 logger = logging.getLogger(__name__)
 
+# Try to import kiteconnect at runtime
+try:
+    from kiteconnect import KiteConnect
+except ImportError:
+    KiteConnect = None  # type: ignore
+
 
 class KiteBroker(BrokerInterface):
     """Zerodha KiteConnect broker implementation.
@@ -56,10 +62,16 @@ class KiteBroker(BrokerInterface):
             api_key: KiteConnect API key
             api_secret: KiteConnect API secret
             access_token: Optional pre-generated access token
+
+        Raises:
+            ImportError: If kiteconnect package is not installed
         """
+        if KiteConnect is None:
+            raise ImportError("kiteconnect package is required. Install with: pip install kiteconnect")
+
         self.api_key = api_key
         self.api_secret = api_secret
-        self._kite: KiteConnect = KiteConnect(api_key=api_key)
+        self._kite: KiteConnect = KiteConnect(api_key=api_key)  # type: ignore
         self._kite.api_secret = api_secret
         self._access_token: str | None = access_token
 

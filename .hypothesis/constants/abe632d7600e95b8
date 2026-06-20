@@ -1,0 +1,4 @@
+# file: g:\OC\SBITB-150626\scripts\daily_reconcile.py
+# hypothesis_version: 6.142.4
+
+[10000, '%Y-%m-%dT%H:%M:%S %Z', '=', 'Description', 'ERROR', 'Issues Found:', 'OK', 'ORDER_CANCELLED', 'ORDER_REJECTED', 'Order ID', 'Summary:', 'Type', 'UNKNOWN', 'WARNING', '__main__', 'bold magenta', 'broker_orders', 'cyan', 'daily_reconcile', 'is_compliant', 'issues', 'local', 'local_orders', 'matched', 'mismatch', 'missing_in_broker', 'missing_in_local', 'order_id', 'order_type', 'phase_0_skeleton', 'price', 'quantity', 'red', 'replace', 'report_id', 'segment', 'severity', 'skipped', 'status_mismatch', 'symbol', 'timestamp', 'total_issues', 'utf-8', 'win32', 'yellow']

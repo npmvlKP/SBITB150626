@@ -1,11 +1,22 @@
 """Shared pytest fixtures for all tests."""
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
-from config.settings import AuditSettings, ComplianceSettings, KillSwitchSettings, RiskSettings
+from config.settings import (
+    AuditSettings,
+    ComplianceSettings,
+    DataPipelineSettings,
+    GreeksSettings,
+    KillSwitchSettings,
+    RiskSettings,
+    WebSocketSettings,
+)
+from src.data.option_chain import OptionMetrics, OptionMetricsComputer, RiskFreeRateProvider
 from src.risk.audit import AuditLogger
 from src.risk.kill_switch import KillSwitch
 from src.risk.manager import RiskManager
@@ -99,3 +110,196 @@ def sample_order() -> dict[str, Any]:
         "ltp": Decimal("25000"),
         "order_type": "LIMIT",
     }
+
+
+# =============================================================================
+# Phase 2: Data Pipeline Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def pipeline_settings() -> DataPipelineSettings:
+    """Data pipeline settings with test-safe values."""
+    return DataPipelineSettings(
+        bhavcopy_base_url="https://example.com/bhavcopy",
+        batch_size=100,
+        max_retries=3,
+        retry_delay=1.0,
+    )
+
+
+@pytest.fixture
+def greeks_settings() -> GreeksSettings:
+    """Greeks computation settings with test-safe values."""
+    return GreeksSettings(
+        RFR_METHOD="t_bill",
+        RFR_T_BILL_DEFAULT=0.065,
+        MIN_TTM_DAYS=1,
+        MIN_OPTION_PRICE=0.05,
+        IV_UPPER_BOUND=5.0,
+        IV_LOWER_BOUND=0.001,
+    )
+
+
+@pytest.fixture
+def ws_settings() -> WebSocketSettings:
+    """WebSocket settings with test-safe values."""
+    return WebSocketSettings(
+        RECONNECT_MAX_DELAY_SEC=60.0,
+        RECONNECT_MAX_ATTEMPTS=3,
+        RING_BUFFER_SIZE=10000,
+        REDIS_TTL_SEC=86400,
+    )
+
+
+@pytest.fixture
+def sample_fo_row() -> dict[str, Any]:
+    """Sample F&O CSV row for testing."""
+    return {
+        "instrument_token": "12345",
+        "symbol": "NIFTY",
+        "expiry": "2026-06-26",
+        "strike": "25000",
+        "option_type": "CE",
+        "open": "24800.00",
+        "high": "24950.00",
+        "low": "24700.00",
+        "close": "24900.00",
+        "volume": "150000",
+        "value": "3735000000.00",
+        "open_interest": "2500000",
+    }
+
+
+@pytest.fixture
+def sample_tick() -> dict[str, Any]:
+    """Sample tick data for testing."""
+    return {
+        "instrument_token": "12345",
+        "last_price": 24900.0,
+        "last_quantity": 50,
+        "average_price": 24850.0,
+        "volume": 150000,
+        "buy_quantity": 120000,
+        "sell_quantity": 130000,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+
+# =============================================================================
+# Phase 2: Mocks for external services (Redis, TimescaleDB)
+# =============================================================================
+
+
+class MockRedisClient:
+    """Mock Redis client for testing."""
+
+    def __init__(self) -> None:
+        self._data: dict[str, Any] = {}
+
+    async def set(self, key: str, value: Any, ex: int | None = None) -> bool:
+        self._data[key] = value
+        return True
+
+    async def get(self, key: str) -> Any | None:
+        return self._data.get(key)
+
+    async def delete(self, *keys: str) -> int:
+        count = sum(1 for k in keys if k in self._data)
+        for k in keys:
+            self._data.pop(k, None)
+        return count
+
+    async def pipeline(self):
+        return MockPipeline(self)
+
+    async def ping(self) -> bool:
+        return True
+
+
+class MockPipeline:
+    """Mock Redis pipeline."""
+
+    def __init__(self, redis: MockRedisClient) -> None:
+        self._redis = redis
+        self._commands: list[tuple[str, ...]] = []
+
+    def set(self, key: str, value: Any) -> "MockPipeline":
+        self._commands.append(("set", key, value))
+        return self
+
+    def expire(self, key: str, seconds: int) -> "MockPipeline":
+        self._commands.append(("expire", key, seconds))
+        return self
+
+    async def execute(self) -> list[Any]:
+        for cmd in self._commands:
+            if cmd[0] == "set":
+                self._redis._data[cmd[1]] = cmd[2]
+        return [True] * len(self._commands)
+
+
+class MockConnectionPool:
+    """Mock psycopg connection pool for testing."""
+
+    def __init__(self) -> None:
+        self._closed = False
+
+    async def connection(self) -> AsyncMock:
+        return AsyncMock()
+
+    async def close(self) -> None:
+        self._closed = True
+
+
+@pytest.fixture
+def mock_redis() -> MockRedisClient:
+    """Mock Redis client."""
+    return MockRedisClient()
+
+
+@pytest.fixture
+def mock_pool() -> MockConnectionPool:
+    """Mock connection pool."""
+    return MockConnectionPool()
+
+
+@pytest.fixture
+def rfr_provider(greeks_settings: GreeksSettings) -> RiskFreeRateProvider:
+    """Risk-free rate provider for Greeks computation."""
+    return RiskFreeRateProvider(settings=greeks_settings, db_url="postgresql://test:test@localhost:5432/test")
+
+
+@pytest.fixture
+def greeks_computer(
+    greeks_settings: GreeksSettings,
+    rfr_provider: RiskFreeRateProvider,
+) -> OptionMetricsComputer:
+    """Option Greeks computer instance."""
+    return OptionMetricsComputer(settings=greeks_settings, rfr_provider=rfr_provider)
+
+
+@pytest.fixture
+def sample_option_metrics() -> OptionMetrics:
+    """Sample option metrics for testing."""
+    return OptionMetrics(
+        iv=0.185,
+        delta=0.52,
+        gamma=0.032,
+        theta=-45.20,
+        vega=0.182,
+        risk_free_rate=0.065,
+        rfr_method="t_bill",
+        ttm_years=0.05,
+        compute_error=None,
+    )
+
+
+@pytest.fixture
+def event_writer() -> AsyncMock:
+    """Mock event writer for testing."""
+    writer = AsyncMock()
+    writer.write = AsyncMock(return_value=True)
+    writer.flush = AsyncMock(return_value=True)
+    writer.close = AsyncMock(return_value=True)
+    return writer

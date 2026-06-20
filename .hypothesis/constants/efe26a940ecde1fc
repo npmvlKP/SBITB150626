@@ -1,0 +1,4 @@
+# file: g:\OC\SBITB-150626\src\brokers\zerodha.py
+# hypothesis_version: 6.142.4
+
+[0.0, 1.0, 3.0, '%Y-%m-%d', 'MARKET', 'NA', 'NFO', 'OPEN', 'Order placed', 'TRIGGER PENDING', 'api_secret', 'cancelled', 'close', 'date', 'default:1', 'error', 'exchange', 'expiry', 'failed', 'high', 'instrument_token', 'instrument_type', 'instruments', 'lot_size', 'low', 'market_protection', 'mode', 'net', 'open', 'option_type', 'order_id', 'order_type', 'params', 'price', 'product', 'quantity', 'regular', 'response', 'status', 'strike', 'tag', 'timestamp', 'trading_symbol', 'tradingsymbol', 'transaction_type', 'trigger_price', 'variety', 'volume']
