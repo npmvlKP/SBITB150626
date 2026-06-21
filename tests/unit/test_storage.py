@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -103,37 +103,64 @@ def sample_tick_data() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class MockAsyncConnectionPool:
-    """Mock psycopg_pool.AsyncConnectionPool for testing."""
+class MockExecuteResult:
+    """Mock result from conn.execute() for healthcheck."""
 
-    def __init__(self):
-        self.connection_count = 0
-        self.connections = []
+    def __init__(self, row):
+        self._row = row
 
-    async def connection(self):
-        """Return a mock connection."""
-        self.connection_count += 1
-        conn = MockConnection()
-        self.connections.append(conn)
-        return conn
+    async def fetchone(self):
+        """Return the mock row."""
+        return self._row
 
-    async def close(self):
-        """Close the pool."""
-        self.connections.clear()
+
+class MockCursor:
+    """Mock database cursor."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self._execute_count = 0
+        self._results = []
+
+    async def execute(self, query, params=None):
+        """Mock execute."""
+        self._execute_count += 1
+        return MagicMock(rowcount=1)
+
+    async def fetchall(self):
+        """Mock fetchall."""
+        return self._results
+
+    async def fetchone(self):
+        """Mock fetchone."""
+        return self._results[0] if self._results else None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
 
 
 class MockConnection:
     """Mock database connection."""
 
-    def __init__(self):
+    def __init__(self, healthcheck_row=None):
         self.execute_count = 0
         self.fetch_count = 0
         self.results = []
+        self._healthcheck_row = healthcheck_row
+
+    def cursor(self):
+        """Return an async cursor context manager."""
+        return MockCursorContext(self)
 
     async def execute(self, query, params=None):
-        """Mock execute."""
+        """Mock execute. Returns a result object that supports fetchone()."""
         self.execute_count += 1
-        return MagicMock(rowcount=1)
+        if self._healthcheck_row:
+            return MockExecuteResult(self._healthcheck_row)
+        return MagicMock(rowcount=1, fetchone=AsyncMock(return_value=None))
 
     async def fetch(self, query, params=None):
         """Mock fetch."""
@@ -143,6 +170,65 @@ class MockConnection:
     async def fetchone(self):
         """Mock fetchone."""
         return self.results[0] if self.results else None
+
+
+class MockAsyncConnectionContext:
+    """Mock async context manager for connection."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    async def __aenter__(self):
+        return self._conn
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
+class MockCursorContext:
+    """Mock async context manager for cursor."""
+
+    def __init__(self, conn):
+        self._cursor = MockCursor(conn)
+
+    async def __aenter__(self):
+        return self._cursor
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
+class MockAsyncConnectionPool:
+    """Mock psycopg_pool.AsyncConnectionPool for testing.
+
+    The real psycopg_pool.connection() is async and returns an async context manager.
+    We mock it by making connection() return the context manager directly (not a coroutine).
+    """
+
+    def __init__(self, healthcheck_row=None):
+        self.connection_count = 0
+        self.connections: list = []
+        self._ready = True
+        self._healthcheck_row = healthcheck_row
+
+    def connection(self):
+        """Return a mock connection context manager (synchronous, like real psycopg_pool).
+
+        Note: psycopg_pool's connection() is async but returns a context manager.
+        For testing simplicity, we return the context manager directly.
+        """
+        self.connection_count += 1
+        conn = MockConnection(healthcheck_row=self._healthcheck_row)
+        self.connections.append(conn)
+        return MockAsyncConnectionContext(conn)
+
+    async def wait(self):
+        """Mock wait for pool initialization."""
+        pass
+
+    async def close(self):
+        """Close the pool."""
+        self.connections.clear()
 
 
 class MockRedis:
@@ -165,8 +251,8 @@ class MockRedis:
         """Ping Redis."""
         return True
 
-    async def pipeline(self, transaction=True):
-        """Return a mock pipeline."""
+    def pipeline(self, transaction=True):
+        """Return a mock pipeline (synchronous for context manager use)."""
         return MockRedisPipeline(self)
 
 
@@ -185,6 +271,14 @@ class MockRedisPipeline:
     async def execute(self):
         """Execute pipeline."""
         return [self._redis.store.get(k) for k in self._gets]
+
+    async def __aenter__(self):
+        """Support async context manager."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Support async context manager."""
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -225,25 +319,13 @@ class TestTimescaleDBStore:
         from src.data.storage import TimescaleDBStore
 
         store = TimescaleDBStore("postgresql://test:test@localhost:5432/test", pipeline_settings)
-        store._pool = MockAsyncConnectionPool()
-        store._pool.connections[0].results = [
-            {
-                "date": date(2024, 1, 15),
-                "symbol": "NIFTY",
-                "expiry": date(2024, 1, 25),
-                "strike": 21500.0,
-                "option_type": "CE",
-                "open": 350.0,
-                "high": 360.0,
-                "low": 340.0,
-                "close": 355.0,
-                "settle_price": 355.0,
-                "volume": 500.0,
-                "oi": 10000.0,
-                "oi_change": 500.0,
-                "created_at": datetime.now(),
-            }
-        ]
+
+        # Set up mock pool before calling query methods
+        mock_pool = MockAsyncConnectionPool()
+        conn = MockConnection()
+        conn.results = []  # Empty results = empty DataFrame
+        mock_pool.connections = [conn]
+        store._pool = mock_pool
 
         df = await store.query_fo_options(
             symbol="NIFTY",
@@ -262,7 +344,10 @@ class TestTimescaleDBStore:
 
         store = TimescaleDBStore("postgresql://test:test@localhost:5432/test", pipeline_settings)
         store._pool = MockAsyncConnectionPool()
-        store._pool.connections[0].results = []
+        # Pre-populate connection for mock
+        conn = MockConnection()
+        conn.results = []
+        store._pool.connections.append(conn)
 
         df = await store.query_cm_spot(
             symbol="NIFTY 50",
@@ -281,7 +366,10 @@ class TestTimescaleDBStore:
 
         store = TimescaleDBStore("postgresql://test:test@localhost:5432/test", pipeline_settings)
         store._pool = MockAsyncConnectionPool()
-        store._pool.connections[0].results = []
+        # Pre-populate connection for mock
+        conn = MockConnection()
+        conn.results = []
+        store._pool.connections.append(conn)
 
         df = await store.query_greeks(
             symbol="NIFTY",
@@ -296,11 +384,14 @@ class TestTimescaleDBStore:
         from src.data.storage import TimescaleDBStore
 
         store = TimescaleDBStore("postgresql://test:test@localhost:5432/test", pipeline_settings)
-        store._pool = MockAsyncConnectionPool()
-        store._pool.connections[0].results = [(1, datetime.now())]
+
+        # Create mock pool with healthcheck row so connections return proper results
+        mock_pool = MockAsyncConnectionPool(healthcheck_row=(1, datetime.now()))
+
+        # Set _pool directly since healthcheck uses it
+        store._pool = mock_pool
 
         result = await store.healthcheck()
-        # Mock always returns True since we set up results
         assert result is True
 
     @pytest.mark.asyncio

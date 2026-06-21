@@ -17,11 +17,12 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import redis
 import structlog
@@ -68,10 +69,10 @@ class WebSocketSettings:
     reconnect_max_delay_sec: float = RECONNECT_MAX_DELAY_SEC
     heartbeat_timeout_sec: float = HEARTBEAT_TIMEOUT_SEC
     persist_interval_sec: float = PERSIST_INTERVAL_SEC
-    redis_ttl_sec: int = REDIS_TTL_SEC
+    redis_ttl_sec: float = REDIS_TTL_SEC
 
 
-class KiteBrokerProtocol:
+class KiteBrokerProtocol(Protocol):
     """Protocol for Kite broker interface."""
 
     @property
@@ -101,12 +102,12 @@ class TickRingBuffer:
         Args:
             capacity: Maximum number of ticks in buffer
         """
-        self._buffer: deque[dict] = deque(maxlen=capacity)
+        self._buffer: deque[dict[str, Any]] = deque(maxlen=capacity)
         self._lock = threading.Lock()
         self.dropped_count: int = 0
         self._capacity = capacity
 
-    def push(self, tick: dict) -> None:
+    def push(self, tick: dict[str, Any]) -> None:
         """Push tick to buffer, dropping oldest if full.
 
         Args:
@@ -122,7 +123,7 @@ class TickRingBuffer:
                 )
             self._buffer.append(tick)
 
-    def drain(self, max_items: int) -> list[dict]:
+    def drain(self, max_items: int) -> list[dict[str, Any]]:
         """Atomically remove and return up to max_items.
 
         Args:
@@ -179,7 +180,7 @@ class LiveMarketFeed:
         kite_api: KiteBrokerProtocol,
         settings: WebSocketSettings,
         event_writer: EventLogWriter,
-        redis_client: redis.Redis,
+        redis_client: redis.Redis[Any],
         audit_logger: AuditLogger,
     ) -> None:
         """Initialize LiveMarketFeed."""
@@ -197,9 +198,9 @@ class LiveMarketFeed:
         self._reconnect_attempts: int = 0
 
         # Background tasks
-        self._persist_task: asyncio.Task | None = None
-        self._heartbeat_task: asyncio.Task | None = None
-        self._reauth_task: asyncio.Task | None = None
+        self._persist_task: asyncio.Task[Any] | None = None
+        self._heartbeat_task: asyncio.Task[Any] | None = None
+        self._reauth_task: asyncio.Task[Any] | None = None
         self._is_running: bool = False
 
         # Heartbeat tracking
@@ -316,10 +317,10 @@ class LiveMarketFeed:
 
         except Exception as e:
             logger.error("websocket_connect_failed", error=str(e))
-            self._state = WSConnectionState.ERROR
+            self._state = WSConnectionState.RECONNECTING
             await self._handle_reconnect()
 
-    def _on_connect(self, ws: Any, response: dict) -> None:
+    def _on_connect(self, ws: Any, response: dict[str, Any]) -> None:
         """WebSocket connect callback.
 
         Args:
@@ -356,7 +357,7 @@ class LiveMarketFeed:
             )
         )
 
-    def _on_ticks(self, ws: Any, ticks: list[dict]) -> None:
+    def _on_ticks(self, ws: Any, ticks: list[dict[str, Any]]) -> None:
         """WebSocket ticks callback.
 
         Args:
@@ -417,7 +418,7 @@ class LiveMarketFeed:
             # Network error - trigger reconnect
             asyncio.create_task(self._handle_reconnect())
 
-    def _on_reconnect(self, ws: Any, response: dict) -> None:
+    def _on_reconnect(self, ws: Any, response: dict[str, Any]) -> None:
         """WebSocket reconnect callback.
 
         Args:
@@ -458,7 +459,7 @@ class LiveMarketFeed:
             )
 
             # Get instrument tokens
-            tokens = []
+            tokens: list[int] = []
             for strike in strikes:
                 ce_token = self._kite_api.get_instrument_token("NFO", f"NIFTY{strike}CE")
                 pe_token = self._kite_api.get_instrument_token("NFO", f"NIFTY{strike}PE")
@@ -471,7 +472,7 @@ class LiveMarketFeed:
             # Subscribe in FULL mode
             if tokens:
                 self._kws.subscribe(tokens)
-                self._kws.set_mode(tokens, self._kws.MODE_FULL)  # type: ignore
+                self._kws.set_mode(tokens, self._kws.MODE_FULL)
                 self._subscribed_tokens.update(tokens)
 
             logger.info("subscribed_nifty_options", tokens=len(tokens))
@@ -496,7 +497,7 @@ class LiveMarketFeed:
             )
 
             # Get instrument tokens
-            tokens = []
+            tokens: list[int] = []
             for strike in strikes:
                 ce_token = self._kite_api.get_instrument_token("NFO", f"BANKNIFTY{strike}CE")
                 pe_token = self._kite_api.get_instrument_token("NFO", f"BANKNIFTY{strike}PE")
@@ -509,7 +510,7 @@ class LiveMarketFeed:
             # Subscribe in FULL mode
             if tokens:
                 self._kws.subscribe(tokens)
-                self._kws.set_mode(tokens, self._kws.MODE_FULL)  # type: ignore
+                self._kws.set_mode(tokens, self._kws.MODE_FULL)
                 self._subscribed_tokens.update(tokens)
 
             logger.info("subscribed_banknifty_options", tokens=len(tokens))
@@ -521,7 +522,7 @@ class LiveMarketFeed:
         """Subscribe to MCX commodity futures (GOLD, SILVER, CRUDEOIL)."""
         try:
             instruments = ["GOLDM", "SILVERM", "CRUDEOILM"]
-            tokens = []
+            tokens: list[int] = []
 
             for instr in instruments:
                 token = self._kite_api.get_instrument_token("MCX", instr)
@@ -531,7 +532,7 @@ class LiveMarketFeed:
             # Subscribe in QUOTE mode
             if tokens:
                 self._kws.subscribe(tokens)
-                self._kws.set_mode(tokens, self._kws.MODE_QUOTE)  # type: ignore
+                self._kws.set_mode(tokens, self._kws.MODE_QUOTE)
                 self._subscribed_tokens.update(tokens)
 
             logger.info("subscribed_mcx_futures", tokens=len(tokens))
@@ -565,7 +566,7 @@ class LiveMarketFeed:
             logger.error("get_spot_price_failed", error=str(e))
             return None
 
-    def _write_to_redis(self, tick: dict) -> None:
+    def _write_to_redis(self, tick: dict[str, Any]) -> None:
         """Write tick to Redis cache.
 
         Args:
@@ -576,7 +577,7 @@ class LiveMarketFeed:
             if instrument_token:
                 key = f"tick:{instrument_token}"
                 value = json.dumps(tick, default=str)
-                self._redis.setex(key, self._settings.redis_ttl_sec, value)
+                self._redis.setex(key, int(self._settings.redis_ttl_sec), value)
         except Exception as e:
             logger.warning("redis_write_failed", error=str(e))
 
@@ -700,7 +701,7 @@ class LiveMarketFeed:
             # Convert to MarketEvent list
             events = [
                 MarketEvent(
-                    event_id=tick.get("event_id") or generate_uuid(),
+                    event_id=uuid.uuid4(),
                     event_type="WS_TICK",
                     source="kite_ws",
                     payload=tick,
@@ -726,7 +727,7 @@ class LiveMarketFeed:
         except Exception as e:
             logger.error("persist_ticks_failed", error=str(e))
 
-    async def _write_to_ws_ticks_table(self, ticks: list[dict]) -> None:
+    async def _write_to_ws_ticks_table(self, ticks: list[dict[str, Any]]) -> None:
         """Write ticks to ws_ticks table using bulk insert.
 
         Args:
@@ -793,6 +794,15 @@ class LiveMarketFeed:
         return self._is_running
 
 
+def generate_uuid() -> str:
+    """Generate a new UUID string.
+
+    Returns:
+        UUID as string
+    """
+    return str(uuid.uuid4())
+
+
 def compute_atm_subscriptions(spot_price: float, strike_interval: float, num_strikes: int) -> list[float]:
     """Compute ATM option strikes to subscribe.
 
@@ -816,10 +826,3 @@ def compute_atm_subscriptions(spot_price: float, strike_interval: float, num_str
         strikes.append(strike)
 
     return strikes
-
-
-def generate_uuid() -> str:
-    """Generate a UUID string."""
-    import uuid
-
-    return str(uuid.uuid4())

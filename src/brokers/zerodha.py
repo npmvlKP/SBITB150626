@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 try:
     from kiteconnect import KiteConnect
 except ImportError:
-    KiteConnect = None  # type: ignore
+    KiteConnect = None
 
 
 class KiteBroker(BrokerInterface):
@@ -71,7 +71,7 @@ class KiteBroker(BrokerInterface):
 
         self.api_key = api_key
         self.api_secret = api_secret
-        self._kite: KiteConnect = KiteConnect(api_key=api_key)  # type: ignore
+        self._kite: KiteConnect = KiteConnect(api_key=api_key)
         self._kite.api_secret = api_secret
         self._access_token: str | None = access_token
 
@@ -212,7 +212,7 @@ class KiteBroker(BrokerInterface):
             },
         )
 
-        return order_response
+        return order_response  # type: ignore[no-any-return]
 
     async def cancel_order(self, order_id: str, variety: str = "regular") -> dict[str, Any]:
         """Cancel an existing order.
@@ -238,7 +238,7 @@ class KiteBroker(BrokerInterface):
                     None, lambda: self._kite.cancel_order(variety=variety, order_id=order_id)
                 )
                 logger.info(f"Order {order_id} cancelled successfully")
-                return result
+                return result  # type: ignore[no-any-return]
 
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -296,7 +296,7 @@ class KiteBroker(BrokerInterface):
         positions = await loop.run_in_executor(None, lambda: self._kite.positions())
 
         # Return net positions
-        return positions.get("net", [])
+        return positions.get("net", [])  # type: ignore[no-any-return]
 
     async def get_margins(self) -> dict[str, Any]:
         """Get account margin information.
@@ -307,7 +307,7 @@ class KiteBroker(BrokerInterface):
         loop = asyncio.get_event_loop()
         margins = await loop.run_in_executor(None, lambda: self._kite.margins())
 
-        return margins
+        return margins  # type: ignore[no-any-return]
 
     async def get_order_book(self) -> list[dict[str, Any]]:
         """Get the order book.
@@ -318,7 +318,7 @@ class KiteBroker(BrokerInterface):
         loop = asyncio.get_event_loop()
         orders = await loop.run_in_executor(None, lambda: self._kite.orders())
 
-        return orders
+        return orders  # type: ignore[no-any-return]
 
     async def get_instruments(self, segment: str) -> list[dict[str, Any]]:
         """Get available instruments for a specific segment.
@@ -554,7 +554,7 @@ class KiteBroker(BrokerInterface):
 
         self._last_quote_call = asyncio.get_event_loop().time()
 
-        return quotes
+        return quotes  # type: ignore[no-any-return]
 
     # =========================================================================
     # Helper Methods
@@ -574,7 +574,7 @@ class KiteBroker(BrokerInterface):
         Returns:
             str: Login URL for user authentication
         """
-        return self._kite.login_url()
+        return self._kite.login_url()  # type: ignore[no-any-return]
 
     def clear_cache(self) -> None:
         """Clear the instrument cache."""

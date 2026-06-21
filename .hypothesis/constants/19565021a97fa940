@@ -1,0 +1,4 @@
+# file: g:\OC\SBITB-150626\src\data\live_market_feed.py
+# hypothesis_version: 6.142.4
+
+[0.0, 1.0, 2.0, 10.0, 30.0, 50.0, 60.0, 100.0, 403, 1000, 10000, 'CRUDEOILM', 'GOLDM', 'MCX', 'NFO', 'NIFTY 50', 'NIFTY BANK', 'NSE', 'SESSION_END', 'SESSION_START', 'SILVERM', 'WS_CONNECTED', 'WS_TICK', 'epoch', 'feed', 'final_epoch', 'initiating_reauth', 'instrument_token', 'instruments', 'kite_ws', 'live_market_feed', 'persist_loop_error', 'persist_ticks_failed', 'reauth_exception', 'reauth_failed', 'reauth_successful', 'reconnect_attempt', 'reconnect_failed', 'redis_write_failed', 'ring_buffer_full', 'scheduled_reauth', 'subscribe_mcx_failed', 'ticks_persisted', 'token', 'websocket_closed', 'websocket_connected', 'websocket_error']

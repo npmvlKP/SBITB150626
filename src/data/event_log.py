@@ -45,13 +45,13 @@ class MarketEvent:
     event_type: str = ""
     event_time: datetime = field(default_factory=lambda: datetime.now(UTC))
     schema_version: int = 1
-    payload: dict | None = None
+    payload: dict[str, Any] | None = None
     source: str = ""
     ingest_id: uuid.UUID | None = None
     epoch: int = 0
 
 
-def _event_to_db_row(event: MarketEvent) -> tuple:
+def _event_to_db_row(event: MarketEvent) -> tuple[str, datetime, str, int, str, str, str | None, int]:
     """Serialize a MarketEvent into a PostgreSQL row tuple.
 
     The payload column (JSONB) stores only the actual data dict. Metadata fields
@@ -122,11 +122,16 @@ class EventLogWriter:
         self.buffer.clear()
 
         rows = 0
+        conn = self._conn
+        if conn is None:
+            logger.error("event_log_no_connection")
+            return 0
+
         for attempt in range(3):
             try:
-                async with self._conn.transaction():
+                async with conn.transaction():
                     records = [_event_to_db_row(ev) for ev in batch]
-                    async with self._conn.cursor() as cur:
+                    async with conn.cursor() as cur:
                         await cur.executemany(_BUFFER_INSERT_SQL, records)
                         rows = cur.rowcount
                 break
@@ -208,7 +213,7 @@ class EventLogReader:
             await conn.close()
 
     @staticmethod
-    def _row_to_event(row: tuple) -> MarketEvent:
+    def _row_to_event(row: tuple[Any, ...]) -> MarketEvent:
         """Convert a database row back to a MarketEvent."""
         return MarketEvent(
             event_id=uuid.UUID(str(row[0])),
@@ -231,7 +236,8 @@ class EventLogReader:
                     {"source": source},
                 )
                 row = await cur.fetchone()
-                return row[0] if row else 0
+                result: int = row[0] if row else 0
+                return result
         finally:
             await conn.close()
 
@@ -243,10 +249,10 @@ class EventCodec:
     upgrades a raw payload dict to the next version.
     """
 
-    MIGRATIONS: dict[int, Callable[[dict], dict]] = {}
+    MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {}
 
     @classmethod
-    def encode(cls, event: MarketEvent) -> dict:
+    def encode(cls, event: MarketEvent) -> dict[str, Any]:
         """Serialize a MarketEvent to a plain dict for storage or transport."""
         return {
             "event_id": str(event.event_id),
@@ -260,7 +266,7 @@ class EventCodec:
         }
 
     @classmethod
-    def decode(cls, raw: dict) -> MarketEvent:
+    def decode(cls, raw: dict[str, Any]) -> MarketEvent:
         """Deserialize a raw dict back into a MarketEvent.
 
         If the stored schema_version is lower than CURRENT_SCHEMA_VERSION,
@@ -303,7 +309,7 @@ class EventCodec:
 # ---------------------------------------------------------------------------
 
 
-def migrate_v1_to_v2(payload: dict) -> dict:
+def migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
     """Example v1→v2 migration: add ``oi_change`` defaulting to 0."""
     if "oi_change" not in payload:
         payload = {**payload, "oi_change": 0}

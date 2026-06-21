@@ -2,12 +2,14 @@
 WebSocket Message Handlers for Zerodha Kite Connect
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from src.brokers.zerodha.types import (
     DepthUpdate,
@@ -16,7 +18,9 @@ from src.brokers.zerodha.types import (
     Quote,
     Tick,
 )
-from src.data.providers import MarketDataProvider
+
+if TYPE_CHECKING:
+    from src.data.providers import MarketDataProvider
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +33,7 @@ class Subscription:
     exchange: str
     tradable: bool
     mode: str  # full, ltp, quote
-    callback: Callable | None = None
+    callback: Callable[..., Any] | None = None
 
 
 class MessageHandler(Protocol):
@@ -42,7 +46,7 @@ class TickHandler:
     """Handles tick (LTP) updates from WebSocket."""
 
     @staticmethod
-    async def handle(message: dict[str, Any], provider: MarketDataProvider) -> bool:
+    async def handle(message: list[Any], provider: MarketDataProvider) -> bool:
         """Handle LTP tick update.
 
         Zerodha format:
@@ -54,7 +58,7 @@ class TickHandler:
         try:
             # Extract tick data
             if len(message) >= 3 and isinstance(message[2], dict):
-                tick_data = message[2]
+                tick_data: dict[str, Any] = message[2]
 
                 # Parse LTP update
                 ltp_update = LTPUpdate(
@@ -78,15 +82,15 @@ class TickHandler:
                 await provider.store_tick(ltp_update)
 
                 logger.debug(
-                    "tick_received",
-                    instrument_token=ltp_update.instrument_token,
-                    last_price=ltp_update.last_price,
-                    last_quantity=ltp_update.last_quantity,
+                    "tick_received: token=%s price=%s qty=%s",
+                    ltp_update.instrument_token,
+                    ltp_update.last_price,
+                    ltp_update.last_quantity,
                 )
                 return True
 
         except Exception as e:
-            logger.error("Failed to handle tick", error=str(e), message=message)
+            logger.error("Failed to handle tick: %s", str(e))
             return False
 
         return False
@@ -96,7 +100,7 @@ class FullModeHandler:
     """Handles full mode updates (all fields)."""
 
     @staticmethod
-    async def handle(message: dict[str, Any], provider: MarketDataProvider) -> bool:
+    async def handle(message: list[Any], provider: MarketDataProvider) -> bool:
         """Handle full mode update.
 
         Zerodha format:
@@ -104,7 +108,7 @@ class FullModeHandler:
         """
         try:
             if len(message) >= 3 and isinstance(message[2], dict):
-                tick_data = message[2]
+                tick_data: dict[str, Any] = message[2]
 
                 # Parse full tick
                 tick = Tick(
@@ -133,16 +137,16 @@ class FullModeHandler:
                 await provider.store_tick(tick)
 
                 logger.debug(
-                    "full_tick_received",
-                    instrument_token=tick.instrument_token,
-                    last_price=tick.last_price,
-                    bid_price=tick.bid_price,
-                    ask_price=tick.ask_price,
+                    "full_tick_received: token=%s price=%s bid=%s ask=%s",
+                    tick.instrument_token,
+                    tick.last_price,
+                    tick.bid_price,
+                    tick.ask_price,
                 )
                 return True
 
         except Exception as e:
-            logger.error("Failed to handle full tick", error=str(e), message=message)
+            logger.error("Failed to handle full tick: %s", str(e))
             return False
 
         return False
@@ -152,7 +156,7 @@ class QuoteModeHandler:
     """Handles quote mode updates."""
 
     @staticmethod
-    async def handle(message: dict[str, Any], provider: MarketDataProvider) -> bool:
+    async def handle(message: list[Any], provider: MarketDataProvider) -> bool:
         """Handle quote mode update.
 
         Zerodha format:
@@ -160,7 +164,7 @@ class QuoteModeHandler:
         """
         try:
             if len(message) >= 3 and isinstance(message[2], dict):
-                tick_data = message[2]
+                tick_data: dict[str, Any] = message[2]
 
                 # Parse quote
                 quote = Quote(
@@ -193,15 +197,15 @@ class QuoteModeHandler:
                 await provider.store_tick(quote)
 
                 logger.debug(
-                    "quote_received",
-                    instrument_token=quote.instrument_token,
-                    last_price=quote.last_price,
-                    oi=quote.oi,
+                    "quote_received: token=%s price=%s oi=%s",
+                    quote.instrument_token,
+                    quote.last_price,
+                    quote.oi,
                 )
                 return True
 
         except Exception as e:
-            logger.error("Failed to handle quote", error=str(e), message=message)
+            logger.error("Failed to handle quote: %s", str(e))
             return False
 
         return False
@@ -211,7 +215,7 @@ class DepthHandler:
     """Handles depth updates from WebSocket."""
 
     @staticmethod
-    async def handle(message: dict[str, Any], provider: MarketDataProvider) -> bool:
+    async def handle(message: list[Any], provider: MarketDataProvider) -> bool:
         """Handle depth update.
 
         Zerodha format for depth:
@@ -219,7 +223,7 @@ class DepthHandler:
         """
         try:
             if len(message) >= 3 and isinstance(message[2], dict):
-                depth_data = message[2]
+                depth_data: dict[str, Any] = message[2]
 
                 # Parse depth update
                 depth_update = DepthUpdate(
@@ -234,15 +238,15 @@ class DepthHandler:
                 await provider.store_depth(depth_update)
 
                 logger.debug(
-                    "depth_received",
-                    instrument_token=depth_update.instrument_token,
-                    bid_count=len(depth_update.bids),
-                    ask_count=len(depth_update.asks),
+                    "depth_received: token=%s bids=%s asks=%s",
+                    depth_update.instrument_token,
+                    len(depth_update.bids),
+                    len(depth_update.asks),
                 )
                 return True
 
         except Exception as e:
-            logger.error("Failed to handle depth", error=str(e), message=message)
+            logger.error("Failed to handle depth: %s", str(e))
             return False
 
         return False
@@ -252,7 +256,7 @@ class FullMarketDepthHandler:
     """Handles full market depth updates."""
 
     @staticmethod
-    async def handle(message: dict[str, Any], provider: MarketDataProvider) -> bool:
+    async def handle(message: list[Any], provider: MarketDataProvider) -> bool:
         """Handle full market depth update.
 
         Zerodha format:
@@ -260,7 +264,7 @@ class FullMarketDepthHandler:
         """
         try:
             if len(message) >= 3 and isinstance(message[2], dict):
-                depth_data = message[2]
+                depth_data: dict[str, Any] = message[2]
 
                 # Parse full depth
                 full_depth = FullMarketDepth(
@@ -279,15 +283,15 @@ class FullMarketDepthHandler:
                 await provider.store_depth(full_depth)
 
                 logger.debug(
-                    "full_depth_received",
-                    instrument_token=full_depth.instrument_token,
-                    total_bids=len(full_depth.bids),
-                    total_asks=len(full_depth.asks),
+                    "full_depth_received: token=%s bids=%s asks=%s",
+                    full_depth.instrument_token,
+                    len(full_depth.bids),
+                    len(full_depth.asks),
                 )
                 return True
 
         except Exception as e:
-            logger.error("Failed to handle full depth", error=str(e), message=message)
+            logger.error("Failed to handle full depth: %s", str(e))
             return False
 
         return False
@@ -297,28 +301,30 @@ class OrderHandler:
     """Handles order updates."""
 
     @staticmethod
-    async def handle(message: dict[str, Any], provider: MarketDataProvider) -> bool:
+    async def handle(message: list[Any], provider: MarketDataProvider) -> bool:
         """Handle order update."""
         try:
             # Order updates typically have type 44 or similar
             if len(message) >= 2:
                 order_data = message[1] if len(message) > 1 else message[2]
 
-                logger.info("order_update", order_data=order_data)
+                logger.info("order_update: %s", order_data)
                 return True
 
+            return False
+
         except Exception as e:
-            logger.error("Failed to handle order", error=str(e), message=message)
+            logger.error("Failed to handle order: %s", str(e))
             return False
 
 
 class MessageRouter:
     """Routes incoming WebSocket messages to appropriate handlers."""
 
-    def __init__(self, provider: MarketDataProvider):
+    def __init__(self, provider: MarketDataProvider) -> None:
         self.provider = provider
         self.subscriptions: dict[int, Subscription] = {}
-        self.handlers: dict[int, list[Callable]] = {
+        self.handlers: dict[int, list[Callable[..., Any]]] = {
             42: [TickHandler.handle, FullModeHandler.handle, QuoteModeHandler.handle],
             43: [DepthHandler.handle, FullMarketDepthHandler.handle],
             44: [OrderHandler.handle],
@@ -353,20 +359,21 @@ class MessageRouter:
                                 return True
                         except Exception as e:
                             logger.error(
-                                f"Handler failed for type {message_type}",
-                                error=str(e),
-                                handler=handler.__name__,
+                                "Handler failed for type %s: %s (%s)",
+                                message_type,
+                                str(e),
+                                handler.__name__,
                             )
                             continue
 
-            logger.warning("unhandled_message", message_type=type(message), message=message)
+            logger.warning("unhandled_message: type=%s msg=%s", type(message), message)
             return False
 
         except json.JSONDecodeError as e:
-            logger.error("Invalid JSON message", error=str(e), message=message)
+            logger.error("Invalid JSON message: %s", str(e))
             return False
         except Exception as e:
-            logger.error("Failed to handle message", error=str(e), message=message)
+            logger.error("Failed to handle message: %s", str(e))
             return False
 
     def _is_subscription_confirmation(self, message: Any) -> bool:
@@ -400,31 +407,31 @@ class MessageRouter:
                                     mode=instr.get("mode", "ltp"),
                                 )
                                 logger.info(
-                                    "subscription_confirmed",
-                                    instrument_token=token,
-                                    mode=instr.get("mode"),
+                                    "subscription_confirmed: token=%s mode=%s",
+                                    token,
+                                    instr.get("mode"),
                                 )
 
             return True
 
         except Exception as e:
-            logger.error("Failed to handle subscription confirmation", error=str(e))
+            logger.error("Failed to handle subscription confirmation: %s", str(e))
             return False
 
-    def add_subscription(self, subscription: Subscription):
+    def add_subscription(self, subscription: Subscription) -> None:
         """Add a new subscription."""
         self.subscriptions[subscription.instrument_token] = subscription
         logger.info(
-            "subscription_added",
-            instrument_token=subscription.instrument_token,
-            mode=subscription.mode,
+            "subscription_added: token=%s mode=%s",
+            subscription.instrument_token,
+            subscription.mode,
         )
 
-    def remove_subscription(self, instrument_token: int):
+    def remove_subscription(self, instrument_token: int) -> None:
         """Remove a subscription."""
         if instrument_token in self.subscriptions:
             del self.subscriptions[instrument_token]
-            logger.info("subscription_removed", instrument_token=instrument_token)
+            logger.info("subscription_removed: token=%s", instrument_token)
 
     def get_subscriptions(self) -> list[Subscription]:
         """Get all active subscriptions."""

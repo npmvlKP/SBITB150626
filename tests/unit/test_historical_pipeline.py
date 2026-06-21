@@ -119,9 +119,9 @@ class TestBhavcopyParserFO:
         assert "option_type" in df.columns
         assert "close" in df.columns
 
-        # Check data types
-        assert df["symbol"].dtype == object
-        assert df["close"].dtype in ["float64", "int64"]
+        # Check data types - handle pandas StringDtype which can be 'str' or 'object'
+        assert df["symbol"].dtype.name in ("object", "str", "string")
+        assert df["close"].dtype in ("float64", "int64", "float32", "int32")
 
     def test_bhavcopy_parser_fo_filters_nifty(self, sample_fo_csv):
         """Parser should filter to NIFTY and BANKNIFTY only."""

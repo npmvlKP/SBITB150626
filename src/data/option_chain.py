@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
@@ -81,7 +81,7 @@ class MarketEvent:
     event_time: datetime
     event_type: str
     schema_version: int = 1
-    payload: dict = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)
     source: str = "computed"
     ingest_id: uuid.UUID = field(default_factory=uuid.uuid4)
     epoch: int = 1
@@ -101,7 +101,7 @@ class RiskFreeRateProvider:
     Kleppmann Ch.3: Single source of truth with proper fallback chain.
     """
 
-    def __init__(self, settings, db_url: str) -> None:
+    def __init__(self, settings: Any, db_url: str) -> None:
         """Initialize RFR provider.
 
         Args:
@@ -112,7 +112,7 @@ class RiskFreeRateProvider:
 
         self._settings = settings
         self._db_url = db_url
-        self._redis: redis_lib.Redis | None = None
+        self._redis: redis_lib.Redis[Any] | None = None
         self._redis_lib = redis_lib
 
         # Lazy Redis connection
@@ -123,7 +123,7 @@ class RiskFreeRateProvider:
             logger.warning("Redis unavailable, RFR caching disabled")
             self._redis = None
 
-    def _get_redis(self) -> redis.Redis | None:
+    def _get_redis(self) -> redis.Redis[Any] | None:
         """Get Redis connection, reconnecting if needed."""
         if self._redis is None:
             return None
@@ -149,12 +149,12 @@ class RiskFreeRateProvider:
             method = RFRMethod.T_BILL if method_name == "t_bill" else RFRMethod.FUTURES_BASIS
 
         # Try primary method
-        if method == RFRMethod.T_BILL or (isinstance(method, str) and method == "t_bill"):
+        if method == RFRMethod.T_BILL or (isinstance(method, str) and method.value == "t_bill"):
             rate = await self._get_t_bill_rate(as_of_date)
             if rate is not None:
                 return rate
 
-        if method == RFRMethod.FUTURES_BASIS or (isinstance(method, str) and method == "futures_basis"):
+        if method == RFRMethod.FUTURES_BASIS or (isinstance(method, str) and method.value == "futures_basis"):
             rate = await self._get_futures_basis_rate(as_of_date)
             if rate is not None:
                 return rate
@@ -176,7 +176,7 @@ class RiskFreeRateProvider:
             as_of_date=str(as_of_date),
             default_rate=self._settings.RFR_T_BILL_DEFAULT,
         )
-        return self._settings.RFR_T_BILL_DEFAULT
+        return self._settings.RFR_T_BILL_DEFAULT  # type: ignore[no-any-return]
 
     async def _get_t_bill_rate(self, as_of_date: date) -> float | None:
         """Fetch RBI 91-day T-bill yield with caching.
@@ -215,15 +215,15 @@ class RiskFreeRateProvider:
                 response = await client.get(self._settings.RFR_T_BILL_FETCH_URL)
                 response.raise_for_status()
 
-            rate = self._parse_rbi_t_bill_yield(response.text)
+            parsed_rate: float | None = self._parse_rbi_t_bill_yield(response.text)
 
-            if rate is None:
+            if parsed_rate is None:
                 raise ValueError("Could not parse RBI T-bill yield from page")
 
             # Cache result
             if redis_conn:
                 try:
-                    redis_conn.setex(cache_key, REDIS_RFR_TTL_SEC, str(rate))
+                    redis_conn.setex(cache_key, REDIS_RFR_TTL_SEC, str(parsed_rate))
                 except self._redis_lib.ConnectionError:
                     pass
 
@@ -231,10 +231,10 @@ class RiskFreeRateProvider:
                 "rfr_computed",
                 action="rfr_computed",
                 method="t_bill",
-                rate=rate,
+                rate=parsed_rate,
                 date=str(as_of_date),
             )
-            return rate
+            return parsed_rate
 
         except Exception as e:
             logger.warning(
@@ -406,7 +406,7 @@ class RiskFreeRateProvider:
                             (as_of_date,),
                         )
                         spot_row = await cur.fetchone()
-                        spot_price = spot_row[0] if spot_row else None
+                        spot_price: float | None = spot_row[0] if spot_row else None
 
                         if spot_price is None:
                             return None, None, 0
@@ -440,7 +440,7 @@ class OptionMetricsComputer:
     Uses asyncio.to_thread() for CPU-bound vollib calls (vollib is synchronous).
     """
 
-    def __init__(self, settings, rfr_provider: RiskFreeRateProvider, db_url: str | None = None) -> None:
+    def __init__(self, settings: Any, rfr_provider: RiskFreeRateProvider, db_url: str | None = None) -> None:
         """Initialize the Greeks computer.
 
         Args:
@@ -643,6 +643,7 @@ class OptionMetricsComputer:
             Count of successful computations
         """
         import psycopg
+        import psycopg.extras
 
         successful_count = 0
         batch_size = 1000
@@ -651,6 +652,8 @@ class OptionMetricsComputer:
             # Get risk-free rate
             rfr = await self._rfr_provider.get_rate(as_of_date)
 
+            if self._db_url is None:
+                return 0
             async with await psycopg.AsyncConnection.connect(self._db_url) as conn:
                 # Fetch option chain data
                 async with conn.cursor() as cur:
@@ -692,7 +695,7 @@ class OptionMetricsComputer:
                 # Process in batches
                 for i in range(0, len(options_rows), batch_size):
                     batch = options_rows[i : i + batch_size]
-                    batch_metrics: list[tuple] = []
+                    batch_metrics: list[tuple[Any, ...]] = []
                     batch_events: list[MarketEvent] = []
                     ingest_id = uuid.uuid4()
                     event_time = datetime.utcnow()
@@ -808,7 +811,7 @@ class OptionMetricsComputer:
                                     event.event_time,
                                     event.event_type,
                                     event.schema_version,
-                                    psycopg.types.Jsonb(event.payload),
+                                    psycopg.extras.Json(event.payload),
                                     event.source,
                                     event.ingest_id,
                                     event.epoch,

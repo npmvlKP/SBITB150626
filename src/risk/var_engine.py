@@ -437,7 +437,7 @@ class GarchVarEngine:
         p: int,
         q: int,
         persistence: float,
-        conditional_volatility: np.ndarray,
+        conditional_volatility: np.ndarray[Any, np.dtype[np.float64]],
         last_forecast: float,
     ) -> GarchResult:
         """Build GarchResult from fitted model and computed values."""

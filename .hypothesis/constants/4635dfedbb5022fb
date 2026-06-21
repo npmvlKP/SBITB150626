@@ -1,0 +1,4 @@
+# file: g:\OC\SBITB-150626\src\data\storage.py
+# hypothesis_version: 6.142.4
+
+[1.0, 2.0, 10.0, 600.0, 3600.0, 1000, 86400, ' AND ', '%s', '***', ', ', ':([^@]+)@', 'DO NOTHING', 'INITIAL_BACKOFF_SEC', 'MAX_BACKOFF_SEC', 'MAX_RETRIES', 'Redis set_rfr', 'Redis set_tick', 'RedisCache', 'SELECT 1', 'SELECT 1, NOW()', 'TimescaleDBStore', 'Unknown', '_', 'broken pipe', 'bucket', 'busy', 'connection', 'could not', 'date', 'date <= %s', 'date = %s', 'date >= %s', 'event_log_flush', 'expiry', 'expiry = %s', 'get_all_ticks', 'get_rfr', 'get_tick', 'loading', 'lost connection', 'network', 'refused', 'reset by peer', 'set_holiday_cache', 'set_rfr', 'set_tick', 'strike = %s', 'symbol = %s', 'temporary failure', 'timeout', 'unavailable', 'utf-8']

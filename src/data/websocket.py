@@ -238,13 +238,13 @@ class WebSocketClient:
         self._write_timeout = write_timeout
         self._auto_reconnect = auto_reconnect
 
-        self._ws: websockets.WebSocketClientProtocol | None = None
+        self._ws: Any | None = None
         self._state: WebSocketState = WebSocketState.DISCONNECTED
         self._stats: WebSocketStats = WebSocketStats()
-        self._reconnect_task: asyncio.Task | None = None
-        self._ping_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task[Any] | None = None
+        self._ping_task: asyncio.Task[Any] | None = None
         self._message_queue: asyncio.Queue[WebSocketMessage] = asyncio.Queue(maxsize=message_queue_size)
-        self._queue_processing_task: asyncio.Task | None = None
+        self._queue_processing_task: asyncio.Task[Any] | None = None
         self._current_reconnect_delay: float = reconnect_delay
         self._reconnect_attempts: int = 0
         self._is_closing: bool = False
@@ -636,7 +636,7 @@ class WebSocketClient:
             return True
 
         except Exception as e:
-            logger.error("Failed to send raw message", error=str(e))
+            logger.error(f"Failed to send raw message: {e}")
             return False
 
     async def receive(self) -> WebSocketMessage | None:
@@ -679,7 +679,7 @@ class WebSocketClient:
             logger.warning(f"Connection closed while receiving: {e}")
 
             # Trigger reconnection
-            if self._auto_reconnect and self._state != WebSocketState.CLOSING:
+            if self._auto_reconnect and self._state.value != WebSocketState.CLOSING.value:
                 self._state = WebSocketState.RECONNECTING
                 await self._start_reconnect_task()
 
@@ -702,7 +702,7 @@ class WebSocketClient:
                     logger.error(f"Handler on_error error: {handler_error}")
 
             # Trigger reconnection for recoverable errors
-            if self._auto_reconnect and self._state != WebSocketState.CLOSING:
+            if self._auto_reconnect and self._state.value != WebSocketState.CLOSING.value:
                 self._state = WebSocketState.RECONNECTING
                 await self._start_reconnect_task()
 
@@ -765,7 +765,7 @@ class WebSocketClient:
                 await asyncio.sleep(self._ping_interval)
             except ConnectionClosed:
                 # Connection was closed
-                if self._auto_reconnect and self._state != WebSocketState.CLOSING:
+                if self._auto_reconnect and self._state.value != WebSocketState.CLOSING.value:
                     self._state = WebSocketState.RECONNECTING
                     await self._start_reconnect_task()
                 break
@@ -878,7 +878,7 @@ class WebSocketClient:
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: Any) -> None:
         """Async context manager exit."""
         await self.disconnect()
 

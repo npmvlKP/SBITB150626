@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json as json_module
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Self
 
 import pandas as pd
@@ -115,8 +115,8 @@ class TimescaleDBStore:
                 min_size=2,
                 max_size=10,
                 timeout=CONNECTION_TIMEOUT_SEC,
-                max_lifetime=timedelta(hours=1),
-                max_idle_time=timedelta(minutes=10),
+                max_lifetime=3600.0,  # 1 hour in seconds
+                max_idle=600.0,  # 10 minutes in seconds
             )
             await self._pool.wait()
             logger.info("TimescaleDBStore connection pool created")
@@ -356,7 +356,9 @@ class TimescaleDBStore:
         pool = await self._ensure_pool()
 
         async with pool.connection() as conn:
-            rows = await conn.fetch(query, tuple(params))
+            async with conn.cursor() as cur:
+                await cur.execute(query, tuple(params))
+                rows = await cur.fetchall()
 
         if not rows:
             return pd.DataFrame()
@@ -406,7 +408,9 @@ class TimescaleDBStore:
         pool = await self._ensure_pool()
 
         async with pool.connection() as conn:
-            rows = await conn.fetch(query, (symbol, start_date, end_date))
+            async with conn.cursor() as cur:
+                await cur.execute(query, (symbol, start_date, end_date))
+                rows = await cur.fetchall()
 
         if not rows:
             return pd.DataFrame()
@@ -462,7 +466,9 @@ class TimescaleDBStore:
         pool = await self._ensure_pool()
 
         async with pool.connection() as conn:
-            rows = await conn.fetch(query, tuple(params))
+            async with conn.cursor() as cur:
+                await cur.execute(query, tuple(params))
+                rows = await cur.fetchall()
 
         if not rows:
             return pd.DataFrame()
@@ -509,7 +515,9 @@ class TimescaleDBStore:
         pool = await self._ensure_pool()
 
         async with pool.connection() as conn:
-            rows = await conn.fetch(query, (symbol, date))
+            async with conn.cursor() as cur:
+                await cur.execute(query, (symbol, date))
+                rows = await cur.fetchall()
 
         if not rows:
             return pd.DataFrame()
@@ -556,7 +564,9 @@ class TimescaleDBStore:
         pool = await self._ensure_pool()
 
         async with pool.connection() as conn:
-            rows = await conn.fetch(query, (symbol, date))
+            async with conn.cursor() as cur:
+                await cur.execute(query, (symbol, date))
+                rows = await cur.fetchall()
 
         if not rows:
             return pd.DataFrame()
@@ -648,7 +658,7 @@ class RedisCache:
         """
         self._redis_url: str = redis_url
         self._settings: WebSocketSettings = settings
-        self._client: redis.Redis | None = None
+        self._client: redis.Redis[bytes] | None = None
         self._retry_attempts: int = MAX_RETRIES
 
         logger.info(
@@ -665,7 +675,7 @@ class RedisCache:
         match = re.search(r":([^@]+)@", url)
         return match.group(1) if match else ""
 
-    async def _ensure_client(self: Self) -> redis.Redis:
+    async def _ensure_client(self: Self) -> redis.Redis[bytes]:
         """Ensure Redis client is initialized with lazy creation.
 
         Returns:
@@ -744,7 +754,7 @@ class RedisCache:
                     # Recreate client on connection errors
                     if self._client is not None:
                         try:
-                            await self._client.aclose()
+                            await self._client.close()
                         except Exception:
                             pass
                         self._client = None
@@ -828,7 +838,7 @@ class RedisCache:
         key = self._tick_key(instrument_token)
         json_data = json_module.dumps(data)
 
-        async def _set(client: redis.Redis) -> None:
+        async def _set(client: redis.Redis[bytes]) -> None:
             await client.setex(key, self._settings.REDIS_TTL_SEC, json_data)
 
         await self._execute_with_retry("set_tick", _set)
@@ -853,13 +863,14 @@ class RedisCache:
         """
         key = self._tick_key(instrument_token)
 
-        async def _get(client: redis.Redis) -> dict[str, Any] | None:
+        async def _get(client: redis.Redis[bytes]) -> dict[str, Any] | None:
             data = await client.get(key)
             if data is None:
                 return None
-            return json_module.loads(data)
+            parsed: dict[str, Any] = json_module.loads(data)
+            return parsed
 
-        return await self._execute_with_retry("get_tick", _get)
+        return await self._execute_with_retry("get_tick", _get)  # type: ignore[no-any-return]
 
     async def get_all_ticks(self: Self, tokens: list[int]) -> dict[int, dict[str, Any]]:
         """Retrieve multiple ticks using pipeline for efficiency.
@@ -876,7 +887,7 @@ class RedisCache:
         if not tokens:
             return {}
 
-        async def _pipeline_get(client: redis.Redis) -> dict[int, dict[str, Any]]:
+        async def _pipeline_get(client: redis.Redis[bytes]) -> dict[int, dict[str, Any]]:
             keys = [self._tick_key(token) for token in tokens]
 
             # Use pipeline for atomic batch get
@@ -898,7 +909,7 @@ class RedisCache:
                         )
             return result
 
-        return await self._execute_with_retry("get_all_ticks", _pipeline_get)
+        return await self._execute_with_retry("get_all_ticks", _pipeline_get)  # type: ignore[no-any-return]
 
     async def set_rfr(self: Self, date: date, method: str, rate: float) -> None:
         """Store risk-free rate with 24h TTL.
@@ -914,7 +925,7 @@ class RedisCache:
         key = self._rfr_key(date, method)
         ttl = 86400  # 24 hours
 
-        async def _set(client: redis.Redis) -> None:
+        async def _set(client: redis.Redis[bytes]) -> None:
             await client.setex(key, ttl, str(rate))
 
         await self._execute_with_retry("set_rfr", _set)
@@ -941,13 +952,13 @@ class RedisCache:
         """
         key = self._rfr_key(date, method)
 
-        async def _get(client: redis.Redis) -> float | None:
+        async def _get(client: redis.Redis[bytes]) -> float | None:
             data = await client.get(key)
             if data is None:
                 return None
             return float(data)
 
-        return await self._execute_with_retry("get_rfr", _get)
+        return await self._execute_with_retry("get_rfr", _get)  # type: ignore[no-any-return]
 
     async def set_holiday_cache(self: Self, key: str, days: list[str], ttl: int = 86400) -> None:
         """Store NSE holiday list in cache.
@@ -963,7 +974,7 @@ class RedisCache:
         cache_key = f"nse_holidays:{key}"
         json_data = json_module.dumps(days)
 
-        async def _set(client: redis.Redis) -> None:
+        async def _set(client: redis.Redis[bytes]) -> None:
             await client.setex(cache_key, ttl, json_data)
 
         await self._execute_with_retry("set_holiday_cache", _set)
@@ -999,7 +1010,7 @@ class RedisCache:
         """Close Redis connection gracefully."""
         if self._client is not None:
             try:
-                await self._client.aclose()
+                await self._client.close()
                 logger.info("RedisCache connection closed")
             except Exception as e:
                 logger.warning(f"Error closing Redis connection: {e}")

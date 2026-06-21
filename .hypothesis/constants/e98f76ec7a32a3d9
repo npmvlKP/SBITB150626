@@ -1,0 +1,4 @@
+# file: G:\OC\SBITB-150626\src\data\providers.py
+# hypothesis_version: 6.155.3
+
+['BANKNIFTY', 'NIFTY', 'NIFTY 50', 'NIFTY BANK', 'NSE', 'cache_lookup_failed', 'cache_set_failed', 'close', 'day', 'delta', 'gamma', 'greeks_lookup_failed', 'high', 'historical_db_hit', 'instrument_token', 'iv', 'last_price', 'low', 'oi', 'oi_change', 'open', 'option_chain_empty', 'option_type', 'quote', 'quote_broker_fetch', 'quote_cache_hit', 'settle_price', 'spot_lookup_failed', 'store_depth', 'store_tick', 'strike', 'subscribe_requested', 'theta', 'timestamp', 'tradingsymbol', 'vega', 'volume']

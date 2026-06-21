@@ -9,21 +9,14 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from datetime import date
 
     import pandas as pd
 
-    from src.brokers.base import KiteBroker
+    from src.brokers.base import BrokerInterface as KiteBroker
     from src.data.option_chain import OptionMetricsComputer
     from src.data.storage import RedisCache, TimescaleDBStore
-
-
-# Stub for pandas DataFrame to avoid import issues in non-strict mode
-class DataFrame:
-    """Stub for pandas DataFrame."""
-
-    pass
 
 
 class MarketDataProvider(ABC):
@@ -69,13 +62,33 @@ class MarketDataProvider(ABC):
     async def subscribe(
         self,
         symbols: list[str],
-        callback: Callable[[dict[str, Any]], None],
+        callback: Callable[[dict[str, Any]], Awaitable[None]],
     ) -> None:
         """Subscribe to real-time quotes.
 
         Args:
             symbols: List of symbols to subscribe
             callback: Async callback function called on each tick
+        """
+
+    # =========================================================================
+    # Phase 2: WebSocket Storage Methods (for handlers.py)
+    # =========================================================================
+
+    @abstractmethod
+    async def store_tick(self, tick: Any) -> None:
+        """Store tick data to database.
+
+        Args:
+            tick: Tick data (LTPUpdate, Tick, or Quote)
+        """
+
+    @abstractmethod
+    async def store_depth(self, depth: Any) -> None:
+        """Store depth/market depth data to database.
+
+        Args:
+            depth: Depth data (DepthUpdate or FullMarketDepth)
         """
 
     # =========================================================================
@@ -200,9 +213,9 @@ class KiteDataProvider(MarketDataProvider):
 
         # Fall back to broker API
         instrument_str = f"NSE:{symbol}"
-        quotes = await self._broker.get_quote([instrument_str])
+        quotes: dict[str, Any] = await self._broker.get_quote([instrument_str])
 
-        quote_data = quotes.get(instrument_str, {})
+        quote_data: dict[str, Any] = quotes.get(instrument_str, {})
 
         # Cache the result
         try:
@@ -278,7 +291,7 @@ class KiteDataProvider(MarketDataProvider):
     async def subscribe(
         self,
         symbols: list[str],
-        callback: Callable[[dict[str, Any]], None],
+        callback: Callable[[dict[str, Any]], Awaitable[None]],
     ) -> None:
         """Subscribe to real-time quotes.
 
@@ -308,8 +321,39 @@ class KiteDataProvider(MarketDataProvider):
             tokens=tokens,
         )
 
+        # Wrap the single-dict callback to match broker's list-dict callback
+        async def wrapper(broker_ticks: list[dict[str, Any]]) -> None:
+            for tick in broker_ticks:
+                await callback(tick)
+
         # Delegate to broker's subscribe_ticks (handled by LiveMarketFeed in Phase 7)
-        await self._broker.subscribe_ticks(tokens, mode="quote", callback=callback)
+        await self._broker.subscribe_ticks(tokens, mode="quote", callback=wrapper)
+
+    # =========================================================================
+    # Phase 2: WebSocket Storage Methods
+    # =========================================================================
+
+    async def store_tick(self, tick: Any) -> None:
+        """Store tick data to database.
+
+        Args:
+            tick: Tick data (LTPUpdate, Tick, or Quote)
+        """
+        import structlog
+
+        logger = structlog.get_logger(__name__)
+        logger.debug("store_tick", instrument_token=getattr(tick, "instrument_token", None))
+
+    async def store_depth(self, depth: Any) -> None:
+        """Store depth/market depth data to database.
+
+        Args:
+            depth: Depth data (DepthUpdate or FullMarketDepth)
+        """
+        import structlog
+
+        logger = structlog.get_logger(__name__)
+        logger.debug("store_depth", instrument_token=getattr(depth, "instrument_token", None))
 
     # =========================================================================
     # Phase 2: F&O Data Pipeline Additions

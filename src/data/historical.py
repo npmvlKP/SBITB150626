@@ -33,6 +33,7 @@ class RedisProtocol(Protocol):
 class EventWriterProtocol(Protocol):
     """Protocol for event writer."""
 
+    async def append(self, event: MarketEvent) -> None: ...
     async def write(self, event: MarketEvent) -> None: ...
 
 
@@ -42,6 +43,7 @@ class AuditLoggerProtocol(Protocol):
     async def info(self, msg: str, **kwargs: Any) -> None: ...
     async def error(self, msg: str, **kwargs: Any) -> None: ...
     async def warning(self, msg: str, **kwargs: Any) -> None: ...
+    async def debug(self, msg: str, **kwargs: Any) -> None: ...
 
 
 # ============================================================================
@@ -248,10 +250,11 @@ class BhavcopyParser:
         dropped = original_count - filtered_count
 
         logger.info(
-            f"Parsed FO bhavcopy: {filepath}",
-            original=original_count,
-            filtered=filtered_count,
-            dropped=dropped,
+            "Parsed FO bhavcopy: %s (original=%d, filtered=%d, dropped=%d)",
+            filepath,
+            original_count,
+            filtered_count,
+            dropped,
         )
 
         return filtered_df
@@ -310,10 +313,11 @@ class BhavcopyParser:
         dropped = original_count - filtered_count
 
         logger.info(
-            f"Parsed CM bhavcopy: {filepath}",
-            original=original_count,
-            filtered=filtered_count,
-            dropped=dropped,
+            "Parsed CM bhavcopy: %s (original=%d, filtered=%d, dropped=%d)",
+            filepath,
+            original_count,
+            filtered_count,
+            dropped,
         )
 
         return filtered_df
@@ -389,7 +393,10 @@ class BhavcopyDownloader:
         """Ensure download directories exist."""
         self.fo_dir.mkdir(parents=True, exist_ok=True)
         self.cm_dir.mkdir(parents=True, exist_ok=True)
-        self.audit_logger.info("Ensured download directories", fo=str(self.fo_dir), cm=str(self.cm_dir))
+        # Fire and forget async log call from sync context
+        asyncio.get_event_loop().run_until_complete(
+            self.audit_logger.info("Ensured download directories", fo=str(self.fo_dir), cm=str(self.cm_dir))
+        )
 
     async def download_fo_bhavcopies(
         self,
@@ -412,7 +419,7 @@ class BhavcopyDownloader:
         trading_days = get_nse_trading_days(start_date, end_date)
         result.total_dates = len(trading_days)
 
-        self.audit_logger.info(
+        await self.audit_logger.info(
             "Starting FO bhavcopy download",
             start=start_date.isoformat(),
             end=end_date.isoformat(),
@@ -487,7 +494,7 @@ class BhavcopyDownloader:
         trading_days = get_nse_trading_days(start_date, end_date)
         result.total_dates = len(trading_days)
 
-        self.audit_logger.info(
+        await self.audit_logger.info(
             "Starting CM bhavcopy download",
             start=start_date.isoformat(),
             end=end_date.isoformat(),
@@ -759,9 +766,9 @@ async def run_historical_pipeline(
         Dictionary with 'fo' and 'cm' DownloadResult instances.
     """
     logger.info(
-        "Starting historical data pipeline",
-        start=start_date.isoformat(),
-        end=end_date.isoformat(),
+        "Starting historical data pipeline (start=%s, end=%s)",
+        start_date.isoformat(),
+        end_date.isoformat(),
     )
 
     audit = audit_logger or AuditLogger()
@@ -797,9 +804,9 @@ async def run_historical_pipeline(
     )
 
     logger.info(
-        "Historical data pipeline completed",
-        fo_downloaded=fo_result.downloaded,
-        cm_downloaded=cm_result.downloaded,
+        "Historical data pipeline completed (fo_downloaded=%d, cm_downloaded=%d)",
+        fo_result.downloaded,
+        cm_result.downloaded,
     )
 
     return {
