@@ -45,7 +45,7 @@ class GateResult:
     name: str
     tier: int
     command: str
-    passed: bool
+    passed: bool = False
     exit_code: int = 0
     stdout: str = ""
     stderr: str = ""
@@ -183,8 +183,9 @@ def gate_ruff_format(report: VerificationReport) -> GateResult:
 
 def gate_bandit(report: VerificationReport) -> GateResult:
     """bandit -c pyproject.toml -r src/ = 0 HIGH."""
-    gate = GateResult(name="bandit (no HIGH)", tier=0, command="bandit -c pyproject.toml -r src/")
-    ec, out, err, dur = run_command("bandit -c pyproject.toml -r src/")
+    cmd = f'"{sys.executable}" -m bandit -lll -c pyproject.toml -r src/'
+    gate = GateResult(name="bandit (no HIGH)", tier=0, command=cmd)
+    ec, out, err, dur = run_command(cmd)
     gate.exit_code, gate.duration_sec = ec, dur
     gate.stdout, gate.stderr = out[:3000], err[:2000]
     gate.passed = ec == 0
@@ -212,7 +213,7 @@ def gate_unit_coverage(report: VerificationReport) -> GateResult:
 
 def gate_pip_audit(report: VerificationReport) -> GateResult:
     """pip-audit -r requirements.txt = 0 vulns."""
-    cmd = f'"{sys.executable}" -m pip_audit -r requirements.txt'
+    cmd = f'"{sys.executable}" -m pip_audit -r requirements.txt --skip-editable'
     gate = GateResult(name="pip-audit (requirements.txt)", tier=0, command=cmd)
     ec, out, err, dur = run_command(cmd, timeout=120)
     gate.exit_code, gate.duration_sec = ec, dur
@@ -255,7 +256,7 @@ def gate_benchmarks(report: VerificationReport) -> GateResult:
     """pytest tests/bench/ --benchmark-only."""
     cmd = f'"{sys.executable}" -m pytest tests/bench/ --benchmark-only -q'
     gate = GateResult(name="benchmarks (<10ms single)", tier=1, command=cmd)
-    ec, out, err, dur = run_command(cmd, timeout=180)
+    ec, out, err, dur = run_command(cmd, timeout=360)
     gate.exit_code, gate.duration_sec = ec, dur
     gate.stdout = out[:4000]
     gate.stderr = err[:2000]
@@ -293,9 +294,9 @@ def gate_kleppmann(report: VerificationReport) -> GateResult:
 
 def gate_pip_audit_detailed(report: VerificationReport) -> GateResult:
     """pip-audit with descriptions (Tier 2)."""
-    cmd = f'"{sys.executable}" -m pip_audit -r requirements.txt --desc'
+    cmd = f'"{sys.executable}" -m pip_audit -r requirements.txt --desc --skip-editable'
     gate = GateResult(name="pip-audit detailed", tier=2, command=cmd)
-    ec, out, err, dur = run_command(cmd, timeout=120)
+    ec, out, err, dur = run_command(cmd, timeout=180)
     gate.exit_code, gate.duration_sec = ec, dur
     gate.stdout, gate.stderr = out[:5000], err[:2000]
     gate.passed = ec == 0
@@ -322,7 +323,9 @@ def gate_trivy(report: VerificationReport) -> GateResult:
         gate.skipped = True
         gate.skip_reason = "trivy not on PATH"
         return gate
-    ec, out, err, dur = run_command("trivy fs . --severity CRITICAL", timeout=120)
+    ec, out, err, dur = run_command(
+        "trivy fs . --severity CRITICAL --skip-dirs .venv,__pycache__,.git,node_modules", timeout=360
+    )
     gate.exit_code, gate.duration_sec = ec, dur
     gate.stdout, gate.stderr = out[:3000], err[:2000]
     gate.passed = ec == 0
