@@ -3,6 +3,8 @@ services:
     image: timescale/timescaledb:2.15.3-pg15
     container_name: trading_timescaledb
     user: postgres
+    env_file:
+      - ../.env
     environment:
       POSTGRES_USER: trading
       POSTGRES_PASSWORD: ${TIMESCALEDB_PASSWORD}
@@ -38,6 +40,8 @@ services:
     image: redis:7.2.4-alpine
     container_name: trading_redis
     user: redis
+    env_file:
+      - ../.env
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
     command: redis-server --requirepass ${REDIS_PASSWORD}
@@ -91,6 +95,8 @@ services:
   grafana:
     image: grafana/grafana:10.4.2
     container_name: trading_grafana
+    env_file:
+      - ../.env
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
       GF_SECURITY_ADMIN_USER: admin

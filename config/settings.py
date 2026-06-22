@@ -3,14 +3,14 @@ and risk limits."""
 
 from datetime import date, time
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class KillSwitchLevel(str, Enum):
+class KillSwitchLevel(StrEnum):
     """Kill switch levels — per MiFID II Art.
 
     17, NIST RS.RP-1, ISO A.8.26.

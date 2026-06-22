@@ -1,0 +1,208 @@
+{
+  "timestamp": "2026-06-22T13:01:40.976687",
+  "project_root": "G:\\OC\\SBITB-150626",
+  "python_version": "3.12.7 (tags/v3.12.7:0b05ead, Oct  1 2024, 03:06:41) [MSC v.1941 64 bit (AMD64)]",
+  "platform": "win32",
+  "gates": [
+    {
+      "name": "mypy --strict",
+      "tier": 0,
+      "command": "mypy src/ --strict",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 2.62,
+      "details": {
+        "msg": "0 errors"
+      },
+      "stdout_last200": "Success: no issues found in 26 source files\n",
+      "stderr_last200": ""
+    },
+    {
+      "name": "ruff check",
+      "tier": 0,
+      "command": "ruff check src/ tests/",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 0.1,
+      "details": {},
+      "stdout_last200": "All checks passed!\n",
+      "stderr_last200": ""
+    },
+    {
+      "name": "ruff format --check",
+      "tier": 0,
+      "command": "ruff format --check src/ tests/",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 0.1,
+      "details": {
+        "files_formatted": "52 files already formatted"
+      },
+      "stdout_last200": "52 files already formatted\n",
+      "stderr_last200": ""
+    },
+    {
+      "name": "bandit (no HIGH)",
+      "tier": 0,
+      "command": "\"C:\\Program Files\\Python312\\python.exe\" -m bandit -lll -c pyproject.toml -r src/",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 1.82,
+      "details": {
+        "severity_summary": "High: 2"
+      },
+      "stdout_last200": "nosec BXXX): 1\n\nRun metrics:\n\tTotal issues (by severity):\n\t\tUndefined: 0\n\t\tLow: 2\n\t\tMedium: 4\n\t\tHigh: 0\n\tTotal issues (by confidence):\n\t\tUndefined: 0\n\t\tLow: 3\n\t\tMedium: 1\n\t\tHigh: 2\nFiles skipped (0):\n",
+      "stderr_last200": "n comment: a is not a test name or id, ignoring\n[manager]\tWARNING\tTest in comment: password is not a test name or id, ignoring\n[tester]\tWARNING\tnosec encountered (B105), but no failed test on line 40\n"
+    },
+    {
+      "name": "unit tests + coverage >=80%",
+      "tier": 0,
+      "command": "\"C:\\Program Files\\Python312\\python.exe\" -m pytest tests/unit/ --cov=src --cov-branch --cov-fail-under=80 -q",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 43.34,
+      "details": {
+        "coverage_line": "TOTAL                            459     71     88     25    81%",
+        "test_summary": "112 passed, 1 warning in 35.05s"
+      },
+      "stdout_last200": "---------------------------------------\nTOTAL                            459     71     88     25    81%\n\nRequired test coverage of 80% reached. Total coverage: 80.99%\n112 passed, 1 warning in 35.05s\n",
+      "stderr_last200": ""
+    },
+    {
+      "name": "pip-audit (requirements.txt)",
+      "tier": 0,
+      "command": "\"C:\\Program Files\\Python312\\python.exe\" -m pip_audit -r requirements.txt --skip-editable",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 72.47,
+      "details": {},
+      "stdout_last200": "Name        Skip Reason\n----------- --------------------------------------------------------------------------\nsbitb150626 Dependency not found on PyPI and could not be audited: sbitb150626 (0.1.0)\n",
+      "stderr_last200": "No known vulnerabilities found\n"
+    },
+    {
+      "name": "gitleaks (no secrets)",
+      "tier": 0,
+      "command": "gitleaks detect --source .",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 35.53,
+      "details": {},
+      "stdout_last200": "",
+      "stderr_last200": ""
+    },
+    {
+      "name": "property tests (Hypothesis)",
+      "tier": 1,
+      "command": "\"C:\\Program Files\\Python312\\python.exe\" -m pytest tests/property/ -v -q",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 15.6,
+      "details": {
+        "test_summary": "======================== 20 passed, 1 warning in 8.60s ========================"
+      },
+      "stdout_last200": "ks.analytical import delta, gamma, theta, vega\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n======================== 20 passed, 1 warning in 8.60s ========================\n",
+      "stderr_last200": ""
+    },
+    {
+      "name": "benchmarks (<10ms single)",
+      "tier": 1,
+      "command": "\"C:\\Program Files\\Python312\\python.exe\" -m pytest tests/bench/ --benchmark-only -q",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 34.39,
+      "details": {},
+      "stdout_last200": "ks     40.5000  139.5000  42.6228  4.3621  41.8000  0.5000   268;586       23.4616    4867           1\n-------------------------------------------------------------------------------------------------",
+      "stderr_last200": ""
+    },
+    {
+      "name": "integration tests",
+      "tier": 1,
+      "command": "\"C:\\Program Files\\Python312\\python.exe\" -m pytest tests/integration/ -v -q",
+      "passed": false,
+      "skipped": true,
+      "skip_reason": "Docker skipped by user",
+      "exit_code": 0,
+      "duration_sec": 0.0,
+      "details": {},
+      "stdout_last200": "",
+      "stderr_last200": ""
+    },
+    {
+      "name": "Kleppmann Ch.1-5 validation",
+      "tier": 1,
+      "command": "python verify_phase2_kleppmann.py",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 0.23,
+      "details": {},
+      "stdout_last200": "92m[PASS]\u001b[0m [Ch.3] Compaction: continuous aggregate views  -- v_tick_1min_ohlcv, v_daily_oi_summary\n  \u001b[92m[PASS]\u001b[0m [Ch.3] Compaction: automatic aggregate refresh policy  -- automatic refresh poli",
+      "stderr_last200": ""
+    },
+    {
+      "name": "pip-audit detailed",
+      "tier": 2,
+      "command": "\"C:\\Program Files\\Python312\\python.exe\" -m pip_audit -r requirements.txt --desc --skip-editable",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 67.7,
+      "details": {},
+      "stdout_last200": "Name        Skip Reason\n----------- --------------------------------------------------------------------------\nsbitb150626 Dependency not found on PyPI and could not be audited: sbitb150626 (0.1.0)\n",
+      "stderr_last200": "No known vulnerabilities found\n"
+    },
+    {
+      "name": "SBOM generation",
+      "tier": 2,
+      "command": "cyclonedx-bom -o sbom.json",
+      "passed": false,
+      "skipped": true,
+      "skip_reason": "cyclonedx-bom not installed",
+      "exit_code": 0,
+      "duration_sec": 0.0,
+      "details": {},
+      "stdout_last200": "",
+      "stderr_last200": ""
+    },
+    {
+      "name": "trivy filesystem scan",
+      "tier": 2,
+      "command": "trivy fs .",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
+      "exit_code": 0,
+      "duration_sec": 3.47,
+      "details": {},
+      "stdout_last200": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502 requirements.txt \u2502 pip  \u2502        0        \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\nLegend:\n- '-': Not scanned\n- '0': Clean (no security findings detected)\n\n",
+      "stderr_last200": "ecting vulnerabilities...\n\n\ud83d\udce3 \u001b[34mNotices:\u001b[0m\n  - Version 0.71.2 of Trivy is now available, current version is 0.71.1\n\nTo suppress version checks, run Trivy scans with the --skip-version-check flag\n\n"
+    }
+  ],
+  "summary": {
+    "total": 14,
+    "passed": 12,
+    "failed": 0,
+    "skipped": 2,
+    "all_passed": true
+  }
+}
