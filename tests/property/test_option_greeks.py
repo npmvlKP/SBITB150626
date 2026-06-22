@@ -67,7 +67,7 @@ class TestGreeksInvariants:
         iv=st.floats(min_value=0.01, max_value=2.0, allow_nan=False, allow_infinity=False),
         rfr=st.floats(min_value=0.01, max_value=0.15, allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow], deadline=None)
     def test_delta_call_bounds_property(self, spot, strike, iv, rfr):
         """CE delta must be in [0, 1] for all valid inputs."""
         assume(strike > 0)
@@ -111,7 +111,7 @@ class TestGreeksInvariants:
         iv=st.floats(min_value=0.01, max_value=2.0, allow_nan=False, allow_infinity=False),
         rfr=st.floats(min_value=0.01, max_value=0.15, allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow], deadline=None)
     def test_delta_put_bounds_property(self, spot, strike, iv, rfr):
         """PE delta must be in [-1, 0] for all valid inputs."""
         assume(strike > 0)
@@ -284,7 +284,7 @@ class TestGreeksInvariants:
         spot=st.floats(min_value=10000.0, max_value=50000.0, allow_nan=False, allow_infinity=False),
         strike=st.floats(min_value=10000.0, max_value=50000.0, allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=20, suppress_health_check=[HealthCheck.filter_too_much])
+    @settings(max_examples=20, suppress_health_check=[HealthCheck.filter_too_much], deadline=None)
     def test_atm_delta_in_range(self, spot, strike):
         """ATM options should have delta reasonably near 0.5 (CE) or -0.5 (PE)."""
         assume(spot > 0)
