@@ -114,6 +114,8 @@ def run_command(
             shell=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             cwd=cwd or str(ROOT),
         )
@@ -324,10 +326,12 @@ def gate_trivy(report: VerificationReport) -> GateResult:
         gate.skip_reason = "trivy not on PATH"
         return gate
     ec, out, err, dur = run_command(
-        "trivy fs . --severity CRITICAL --scanners vuln --skip-dirs .venv,__pycache__,.git,node_modules", timeout=360
+        "trivy fs . --severity CRITICAL --scanners vuln --skip-dirs .venv,__pycache__,.git,node_modules",
+        timeout=360,
     )
     gate.exit_code, gate.duration_sec = ec, dur
-    gate.stdout, gate.stderr = out[:3000], err[:2000]
+    gate.stdout = (out or "")[:3000]
+    gate.stderr = (err or "")[:2000]
     gate.passed = ec == 0
     return gate
 
