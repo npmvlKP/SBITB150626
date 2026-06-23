@@ -3,11 +3,14 @@
 Verifies all Phase 3 dependencies are correctly installed and TA-Lib
 function signatures match the corrections table.
 
-Note on version detection:
+PowerShell escape-trap notes (Windows 11):
   - The ``ta`` package does NOT expose ``__version__`` on its module.
     Always use ``importlib.metadata.version("ta")`` instead of ``ta.__version__``.
   - ``pip-audit`` is invoked as ``python -m pip_audit`` (underscore),
     NOT as ``pip-audit.exe`` (hyphen).
+  - ``pip`` must be invoked as ``python -m pip``, NOT as
+    ``.venv\\Scripts\\pip.exe`` — PowerShell double-quotes strip the
+    backslash before ``.venv``, corrupting the path.
 """
 
 from __future__ import annotations
@@ -160,6 +163,25 @@ def main() -> int:
             exit_code = 1
     except Exception as e:
         print(f"  pip-audit (python -m pip_audit): [FAIL] {e}")
+        exit_code = 1
+
+    # Gate: pip must be invocable via `python -m pip` (NOT pip.exe — PowerShell
+    # corrupts the path by stripping the backslash before .venv)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            ver = result.stdout.strip().split()[1] if result.stdout.strip() else "unknown"
+            print(f"  pip (python -m pip): [PASS] (version: {ver})")
+        else:
+            print(f"  pip (python -m pip): [FAIL] {result.stderr.strip()}")
+            exit_code = 1
+    except Exception as e:
+        print(f"  pip (python -m pip): [FAIL] {e}")
         exit_code = 1
 
     print("\n" + "=" * 60)
