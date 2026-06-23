@@ -2,13 +2,28 @@
 
 Verifies all Phase 3 dependencies are correctly installed and TA-Lib
 function signatures match the corrections table.
+
+Note on version detection:
+  - The ``ta`` package does NOT expose ``__version__`` on its module.
+    Always use ``importlib.metadata.version("ta")`` instead of ``ta.__version__``.
+  - ``pip-audit`` is invoked as ``python -m pip_audit`` (underscore),
+    NOT as ``pip-audit.exe`` (hyphen).
 """
 
 from __future__ import annotations
 
 import importlib.metadata
 import inspect
+import subprocess
 import sys
+
+# Known PyPI distribution names that differ from the importable module name.
+_MODULE_TO_DIST: dict[str, str] = {
+    "talib": "TA-Lib",
+    "ta": "ta",
+    "scipy": "scipy",
+    "flowrisk": "flowrisk",
+}
 
 
 def check_import(module_name: str, attr: str | None = None) -> tuple[bool, str]:
@@ -22,17 +37,16 @@ def check_import(module_name: str, attr: str | None = None) -> tuple[bool, str]:
             for part in parts[1:]:
                 current = getattr(current, part)
             getattr(current, attr)
-        # Try module_name first, then common PyPI name variants
+        # Prefer importlib.metadata for version (works even when __version__ is absent)
         version = "unknown"
-        # Special case: talib C extension uses "TA-Lib" as PyPI package name
-        metadata_names = [module_name, module_name.replace("_", "-")]
-        if module_name == "talib":
-            metadata_names.append("TA-Lib")
-        for name_attempt in metadata_names:
+        dist_name = _MODULE_TO_DIST.get(module_name, module_name)
+        # Try exact dist name, then module name, then hyphen/underscore variants
+        candidates = [dist_name, module_name, module_name.replace("_", "-")]
+        for name_attempt in candidates:
             try:
-                version = importlib.metadata.metadata(name_attempt).get("Version", "unknown")
+                version = importlib.metadata.version(name_attempt)
                 break
-            except Exception:
+            except importlib.metadata.PackageNotFoundError:
                 continue
         # Fallback: try __version__ attribute on the module
         if version == "unknown" and hasattr(mod, "__version__"):
@@ -114,6 +128,39 @@ def main() -> int:
         print(f"  {func_name}: {status}")
         if not passed:
             exit_code = 1
+
+    print("\n--- Tooling Gates ---")
+
+    # Gate: ta must NOT be accessed via ta.__version__ (the attribute does not exist)
+    try:
+        import ta as _ta
+
+        _ta_version = getattr(_ta, "__version__", None)
+        if _ta_version is None:
+            print("  ta.__version__: [PASS] Attribute absent — use importlib.metadata.version('ta')")
+        else:
+            print(f"  ta.__version__: [WARN] Unexpectedly present as {_ta_version}")
+    except ImportError:
+        print("  ta.__version__: [FAIL] Cannot import ta")
+        exit_code = 1
+
+    # Gate: pip-audit must be invocable via `python -m pip_audit`
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip_audit", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            ver = result.stdout.strip().split()[-1] if result.stdout.strip() else "unknown"
+            print(f"  pip-audit (python -m pip_audit): [PASS] (version: {ver})")
+        else:
+            print(f"  pip-audit (python -m pip_audit): [FAIL] {result.stderr.strip()}")
+            exit_code = 1
+    except Exception as e:
+        print(f"  pip-audit (python -m pip_audit): [FAIL] {e}")
+        exit_code = 1
 
     print("\n" + "=" * 60)
     if exit_code == 0:
