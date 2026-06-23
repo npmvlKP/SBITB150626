@@ -18,47 +18,34 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
-[project.urls]
-"Homepage" = "https://github.com/npmvlKP/SBITB150626"
-"Repository" = "https://github.com/npmvlKP/SBITB150626"
-
-[tool.merge-formatting]
-include_layout = ["ruff"]
-format = "black"
-
 # ============================================================
-# FIXED DEPENDENCIES (per /sbitb150626 strict protocol)
+# CORE DEPENDENCIES — MUST be directly under [project] table
+# (Previous bug: [tool.merge-formatting] section was inserted here,
+#  causing dependencies to be parsed as tool.merge-formatting.dependencies
+#  instead of project.dependencies — Requires-Dist was empty in PKG-INFO)
 # ============================================================
-# Fixes applied:
-# 1. vollib: Use 'vollib>=1.0.11' (canonical package, py_vollib is deprecated)
-# 2. newspaper: Use 'newspaper4k>=0.9.2' (NOT newspaper3k - deprecated since 2020)
-# 3. psycopg: Use 'psycopg[binary]>=3.1' (NOT psycopg2-binary - version conflict)
-# 4. TA-Lib: Already installed as 0.6.8 with cp312 wheel
-# 5. All wheels use cp312 (Python 3.12.7)
-# ============================================================
-
 dependencies = [
     # Build tools
     "setuptools>=61.0",
     "wheel>=0.40.0",
 
-    # Core data processing
-    "numpy>=1.26.0",
-    "pandas>=2.2.0",
+    # Core data processing — numpy<2 upper bound (numpy>=2 breaks py_vollib/QuantLib ABI)
+    "numpy>=1.26.0,<2",
+    "pandas>=2.2.0,<3",
     "polars>=1.0.0",
 
     # Technical Analysis
     "ta>=0.11.0",     # Pure Python backup indicators
 
-    # Options Greeks — FIXED C9: py_vollib is the canonical package (import py_vollib)
+    # Options Greeks — py_vollib is the canonical package (import py_vollib)
     "py_vollib>=1.0.12",  # Correct PyPI package; code imports py_vollib.*
     "QuantLib>=1.36",     # Indian calendar, day-count conventions
 
-    # Data sources — FIXED C20: kiteconnect>=5.0 per Phase 0 contract
+    # Data sources — kiteconnect>=5.0 per Phase 0 contract
     "kiteconnect>=5.0",       # Zerodha API
     "jugaad-data>=0.20.0",    # NSE F&O bhavcopy
 
-    # Database — FIXED: psycopg3 async + psycopg-pool for async connection pooling
+    # Database — psycopg3 async + psycopg-pool for async connection pooling
     "psycopg[binary]>=3.1",   # Async PostgreSQL driver
     "psycopg-pool>=3.2.0",    # AsyncConnectionPool used by storage.py
 
@@ -80,12 +67,16 @@ dependencies = [
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
 
-    # FIXED C19: Runtime deps actually imported by src/ but previously missing
+    # Runtime deps actually imported by src/
     "apscheduler>=3.10",           # Used by kill_switch + reauth scheduler
     "cryptography>=42.0",          # Used by audit/secrets encryption
     "pynput>=1.7",                 # Used by kill_switch keyboard handler
     "ntplib>=0.4",                 # Used by audit NTPClock
 ]
+
+[project.urls]
+"Homepage" = "https://github.com/npmvlKP/SBITB150626"
+"Repository" = "https://github.com/npmvlKP/SBITB150626"
 
 # Optional dependency groups (not installed by default)
 [project.optional-dependencies]
