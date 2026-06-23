@@ -120,19 +120,31 @@ class TestCheckDiskSpace:
 
 
 class TestMain:
-    """Tests for main entry point."""
+    """Tests for main entry point.
+
+    Uses real async stub functions instead of mocking asyncio.run to avoid
+    coroutine-never-awaited warnings.
+    """
 
     def test_main_returns_zero_on_success(self) -> None:
-        """main() should return 0 when asyncio.run returns 0."""
-        with patch("scripts.health_check.asyncio.run", return_value=0):
+        """main() should return 0 when run_health_check returns 0."""
+
+        async def fake_health_check() -> int:
+            return 0
+
+        with patch("scripts.health_check.run_health_check", side_effect=fake_health_check):
             from scripts.health_check import main
 
             result = main()
             assert result == 0
 
     def test_main_returns_one_on_failure(self) -> None:
-        """main() should return 1 when asyncio.run returns 1."""
-        with patch("scripts.health_check.asyncio.run", return_value=1):
+        """main() should return 1 when run_health_check returns 1."""
+
+        async def fake_health_check() -> int:
+            return 1
+
+        with patch("scripts.health_check.run_health_check", side_effect=fake_health_check):
             from scripts.health_check import main
 
             result = main()
@@ -140,7 +152,11 @@ class TestMain:
 
     def test_main_handles_keyboard_interrupt(self) -> None:
         """main() should handle KeyboardInterrupt gracefully."""
-        with patch("scripts.health_check.asyncio.run", side_effect=KeyboardInterrupt):
+
+        async def fake_health_check() -> int:
+            raise KeyboardInterrupt
+
+        with patch("scripts.health_check.run_health_check", side_effect=fake_health_check):
             from scripts.health_check import main
 
             result = main()

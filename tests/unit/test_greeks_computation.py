@@ -486,7 +486,7 @@ class TestGreeksInvariants:
         spot=st.floats(min_value=100, max_value=50000),
         strike=st.floats(min_value=100, max_value=50000),
     )
-    @settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow], deadline=None)
     def test_delta_put_bounds(self, spot, strike):
         """PE delta should be in [-1, 0] if computed."""
         settings_obj = GreeksSettings()

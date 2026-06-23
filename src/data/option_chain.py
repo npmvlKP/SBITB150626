@@ -115,24 +115,35 @@ class RiskFreeRateProvider:
         self._redis: redis_lib.Redis | None = None  # type: ignore[type-arg]
         self._redis_lib = redis_lib
 
-        # Lazy Redis connection
-        try:
-            self._redis = redis_lib.Redis(host="localhost", port=6379, db=0, decode_responses=True)
-            self._redis.ping()
-        except redis_lib.ConnectionError:
-            logger.warning("Redis unavailable, RFR caching disabled")
-            self._redis = None
+        # Lazy Redis connection — do NOT ping in __init__ (blocks event loop / tests).
+        # Connection is verified lazily on first use with a short socket timeout.
+        self._redis = redis_lib.Redis(
+            host="localhost",
+            port=6379,
+            db=0,
+            decode_responses=True,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+        )
+        self._redis_available: bool | None = None  # None = not yet checked
 
     def _get_redis(self) -> redis.Redis | None:  # type: ignore[type-arg]
-        """Get Redis connection, reconnecting if needed."""
+        """Get Redis connection if available (cached after first check).
+
+        Uses the socket_connect_timeout/socket_timeout set in __init__ so
+        unavailable Redis fails fast instead of blocking the event loop.
+        """
         if self._redis is None:
             return None
-        try:
-            self._redis.ping()
-            return self._redis
-        except self._redis_lib.ConnectionError:
-            self._redis = None
-            return None
+        # Cache the availability check so we don't ping on every call
+        if self._redis_available is None:
+            try:
+                self._redis.ping()
+                self._redis_available = True
+            except (self._redis_lib.ConnectionError, self._redis_lib.TimeoutError, OSError):
+                logger.warning("Redis unavailable, RFR caching disabled")
+                self._redis_available = False
+        return self._redis if self._redis_available else None
 
     async def get_rate(self, as_of_date: date, method: RFRMethod | None = None) -> float:
         """Get risk-free rate for given date.
