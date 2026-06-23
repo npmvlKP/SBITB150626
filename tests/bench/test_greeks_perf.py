@@ -4,6 +4,7 @@ Uses pytest-benchmark to measure computation performance and ensure
 Greeks calculations meet latency requirements for live trading.
 """
 
+import asyncio
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,7 @@ from src.data.option_chain import OptionMetrics, OptionMetricsComputer, RiskFree
 
 if TYPE_CHECKING:
     from pytest_benchmark.fixture import BenchmarkFixture
+    from pytest_mock import MockerFixture
 
 
 # ============================================================================
@@ -59,13 +61,15 @@ def test_benchmark_single_option_greeks(
 # ============================================================================
 
 
-@pytest.mark.asyncio
 @pytest.mark.benchmark(group="greeks_batch_100")
-async def test_benchmark_batch_100_greeks(
+def test_benchmark_batch_100_greeks(
     benchmark: "BenchmarkFixture",
     greeks_computer: OptionMetricsComputer,
 ) -> None:
-    """Benchmark 100 options Greeks computation."""
+    """Benchmark 100 options Greeks computation.
+
+    Uses asyncio.run() wrapper since pytest-benchmark is synchronous.
+    """
     # Generate 100 option parameters
     spot = 24890.50
     base_strike = 24000.0
@@ -93,8 +97,11 @@ async def test_benchmark_batch_100_greeks(
             results.append(metric)
         return results
 
-    # Benchmark the batch computation
-    result = await benchmark.pedantic(batch_compute, rounds=5, iterations=1)
+    def run() -> list[OptionMetrics]:
+        return asyncio.run(batch_compute())
+
+    # Benchmark the batch computation (sync wrapper around async)
+    result = benchmark.pedantic(run, rounds=5, iterations=1)
 
     assert len(result) == 100
 
@@ -104,19 +111,34 @@ async def test_benchmark_batch_100_greeks(
 # ============================================================================
 
 
-@pytest.mark.asyncio
 @pytest.mark.benchmark(group="rfr_lookup")
-async def test_benchmark_rfr_lookup(
+def test_benchmark_rfr_lookup(
     benchmark: "BenchmarkFixture",
     rfr_provider: RiskFreeRateProvider,
+    mocker: "MockerFixture",
 ) -> None:
-    """Benchmark risk-free rate lookup time."""
+    """Benchmark risk-free rate lookup time (cached/mocked path).
+
+    Benchmarks the in-memory lookup path, NOT real RBI HTTP fetch.
+    Real network calls are not benchmarked — they're tested separately
+    with proper timeouts and are non-deterministic.
+    Uses asyncio.run() wrapper since pytest-benchmark is synchronous.
+    """
     test_date = date(2026, 6, 20)
+
+    # Mock the async HTTP fetch so we measure lookup overhead, not network latency
+    async def mock_t_bill(_date: date) -> float:
+        return 0.065
+
+    mocker.patch.object(rfr_provider, "_get_t_bill_rate", side_effect=mock_t_bill)
 
     async def lookup_rfr() -> float:
         return await rfr_provider.get_rate(test_date)
 
-    result = await benchmark.pedantic(lookup_rfr, rounds=10, iterations=5)
+    def run() -> float:
+        return asyncio.run(lookup_rfr())
+
+    result = benchmark.pedantic(run, rounds=10, iterations=5)
 
     assert result is not None
     assert 0 < result < 1  # Valid RFR range
@@ -127,13 +149,15 @@ async def test_benchmark_rfr_lookup(
 # ============================================================================
 
 
-@pytest.mark.asyncio
 @pytest.mark.benchmark(group="greeks_full_chain")
-async def test_benchmark_full_option_chain(
+def test_benchmark_full_option_chain(
     benchmark: "BenchmarkFixture",
     greeks_computer: OptionMetricsComputer,
 ) -> None:
-    """Benchmark full option chain computation time."""
+    """Benchmark full option chain computation time.
+
+    Uses asyncio.run() wrapper since pytest-benchmark is synchronous.
+    """
     # Full NIFTY chain: ~50 strikes x 2 expiry weeks
     spot = 24890.50
     atm_strike = 24900.0
@@ -167,7 +191,10 @@ async def test_benchmark_full_option_chain(
 
         return results
 
-    result = await benchmark.pedantic(compute_full_chain, rounds=3, iterations=1)
+    def run() -> list[OptionMetrics]:
+        return asyncio.run(compute_full_chain())
+
+    result = benchmark.pedantic(run, rounds=3, iterations=1)
 
     # range(-25, 26) = 51 values: -25 to 25 inclusive
     # 51 strikes x 2 types = 102 options (may be less if some fail IV validation)

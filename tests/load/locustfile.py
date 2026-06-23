@@ -5,13 +5,22 @@ Run with: locust -f tests/load/locustfile.py --host=http://localhost:8000
 Or headless mode:
     locust -f tests/load/locustfile.py --host=http://localhost:8000 \
            --users=100 --spawn-rate=10 --run-time=60s --headless
+
+NOTE: locust is in the [backtest] optional dependency group because it requires
+autobahn>=24, which conflicts with kiteconnect's pin (autobahn==19.11.2).
+Install in a separate venv: pip install locust
 """
 
-from decimal import Decimal
-from typing import Any
-from uuid import uuid4
+import pytest
 
-from locust import HttpUser, between, task
+# Gracefully skip load tests if locust is not installed (avoids collection errors)
+pytest.importorskip("locust")
+
+from decimal import Decimal  # noqa: E402
+from typing import Any  # noqa: E402
+from uuid import uuid4  # noqa: E402
+
+from locust import HttpUser, between, task  # noqa: E402
 
 # ============================================================================
 # User 1: Market Data User — high-frequency requests

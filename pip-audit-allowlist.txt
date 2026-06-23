@@ -1,0 +1,24 @@
+# pip-audit vulnerability allowlist / accepted risks
+# Format: package_name==version:id=justification
+#
+# All entries must have a documented root-cause + mitigation rationale.
+# This file is reviewed at every dependency update cycle.
+
+# ---------------------------------------------------------------------------
+# autobahn 19.11.2 — PYSEC-2020-25
+# ---------------------------------------------------------------------------
+# Root cause:
+#   kiteconnect==5.2.0 (latest, the Zerodha Kite Connect SDK we depend on)
+#   hard-pins autobahn[twisted]==19.11.2 in its own metadata. kiteconnect uses
+#   autobahn only as a WebSocket CLIENT to Zerodha's ticker endpoint; it does
+#   NOT expose autobahn's WAMP/RawSocket server features that are the subject
+#   of PYSEC-2020-25 (a Crossbar router server-side ROP issue).
+# Mitigation:
+#   1. We do not run any autobahn/WAMP server; the vulnerable code path is
+#      unreachable in this codebase (client-only usage).
+#   2. All WebSocket traffic is outbound-only to api.kite.trade over TLS.
+#   3. Upgrading autobahn independently would violate kiteconnect's pin and
+#      break the Zerodha client (verified: pip check fails with newer autobahn).
+#   4. The fix must come from Zerodha (kiteconnect maintainers) — tracked.
+# Accepted risk: YES (client-only, server-side CVE not applicable)
+autobahn==19.11.2:PYSEC-2020-25=kiteconnect-hardpin-client-only-not-server-path
