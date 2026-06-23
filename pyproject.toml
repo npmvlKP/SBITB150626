@@ -34,8 +34,10 @@ dependencies = [
     "pandas>=2.2.0,<3",
     "polars>=1.0.0",
 
-    # Technical Analysis
-    "ta>=0.11.0",     # Pure Python backup indicators
+    # Technical Analysis — Phase 3
+    "TA-Lib>=0.4.28",     # Primary: 150+ indicators (C library, installed as wheel)
+    "ta>=0.11.0",          # Fallback: pure-Python indicators (Wilder smoothing issues noted)
+    "scipy>=1.12.0",      # Hurst exponent R/S analysis, statistical functions
 
     # Options Greeks — py_vollib is the canonical package (import py_vollib)
     "py_vollib>=1.0.12",  # Correct PyPI package; code imports py_vollib.*
@@ -43,6 +45,10 @@ dependencies = [
 
     # Data sources — kiteconnect>=5.0 per Phase 0 contract
     "kiteconnect>=5.0",       # Zerodha API
+    # SECURITY OVERRIDE: kiteconnect pins autobahn==19.11.2 (vulnerable, PYSEC-2020-25).
+    # We do NOT pin autobahn here to avoid pip resolver conflict. Instead:
+    #   pip install --no-deps "autobahn>=20.12.3"
+    # This is applied post-install. See scripts/verify_phase3_deps.py for audit.
     "jugaad-data>=0.20.0",    # NSE F&O bhavcopy
 
     # Database — psycopg3 async + psycopg-pool for async connection pooling
@@ -108,6 +114,9 @@ dev = [
 
     # Pre-commit hooks
     "pre-commit>=3.6.0",
+
+    # Phase 3 specific
+    "flowrisk>=0.1.0",        # Optional: VPIN computation (Windows fallback implemented)
 ]
 
 # Phase 2: Load testing (async WebSocket simulation)
@@ -220,6 +229,8 @@ module = [
     "kiteconnect.*",
     "py_vollib.*",
     "QuantLib.*",
+    "talib.*",
+    "flowrisk.*",
 ]
 ignore_missing_imports = true
 
