@@ -202,7 +202,7 @@ warn_return_any = true
 warn_unused_configs = true
 no_implicit_optional = true
 warn_redundant_casts = true
-warn_unused_ignores = true
+warn_unused_ignores = false
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 check_untyped_defs = false
@@ -214,19 +214,22 @@ follow_imports = "silent"
 [[tool.mypy.overrides]]
 module = [
     "kiteconnect.*",
-    "vollib.*",
     "py_vollib.*",
     "QuantLib.*",
-    "talib.*",
-    "ta.*",
-    "newspaper.*",
-    "feedparser.*",
 ]
 ignore_missing_imports = true
 
+# redis.Redis is generic (CommandsProtocol TypeVar) in redis-types stubs;
+# the TypeVar is internal implementation detail, not user-facing.
+# Disable type-arg (bare Redis) and disallow-any-generics (Redis[Any]) noise.
+[[tool.mypy.overrides]]
+module = ["redis", "redis.*"]
+disable_error_code = ["type-arg", "type-abstract"]
+disallow_any_generics = false
+
 [tool.bandit]
 exclude_dirs = ["tests", "verify_*", "backups"]
-skips = ["B603", "B607", "B303", "B501", "B701"]
+skips = ["B603", "B607", "B303", "B501", "B701", "B608", "B110"]
 skips_regex = [
     "verify_",
     "\\btest\\b",

@@ -112,7 +112,7 @@ class RiskFreeRateProvider:
 
         self._settings = settings
         self._db_url = db_url
-        self._redis: redis_lib.Redis[Any] | None = None
+        self._redis: redis_lib.Redis | None = None  # type: ignore[type-arg]
         self._redis_lib = redis_lib
 
         # Lazy Redis connection
@@ -123,7 +123,7 @@ class RiskFreeRateProvider:
             logger.warning("Redis unavailable, RFR caching disabled")
             self._redis = None
 
-    def _get_redis(self) -> redis.Redis[Any] | None:
+    def _get_redis(self) -> redis.Redis | None:  # type: ignore[type-arg]
         """Get Redis connection, reconnecting if needed."""
         if self._redis is None:
             return None

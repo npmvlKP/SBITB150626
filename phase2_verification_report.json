@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-06-22T13:01:40.976687",
+  "timestamp": "2026-06-22T22:13:32.006864",
   "project_root": "G:\\OC\\SBITB-150626",
   "python_version": "3.12.7 (tags/v3.12.7:0b05ead, Oct  1 2024, 03:06:41) [MSC v.1941 64 bit (AMD64)]",
   "platform": "win32",
@@ -12,7 +12,7 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 2.62,
+      "duration_sec": 2.3,
       "details": {
         "msg": "0 errors"
       },
@@ -27,7 +27,7 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 0.1,
+      "duration_sec": 0.08,
       "details": {},
       "stdout_last200": "All checks passed!\n",
       "stderr_last200": ""
@@ -40,7 +40,7 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 0.1,
+      "duration_sec": 0.09,
       "details": {
         "files_formatted": "52 files already formatted"
       },
@@ -55,7 +55,7 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 1.82,
+      "duration_sec": 1.52,
       "details": {
         "severity_summary": "High: 2"
       },
@@ -70,12 +70,12 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 43.34,
+      "duration_sec": 39.28,
       "details": {
         "coverage_line": "TOTAL                            459     71     88     25    81%",
-        "test_summary": "112 passed, 1 warning in 35.05s"
+        "test_summary": "112 passed, 1 warning in 32.32s"
       },
-      "stdout_last200": "---------------------------------------\nTOTAL                            459     71     88     25    81%\n\nRequired test coverage of 80% reached. Total coverage: 80.99%\n112 passed, 1 warning in 35.05s\n",
+      "stdout_last200": "---------------------------------------\nTOTAL                            459     71     88     25    81%\n\nRequired test coverage of 80% reached. Total coverage: 80.99%\n112 passed, 1 warning in 32.32s\n",
       "stderr_last200": ""
     },
     {
@@ -86,7 +86,7 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 72.47,
+      "duration_sec": 53.8,
       "details": {},
       "stdout_last200": "Name        Skip Reason\n----------- --------------------------------------------------------------------------\nsbitb150626 Dependency not found on PyPI and could not be audited: sbitb150626 (0.1.0)\n",
       "stderr_last200": "No known vulnerabilities found\n"
@@ -99,7 +99,7 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 35.53,
+      "duration_sec": 31.77,
       "details": {},
       "stdout_last200": "",
       "stderr_last200": ""
@@ -112,11 +112,11 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 15.6,
+      "duration_sec": 11.41,
       "details": {
-        "test_summary": "======================== 20 passed, 1 warning in 8.60s ========================"
+        "test_summary": "======================== 20 passed, 1 warning in 6.26s ========================"
       },
-      "stdout_last200": "ks.analytical import delta, gamma, theta, vega\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n======================== 20 passed, 1 warning in 8.60s ========================\n",
+      "stdout_last200": "ks.analytical import delta, gamma, theta, vega\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n======================== 20 passed, 1 warning in 6.26s ========================\n",
       "stderr_last200": ""
     },
     {
@@ -127,22 +127,24 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 34.39,
+      "duration_sec": 31.34,
       "details": {},
-      "stdout_last200": "ks     40.5000  139.5000  42.6228  4.3621  41.8000  0.5000   268;586       23.4616    4867           1\n-------------------------------------------------------------------------------------------------",
+      "stdout_last200": "  42.0753  25.4108  40.2000  0.9000    39;577       23.7669    7480           1\n------------------------------------------------------------------------------------------------------------------------",
       "stderr_last200": ""
     },
     {
       "name": "integration tests",
       "tier": 1,
       "command": "\"C:\\Program Files\\Python312\\python.exe\" -m pytest tests/integration/ -v -q",
-      "passed": false,
-      "skipped": true,
-      "skip_reason": "Docker skipped by user",
+      "passed": true,
+      "skipped": false,
+      "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 0.0,
-      "details": {},
-      "stdout_last200": "",
+      "duration_sec": 5.66,
+      "details": {
+        "test_summary": "============================= 12 passed in 0.81s =============================="
+      },
+      "stdout_last200": "oop_scope=function\ncollected 12 items\n\ntests\\integration\\test_redis_timescaledb.py ............                 [100%]\n\n============================= 12 passed in 0.81s ==============================\n",
       "stderr_last200": ""
     },
     {
@@ -153,7 +155,7 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 0.23,
+      "duration_sec": 0.15,
       "details": {},
       "stdout_last200": "92m[PASS]\u001b[0m [Ch.3] Compaction: continuous aggregate views  -- v_tick_1min_ohlcv, v_daily_oi_summary\n  \u001b[92m[PASS]\u001b[0m [Ch.3] Compaction: automatic aggregate refresh policy  -- automatic refresh poli",
       "stderr_last200": ""
@@ -166,7 +168,7 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 67.7,
+      "duration_sec": 54.0,
       "details": {},
       "stdout_last200": "Name        Skip Reason\n----------- --------------------------------------------------------------------------\nsbitb150626 Dependency not found on PyPI and could not be audited: sbitb150626 (0.1.0)\n",
       "stderr_last200": "No known vulnerabilities found\n"
@@ -192,7 +194,7 @@
       "skipped": false,
       "skip_reason": "",
       "exit_code": 0,
-      "duration_sec": 3.47,
+      "duration_sec": 2.93,
       "details": {},
       "stdout_last200": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502 requirements.txt \u2502 pip  \u2502        0        \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\nLegend:\n- '-': Not scanned\n- '0': Clean (no security findings detected)\n\n",
       "stderr_last200": "ecting vulnerabilities...\n\n\ud83d\udce3 \u001b[34mNotices:\u001b[0m\n  - Version 0.71.2 of Trivy is now available, current version is 0.71.1\n\nTo suppress version checks, run Trivy scans with the --skip-version-check flag\n\n"
@@ -200,9 +202,9 @@
   ],
   "summary": {
     "total": 14,
-    "passed": 12,
+    "passed": 13,
     "failed": 0,
-    "skipped": 2,
+    "skipped": 1,
     "all_passed": true
   }
 }
