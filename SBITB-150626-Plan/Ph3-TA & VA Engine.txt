@@ -24,6 +24,10 @@ Critical Corrections & Findings (Pre-Implementation)
 15	Kaufman percentile ranking	Raw indicator values	Normalize all indicators over 252-day lookback using percentile rank	Kaufman Ch.7: comparable signals across indicators
 16	Weis VSA context window	Single bar analysis	5 surrounding bars required for signal confirmation (2 prior + current + 2 after)	Weis "Trades About to Happen" Ch.3
 17	flowrisk package	Assumed stable	Optional dependency — may fail to install on Windows. Implement custom VPIN as fallback	flowrisk has C dependencies; Windows wheel not always available
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+<@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 1 — Install Phase 3 Dependencies + Verify Imports
 Prerequisite: Phase 0+1+2 project exists at G:\OC\02June26\indian-trading-bot\ with .venv activated, Docker services running.
 
@@ -101,6 +105,10 @@ sig = inspect.signature(talib.OBV)
 print(f'OBV defaults: {sig}')  # CONFIRM: no timeperiod
 "
 Verification Gate: ALL core imports must succeed (talib, ta, scipy). flowrisk failure is acceptable — custom VPIN fallback handles it. TA-Lib default signatures must match the corrections table above. If ANY core import fails, fix before proceeding.
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+<@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 INSTRUCTION 2 — Extend config/settings.py with Phase 3 Settings
 File: G:\OC\02June26\indian-trading-bot\config\settings.py
@@ -194,6 +202,10 @@ class DepthAnalysisSettings(BaseSettings):
     VPIN_USE_BVC: bool = Field(default=True, description="Use BVC (Bulk Volume Classification) — required since Zerodha lacks tick-level trade direction")
     VPIN_MIN_1MIN_BARS: int = Field(default=50, ge=20, le=200, description="Minimum 1-min bars required for VPIN computation")
 All settings must: Use pydantic-settings with env_prefix, Field() with validation constraints, model_config = SettingsConfigDict(env_file=".env", extra="ignore").
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+<@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 INSTRUCTION 3 — Implement src/analysis/technical.py
 File: G:\OC\02June26\indian-trading-bot\src\analysis\technical.py
@@ -728,6 +740,10 @@ Volume Rate:
         return None  # Will be overridden by VolumeIndicators which track history
 All methods: Fully type-hinted, structlog on errors/warnings, NaN/inf guards on every output, performance target < 1ms per indicator batch (500 bars).
 
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+<@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 4 — Implement src/analysis/volume.py
 File: G:\OC\02June26\indian-trading-bot\src\analysis\volume.py
 
@@ -1155,6 +1171,10 @@ class VolumeAnomalyDetector:
         return anomalies
 Performance target: Volume profile computation < 5ms for 500 bars. All detectors combined < 10ms.
 
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+<@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 5 — Implement src/analysis/depth.py
 File: G:\OC\02June26\indian-trading-bot\src\analysis\depth.py
 
@@ -1383,6 +1403,11 @@ class DepthAnalyzer:
             vpin_cdf=round(vpin_cdf, 4),
             vpin_level=vpin_level,
         )
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+<@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 6 — Implement src/analysis/__init__.py (AnalysisEngine + analyze())
 File: G:\OC\02June26\indian-trading-bot\src\analysis\__init__.py
 
@@ -1504,6 +1529,10 @@ class AnalysisEngine:
         )
 Exports: AnalysisEngine, TechnicalReport, TechnicalIndicators, VolumeSignals, DepthSignals, MarketRegime, VSASignalType, VPINLevel
 
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+<@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 7 — Create src/analysis/metrics.py (Prometheus Metrics)
 File: G:\OC\02June26\indian-trading-bot\src\analysis\metrics.py
 
@@ -1572,6 +1601,11 @@ MARKET_REGIME_GAUGE = Gauge(
     "Current market regime",
     ["regime"],  # TRENDING, MEAN_REVERTING, RANDOM_WALK
 )
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+<@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 8 — Write All Tests
 8.1 tests/conftest.py — Add Phase 3 Fixtures
 # Add these to the existing conftest.py
@@ -1804,6 +1838,11 @@ def test_vpin_benchmark(benchmark, depth_settings, sample_1min_bars):
     analyzer = DepthAnalyzer(depth_settings)
     result = benchmark(analyzer.compute_vpin, sample_1min_bars)
 # Target: < 20ms
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+<@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 9 — Run Full Verification Suite
 # Ensure venv activated + Docker services running
 & "G:\OC\02June26\indian-trading-bot\.venv\Scripts\Activate.ps1"
@@ -1835,6 +1874,11 @@ pip-audit = 0 known vulnerabilities
 gitleaks = 0 secrets detected
 ALL unit + property tests pass
 No benchmark regression > 20% from baseline
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+<@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 INSTRUCTION 10 — Cross-Reference Validation Matrix
 After all tests pass, validate every critical correction and decision against the implementation:
 
@@ -1859,6 +1903,11 @@ After all tests pass, validate every critical correction and decision against th
 18	Regime switching: ADX + Hurst	VERIFIED	Chan logic in _compute_regime()
 19	analyze() → TechnicalReport	VERIFIED	AnalysisEngine.analyze() returns TechnicalReport
 20	Performance targets met	VERIFIED	Benchmark tests: indicators <1ms, profile <5ms, total <10ms
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+<@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
 File Summary
 File	Purpose	Lines (est.)
 config/settings.py	+3 settings classes (TechnicalIndicatorSettings, VolumeProfileSettings, DepthAnalysisSettings)	~120
