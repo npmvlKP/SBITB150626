@@ -154,15 +154,16 @@ feast = [
 # ============================================================
 # PROJECT SCRIPTS — Safe venv entry points (PowerShell-safe)
 #
-# CRITICAL: PowerShell double-quotes strip the backslash before .venv
-# in paths like .venv\Scripts\python.exe, causing CommandNotFoundException.
+# CRITICAL: PowerShell double-quotes strip the backslash before the venv
+# directory name in paths like SBITB150626\Scripts\python.exe, causing
+# CommandNotFoundException when the backslash before a letter is stripped.
 # FIX: Always use `python -m <module>` or activate the venv first:
-#   & .venv\Scripts\Activate.ps1   (no path escape issue — . is not \)
-#   python -m pytest               (works after activation)
-#   python -m pip_audit            (works after activation)
-#   python scripts\verify_phase3_deps.py  (works after activation)
+#   & SBITB150626\Scripts\Activate.ps1  (no path escape issue)
+#   python -m pytest                     (works after activation)
+#   python -m pip_audit                  (works after activation)
+#   python scripts\verify_phase3_deps.py (works after activation)
 #
-# Do NOT use: & ".venv\Scripts\python.exe"  (PowerShell corrupts path)
+# Do NOT use: & "SBITB150626\Scripts\python.exe" (PowerShell corrupts path)
 # ============================================================
 
 [tool.setuptools.packages.find]

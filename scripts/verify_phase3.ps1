@@ -3,8 +3,8 @@
     Phase 3 Dependency Verification — PowerShell-safe wrapper
 
 .DESCRIPTION
-    PowerShell double-quotes strip the backslash before .venv in paths
-    like .venv\Scripts\python.exe, causing CommandNotFoundException.
+    PowerShell double-quotes strip the backslash before the venv dir
+    in paths like SBITB150626\Scripts\python.exe, causing CommandNotFoundException.
 
     This script ACTIVATES the venv first (avoiding path issues entirely)
     and then runs all Phase 3 verification checks.
@@ -22,10 +22,10 @@
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
-# Activate venv — use Join-Path to avoid backslash-before-dot escaping
-$ActivateScript = Join-Path $ProjectRoot ".venv\Scripts\Activate.ps1"
+# Activate venv — use Join-Path to avoid backslash stripping
+$ActivateScript = Join-Path $ProjectRoot "SBITB150626\Scripts\Activate.ps1"
 if (-not (Test-Path $ActivateScript)) {
-    Write-Error "Virtual environment not found at $ActivateScript. Run: python -m venv .venv"
+    Write-Error "Virtual environment not found at $ActivateScript. Run: python -m venv SBITB150626"
     exit 1
 }
 

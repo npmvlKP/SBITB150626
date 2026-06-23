@@ -9,8 +9,8 @@ PowerShell escape-trap notes (Windows 11):
   - ``pip-audit`` is invoked as ``python -m pip_audit`` (underscore),
     NOT as ``pip-audit.exe`` (hyphen).
   - ``pip`` must be invoked as ``python -m pip``, NOT as
-    ``.venv\\Scripts\\pip.exe`` — PowerShell double-quotes strip the
-    backslash before ``.venv``, corrupting the path.
+    ``SBITB150626\\Scripts\\pip.exe`` — PowerShell double-quotes strip the
+    backslash before ``SBITB``, corrupting the path.
 """
 
 from __future__ import annotations
@@ -166,7 +166,7 @@ def main() -> int:
         exit_code = 1
 
     # Gate: pip must be invocable via `python -m pip` (NOT pip.exe — PowerShell
-    # corrupts the path by stripping the backslash before .venv)
+    # corrupts the path by stripping the backslash before SBITB150626)
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pip", "--version"],

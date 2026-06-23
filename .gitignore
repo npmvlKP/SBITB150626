@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+# Virtual environment (renamed from .venv -> SBITB150626 for project consistency)
 SBITB150626/
 .env
 .env.docker
@@ -20,7 +21,5 @@ node_modules/
 *.log
 .trivy-cache/
 .gitleaks/
-.venv/
-venv/
 gitleaks_report.json
 gitleaks_src_report.json
