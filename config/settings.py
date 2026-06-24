@@ -258,3 +258,199 @@ class WebSocketSettings(BaseSettings):
     NIFTY_ATM_STRIKES_EACH_SIDE: int = 25  # 25 above + 25 below = 50 strikes
     MCX_INSTRUMENTS: list[str] = ["GOLD", "SILVER", "CRUDEOIL"]
     HEARTBEAT_TIMEOUT_SEC: float = 5.0  # Zerodha sends heartbeat every ~2-3s
+
+
+# PHASE 3 ADDITIONS ─────────────────────────────────────────────────────────────────────
+# Technical Analysis + Volume Analysis Engine Settings
+# Reference: Kaufman Ch.2-8, Chan Ch.1-4, Dalton "Mind Over Markets", Weis "Trades About to Happen", Coulling "VPA"
+
+
+class TechnicalIndicatorSettings(BaseSettings):
+    """Technical indicator parameters — momentum, volatility, trend, volume, regime detection.
+
+    CRITICAL TA-Lib default overrides documented in each field description:
+    - BBANDS: TA-Lib default timeperiod=5 → override to 20
+    - EMA: TA-Lib default timeperiod=30 → must pass explicit periods
+    - CCI: TA-Lib default timeperiod=14 → override to 20
+    - CMF: NOT TA-Lib ADOSC (different formula) — custom implementation required
+    - Supertrend/VWAP/Volume Rate: NOT in TA-Lib — custom implementations required
+
+    References:
+    - Kaufman Ch.7: EMA alignment (fastest >= 1/4 slowest), percentile ranking
+    - Kaufman Ch.4-5: RSI, MACD, ATR with Wilder smoothing
+    - Chan Ch.1-4: Regime switching (ADX + Hurst for trending vs mean-reverting)
+    - Wilder (1978): RSI, ATR EWMA smoothing (alpha=1/period)
+    """
+
+    model_config = SettingsConfigDict(env_prefix="TA_", env_file=".env", extra="ignore")
+
+    # ── Momentum indicators ──────────────────────────────────────────────────────────
+
+    RSI_PERIOD: int = Field(default=14, ge=2, le=100, description="RSI lookback period (Wilder smoothing alpha=1/14)")
+    MACD_FAST: int = Field(default=12, ge=2, le=50, description="MACD fast EMA period")
+    MACD_SLOW: int = Field(default=26, ge=5, le=100, description="MACD slow EMA period")
+    MACD_SIGNAL: int = Field(default=9, ge=2, le=50, description="MACD signal line period")
+    ADX_PERIOD: int = Field(default=14, ge=2, le=100, description="ADX lookback period")
+    CCI_PERIOD: int = Field(
+        default=20, ge=2, le=100, description="CCI lookback period (TA-Lib default=14, overridden to 20)"
+    )
+
+    # ── Volatility indicators ─────────────────────────────────────────────────────────
+
+    BBANDS_PERIOD: int = Field(
+        default=20, ge=2, le=100, description="Bollinger Bands period (TA-Lib default=5, overridden to 20)"
+    )
+    BBANDS_STDDEV: float = Field(default=2.0, ge=0.5, le=4.0, description="Bollinger Bands standard deviations")
+    ATR_PERIOD: int = Field(default=14, ge=2, le=100, description="ATR lookback period (Wilder smoothing)")
+    INDIA_VIX_ELEVATED: float = Field(default=20.0, ge=5.0, le=50.0, description="India VIX elevated threshold")
+    INDIA_VIX_HIGH: float = Field(default=25.0, ge=10.0, le=60.0, description="India VIX high threshold")
+    INDIA_VIX_EXTREME: float = Field(default=35.0, ge=15.0, le=80.0, description="India VIX extreme threshold")
+
+    # ── Trend indicators ──────────────────────────────────────────────────────────────
+
+    SUPERTREND_PERIOD: int = Field(
+        default=10, ge=2, le=50, description="Supertrend ATR period (Wilders-smoothed, NOT simple RMA)"
+    )
+    SUPERTREND_MULTIPLIER: float = Field(default=3.0, ge=1.0, le=10.0, description="Supertrend ATR multiplier")
+    EMA_PERIODS: list[int] = Field(
+        default=[9, 21, 50, 200], description="EMA periods (9/21 for signal crossover, 50/200 for macro trend)"
+    )
+    VWAP_ANCHOR_TIME: time = Field(default=time(9, 15), description="VWAP session anchor (NSE open)")
+
+    # ── Volume indicators ─────────────────────────────────────────────────────────────
+
+    OBV_SMOOTHING_PERIOD: int = Field(default=21, ge=5, le=100, description="OBV EMA smoothing period (Kaufman Ch.6)")
+    MFI_PERIOD: int = Field(default=14, ge=2, le=100, description="Money Flow Index period")
+    CMF_PERIOD: int = Field(
+        default=20, ge=5, le=100, description="Chaikin Money Flow period (custom CMF — NOT TA-Lib ADOSC)"
+    )
+    VOLUME_RATE_PERIOD: int = Field(default=20, ge=5, le=100, description="Volume rate SMA period")
+
+    # ── Normalization (Kaufman Ch.7: percentile ranking for cross-indicator comparison) ─
+
+    PERCENTILE_LOOKBACK: int = Field(
+        default=252, ge=30, le=504, description="Percentile ranking lookback (1 trading year)"
+    )
+    PERCENTILE_MIN_HISTORY: int = Field(
+        default=63, ge=20, le=126, description="Minimum bars required for percentile computation"
+    )
+
+    # ── EMA alignment validation (Kaufman Ch.7: fastest >= 1/4 of slowest) ────────────
+
+    EMA_MACRO_FAST: int = Field(default=50, description="Macro trend fast EMA (must be >= 200/4 = 50 per Kaufman Ch.7)")
+    EMA_MACRO_SLOW: int = Field(default=200, description="Macro trend slow EMA")
+
+    # ── Regime detection (Chan Ch.1-4) ─────────────────────────────────────────────────
+
+    ADX_TRENDING_THRESHOLD: float = Field(
+        default=25.0, ge=15.0, le=40.0, description="ADX above this = trending regime"
+    )
+    HURST_TRENDING_THRESHOLD: float = Field(
+        default=0.5, ge=0.4, le=0.7, description="Hurst exponent > this = trending regime (H<0.5 = mean-reverting)"
+    )
+    HURST_LOOKBACK: int = Field(default=100, ge=50, le=500, description="Hurst exponent R/S analysis lookback")
+
+
+class VolumeProfileSettings(BaseSettings):
+    """Volume profile, VSA (Volume Spread Analysis), price-volume divergence, and volume anomaly detection.
+
+    References:
+    - Dalton "Mind Over Markets" & CME Market Profile handbook: 68.2% value area (canonical 1 sigma)
+    - Weis "Trades About to Happen" Ch.3: 5-bar context window for VSA confirmation
+    - Coulling "Volume Price Analysis": demand/supply bar classification
+    """
+
+    model_config = SettingsConfigDict(env_prefix="VOLPROF_", env_file=".env", extra="ignore")
+
+    # ── Volume profile ────────────────────────────────────────────────────────────────
+
+    NUM_PRICE_BINS: int = Field(default=24, ge=10, le=100, description="Number of price bins for volume histogram")
+    VALUE_AREA_PCT: float = Field(
+        default=0.682, ge=0.5, le=0.95, description="Value area = 68.2% (CME/Dalton canonical 1 sigma, NOT 70%)"
+    )
+    POC_MIN_VOLUME_PCT: float = Field(
+        default=0.05, ge=0.01, le=0.20, description="POC bin must have >= this percentage of total volume"
+    )
+
+    # ── VSA (Volume Spread Analysis — Weis + Coulling) ────────────────────────────────
+
+    VSA_CONTEXT_WINDOW: int = Field(
+        default=5,
+        ge=3,
+        le=10,
+        description="Surrounding bars for VSA signal confirmation (Weis Ch.3: 2 prior + current + 2 after)",
+    )
+    VSA_VOLUME_SPIKE_MULTIPLIER: float = Field(
+        default=2.0, ge=1.5, le=5.0, description="Volume > this * 20-day average = spike"
+    )
+    VSA_SPREAD_COMPARISON_PERIOD: int = Field(
+        default=20, ge=10, le=50, description="Bars for average spread comparison"
+    )
+    VSA_WICK_RATIO_THRESHOLD: float = Field(
+        default=0.5, ge=0.3, le=0.8, description="Wick-to-body ratio for rejection signals"
+    )
+
+    # ── Price-Volume Divergence ────────────────────────────────────────────────────────
+
+    DIVERGENCE_LOOKBACK: int = Field(default=20, ge=10, le=50, description="Lookback for divergence detection")
+    DIVERGENCE_MIN_SWINGS: int = Field(default=2, ge=2, le=5, description="Minimum swing points for divergence")
+
+    # ── Volume anomalies ──────────────────────────────────────────────────────────────
+
+    ANOMALY_STDDEV_THRESHOLD: float = Field(
+        default=2.0, ge=1.5, le=4.0, description="Volume > mean + N*sigma = anomaly"
+    )
+    ANOMALY_LOOKBACK: int = Field(default=20, ge=10, le=60, description="Lookback for volume mean/stddev computation")
+
+
+class DepthAnalysisSettings(BaseSettings):
+    """Order book depth analysis and VPIN (Volume-Synchronized Probability of Informed Trading).
+
+    Depth levels: Zerodha provides 5, Dhan provides up to 200.
+
+    VPIN: Uses BVC (Bulk Volume Classification) since Zerodha lacks tick-level trade direction.
+    BVC achieves ~85-95% accuracy vs full tick data (Easley/Lopez de Prado/O'Hara 2012).
+    Requires 1-min OHLCV bars (NOT 5-level depth — that is insufficient for VPIN).
+
+    References:
+    - Easley, Lopez de Prado, O'Hara (2012): VPIN methodology
+    - Bhabra et al.: BVC (Bulk Volume Classification) for trade direction estimation
+    """
+
+    model_config = SettingsConfigDict(env_prefix="DEPTH_", env_file=".env", extra="ignore")
+
+    # ── Depth analysis (Zerodha 5-level, Dhan 200-level) ──────────────────────────────
+
+    DEPTH_LEVELS: int = Field(
+        default=5, ge=1, le=200, description="Number of depth levels (5 for Zerodha, 200 for Dhan)"
+    )
+    IMBALANCE_THRESHOLD: float = Field(default=2.0, ge=1.5, le=5.0, description="Bid/ask ratio above this = imbalance")
+    SPREAD_BPS_THRESHOLD: float = Field(
+        default=5.0, ge=1.0, le=20.0, description="Spread > N basis points = wide spread alert"
+    )
+
+    # ── VPIN (Volume-Synchronized Probability of Informed Trading) ─────────────────────
+
+    VPIN_ENABLED: bool = Field(default=True, description="Enable VPIN computation")
+    VPIN_BUCKET_SIZE_METHOD: Literal["fixed", "daily_adv"] = Field(
+        default="daily_adv", description="Bucket size method: fixed=N shares or daily_adv/50"
+    )
+    VPIN_FIXED_BUCKET_SIZE: int = Field(
+        default=5000, ge=100, le=100000, description="Fixed bucket size if method=fixed"
+    )
+    VPIN_DAILY_ADV_LOOKBACK: int = Field(
+        default=20, ge=5, le=60, description="Days for Average Daily Volume computation"
+    )
+    VPIN_NUM_BUCKETS: int = Field(
+        default=50, ge=20, le=200, description="Number of volume buckets for VPIN rolling window"
+    )
+    VPIN_CDF_ELEVATED: float = Field(default=0.90, ge=0.75, le=0.95, description="VPIN CDF > this = elevated toxicity")
+    VPIN_CDF_HIGH: float = Field(default=0.95, ge=0.85, le=0.99, description="VPIN CDF > this = high toxicity")
+    VPIN_CDF_EXTREME: float = Field(default=0.99, ge=0.95, le=0.999, description="VPIN CDF > this = extreme toxicity")
+    VPIN_USE_BVC: bool = Field(
+        default=True,
+        description="Use BVC (Bulk Volume Classification) — required since Zerodha lacks tick-level trade direction",
+    )
+    VPIN_MIN_1MIN_BARS: int = Field(
+        default=50, ge=20, le=200, description="Minimum 1-min bars required for VPIN computation"
+    )
