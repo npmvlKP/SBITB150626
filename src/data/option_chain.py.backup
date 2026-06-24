@@ -15,11 +15,11 @@ Author: SBITB-150626
 from __future__ import annotations
 
 import asyncio
-import json
+import json as json_module
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -515,12 +515,11 @@ class OptionMetricsComputer:
             )
 
         # Validate inputs and compute time to maturity
-        validation = self._validate_and_preprocess_inputs(
+        t, flag = self._validate_and_preprocess_inputs(
             spot, strike, expiry_date, as_of_date, option_ltp, option_type, risk_free_rate
         )
-        if isinstance(validation, OptionMetrics):
-            return validation
-        t, flag = validation
+        if t is None:  # Validation failed, error response already returned
+            return t  # type: ignore[return-value]
 
         # Compute implied volatility
         iv = self._compute_implied_volatility(option_ltp, spot, strike, t, risk_free_rate, flag)
@@ -536,7 +535,9 @@ class OptionMetricsComputer:
         greeks = self._compute_greeks(flag, spot, strike, t, risk_free_rate, iv)
 
         # Build and return result
-        return self._build_result(iv, greeks, risk_free_rate, t)
+        return self._build_result(
+            iv, greeks, risk_free_rate, t
+        )
 
     def _validate_and_preprocess_inputs(
         self,
@@ -724,7 +725,7 @@ class OptionMetricsComputer:
             risk_free_rate,
         )
 
-    async def compute_greeks_for_date(self, as_of_date: date, symbol: str) -> int:
+async def compute_greeks_for_date(self, as_of_date: date, symbol: str) -> int:
         """Compute Greeks for all options of a symbol on a given date.
 
         Kleppmann Ch.3: Writes to event log first, then derives to snapshot table.
@@ -779,8 +780,6 @@ class OptionMetricsComputer:
 
     async def _get_database_connection(self):
         """Get database connection."""
-        import psycopg
-
         if self._db_url is None:
             raise ValueError("Database URL not configured")
         return await psycopg.AsyncConnection.connect(self._db_url)
@@ -835,9 +834,12 @@ class OptionMetricsComputer:
     ) -> int:
         """Process options in batches and return successful count."""
         successful_count = 0
+
         for i in range(0, len(options_rows), batch_size):
             batch = options_rows[i : i + batch_size]
-            batch_metrics, batch_events = await self._process_batch(batch, spot, as_of_date, symbol, rfr)
+            batch_metrics, batch_events = await self._process_batch(
+                batch, spot, as_of_date, symbol, rfr
+            )
 
             # Insert metrics to database
             if batch_metrics:
@@ -863,20 +865,78 @@ class OptionMetricsComputer:
         """Process a single batch of options and return metrics and events."""
         batch_metrics: list[tuple[Any, ...]] = []
         batch_events: list[MarketEvent] = []
-        ingest_id = uuid.uuid4()
+ingest_id = uuid.uuid4()
+            event_time = datetime.now(timezone.utc)
 
-        for row in batch:
-            expiry, strike, option_type, close_price = row
+for row in batch:
+                        expiry, strike, option_type, close_price = row
 
-            metrics = await self.compute_single_async(
-                spot=spot,
-                strike=float(strike),
-                expiry_date=expiry,
-                as_of_date=as_of_date,
-                option_ltp=float(close_price),
-                option_type=option_type,
-                risk_free_rate=rfr,
-            )
+                        metrics = await self.compute_single_async(
+                            spot=spot,
+                            strike=float(strike),
+                            expiry_date=expiry,
+                            as_of_date=as_of_date,
+                            option_ltp=float(close_price),
+                            option_type=option_type,
+                            risk_free_rate=rfr,
+                        )
+
+                        # Prepare batch insert data
+                        batch_metrics.append(
+                            (
+                                as_of_date,
+                                symbol,
+                                expiry,
+                                float(strike),
+                                option_type,
+                                spot,
+                                metrics.iv,
+                                metrics.delta,
+                                metrics.gamma,
+                                metrics.theta,
+                                metrics.vega,
+                                metrics.risk_free_rate,
+                                metrics.rfr_method,
+                                metrics.ttm_years,
+                                metrics.compute_error,
+                            )
+                        )
+
+                        # Track success
+                        if metrics.compute_error is None:
+                            successful_count += 1
+
+                        # Create event for event log
+                        batch_events.append(
+                            MarketEvent(
+                                event_id=uuid.uuid4(),
+                                event_time=datetime.now(timezone.utc),
+                                event_type="GREEKS_SNAPSHOT",
+                                schema_version=1,
+                                payload={
+                                    "date": str(as_of_date),
+                                    "symbol": symbol,
+                                    "expiry": str(expiry),
+                                    "strike": float(strike),
+                                    "option_type": option_type,
+                                    "spot": spot,
+                                    "greeks": {
+                                        "iv": metrics.iv,
+                                        "delta": metrics.delta,
+                                        "gamma": metrics.gamma,
+                                        "theta": metrics.theta,
+                                        "vega": metrics.vega,
+                                    },
+                                    "risk_free_rate": metrics.risk_free_rate,
+                                    "rfr_method": metrics.rfr_method,
+                                    "ttm_years": metrics.ttm_years,
+                                    "compute_error": metrics.compute_error,
+                                },
+                                source="computed",
+                                ingest_id=ingest_id,
+                                epoch=1,
+                            )
+                        )
 
             # Prepare batch insert data
             batch_metrics.append(
@@ -907,7 +967,7 @@ class OptionMetricsComputer:
             batch_events.append(
                 MarketEvent(
                     event_id=uuid.uuid4(),
-                    event_time=datetime.now(UTC),
+                    event_time=event_time,
                     event_type="GREEKS_SNAPSHOT",
                     schema_version=1,
                     payload={

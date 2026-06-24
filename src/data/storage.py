@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json as json_module
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, Self
 
 import pandas as pd
@@ -277,7 +277,7 @@ class TimescaleDBStore:
         # Use parameterized ON CONFLICT clause
         on_conflict_clause = f"ON CONFLICT {on_conflict}" if on_conflict.upper() != "DO NOTHING" else ""
 
-        start_time = datetime.now()
+        start_time = datetime.now(UTC)
 
         # Prepare columns and placeholders
         columns = list(rows[0].keys())
@@ -297,7 +297,7 @@ class TimescaleDBStore:
                     )
                     inserted += 1
 
-        elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
+        elapsed_ms = (datetime.now(UTC) - start_time).total_seconds() * 1000
 
         logger.info(
             "bulk_insert completed",

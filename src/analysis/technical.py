@@ -22,12 +22,14 @@ Performance target: < 1ms per indicator batch (500 bars).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC
+from datetime import datetime as Datetime
 from enum import StrEnum
 
 import numpy as np
 import structlog
 import talib
+from numpy.typing import NDArray
 from pydantic import BaseModel, Field
 
 from config.settings import TechnicalIndicatorSettings
@@ -121,7 +123,7 @@ class TechnicalIndicators(BaseModel):
     volume: VolumeIndicators = Field(default_factory=VolumeIndicators)
     regime: MarketRegime = Field(MarketRegime.UNKNOWN)
     hurst_exponent: float | None = Field(None, description="Hurst exponent via R/S analysis")
-    timestamp: datetime | None = Field(None, description="Timestamp of the last bar in the input data")
+    timestamp: Datetime | None = Field(None, description="Timestamp of the last bar in the input data")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -148,7 +150,7 @@ class TechnicalIndicatorPipeline:
 
     def compute(
         self,
-        ohlcv: np.ndarray,
+        ohlcv: NDArray[np.float64],
         india_vix: float | None = None,
     ) -> TechnicalIndicators:
         """Compute all technical indicators from OHLCV data.
@@ -170,7 +172,13 @@ class TechnicalIndicatorPipeline:
                 "ta_pipeline_insufficient_data",
                 bars=len(ohlcv) if ohlcv is not None else 0,
             )
-            return TechnicalIndicators()
+            return TechnicalIndicators(
+                momentum=MomentumIndicators(),
+                volatility=VolatilityIndicators(),
+                trend=TrendIndicators(),
+                volume=VolumeIndicators(),
+                timestamp=Datetime.now(UTC),
+            )
 
         h = ohlcv[:, 1].astype(np.float64)
         low = ohlcv[:, 2].astype(np.float64)
@@ -191,12 +199,14 @@ class TechnicalIndicatorPipeline:
             volume=volume,
             regime=regime,
             hurst_exponent=hurst,
-            timestamp=None,
+            timestamp=Datetime.now(UTC),
         )
 
     # ── 3.3 Momentum Indicators ────────────────────────────────────────────
 
-    def _compute_momentum(self, h: np.ndarray, low: np.ndarray, c: np.ndarray) -> MomentumIndicators:
+    def _compute_momentum(
+        self, h: NDArray[np.float64], low: NDArray[np.float64], c: NDArray[np.float64]
+    ) -> MomentumIndicators:
         """Compute momentum indicators: RSI, MACD, ADX, CCI.
 
         RSI(14): Kaufman Ch.4 — Wilder smoothing (alpha=1/14).
@@ -240,9 +250,9 @@ class TechnicalIndicatorPipeline:
 
     def _compute_volatility(
         self,
-        h: np.ndarray,
-        low: np.ndarray,
-        c: np.ndarray,
+        h: NDArray[np.float64],
+        low: NDArray[np.float64],
+        c: NDArray[np.float64],
         india_vix: float | None,
     ) -> VolatilityIndicators:
         """Compute volatility indicators: BBands, ATR, India VIX level.
@@ -259,7 +269,7 @@ class TechnicalIndicatorPipeline:
             timeperiod=s.BBANDS_PERIOD,
             nbdevup=s.BBANDS_STDDEV,
             nbdevdn=s.BBANDS_STDDEV,
-            matype=0,
+            matype=talib.MA_Type.SMA,
         )
         last_close = c[-1]
         bb_u = self._safe_last(bb_upper)
@@ -307,10 +317,10 @@ class TechnicalIndicatorPipeline:
 
     def _compute_trend(
         self,
-        h: np.ndarray,
-        low: np.ndarray,
-        c: np.ndarray,
-        v: np.ndarray,
+        h: NDArray[np.float64],
+        low: NDArray[np.float64],
+        c: NDArray[np.float64],
+        v: NDArray[np.float64],
     ) -> TrendIndicators:
         """Compute trend indicators: Supertrend, EMA, VWAP.
 
@@ -357,10 +367,10 @@ class TechnicalIndicatorPipeline:
 
     def _compute_volume(
         self,
-        h: np.ndarray,
-        low: np.ndarray,
-        c: np.ndarray,
-        v: np.ndarray,
+        h: NDArray[np.float64],
+        low: NDArray[np.float64],
+        c: NDArray[np.float64],
+        v: NDArray[np.float64],
     ) -> VolumeIndicators:
         """Compute volume indicators: OBV, MFI, CMF, Volume Rate.
 
@@ -467,10 +477,10 @@ class TechnicalIndicatorPipeline:
 
     def _compute_cmf(
         self,
-        high: np.ndarray,
-        low: np.ndarray,
-        close: np.ndarray,
-        volume: np.ndarray,
+        high: NDArray[np.float64],
+        low: NDArray[np.float64],
+        close: NDArray[np.float64],
+        volume: NDArray[np.float64],
         period: int,
     ) -> float | None:
         """Chaikin Money Flow.
@@ -501,10 +511,10 @@ class TechnicalIndicatorPipeline:
 
     def _compute_vwap(
         self,
-        high: np.ndarray,
-        low: np.ndarray,
-        close: np.ndarray,
-        volume: np.ndarray,
+        high: NDArray[np.float64],
+        low: NDArray[np.float64],
+        close: NDArray[np.float64],
+        volume: NDArray[np.float64],
     ) -> float | None:
         """VWAP computation.
 
@@ -527,7 +537,7 @@ class TechnicalIndicatorPipeline:
 
         return float(vwap_series[-1])
 
-    def _compute_volume_rate(self, volume: np.ndarray, period: int) -> float | None:
+    def _compute_volume_rate(self, volume: NDArray[np.float64], period: int) -> float | None:
         """Volume Rate = current_volume / SMA(volume, period).
 
         Values > 1.0 = above average volume.

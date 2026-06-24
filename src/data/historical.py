@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -99,7 +99,7 @@ class AuditLogger:
         """
         self.log_file = log_file
         self._buffer: list[str] = []
-        self._run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
     @property
     def run_id(self) -> str:
@@ -126,7 +126,7 @@ class AuditLogger:
         """Internal logging method."""
         import json as json_module
 
-        timestamp = datetime.now().isoformat()
+        timestamp = datetime.now(UTC).isoformat()
         log_entry = f"[{timestamp}] [{level}] [{self._run_id}] {msg}"
 
         if kwargs:
