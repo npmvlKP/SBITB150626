@@ -110,7 +110,7 @@ Verification Gate: ALL core imports must succeed (talib, ta, scipy). flowrisk fa
 <@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
-INSTRUCTION 2 — Extend config/settings.py with Phase 3 Settings
+Phase.3-Instruction.2—Extend config/settings.py with Phase 3 Settings
 File: G:\OC\02June26\indian-trading-bot\config\settings.py
 
 Rule: ADD Phase 3 settings classes only. Do NOT modify existing Phase 0/1/2 settings.
@@ -207,7 +207,7 @@ All settings must: Use pydantic-settings with env_prefix, Field() with validatio
 <@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*><@#$&*>
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
-INSTRUCTION 3 — Implement src/analysis/technical.py
+Phase.3 = Instruction.3 <=> Implement src/analysis/technical.py
 File: G:\OC\02June26\indian-trading-bot\src\analysis\technical.py
 
 This is the largest file in Phase 3. It contains the entire technical indicator pipeline, all indicator methods, regime detection, and Pydantic output models.

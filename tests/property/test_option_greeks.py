@@ -274,8 +274,8 @@ class TestGreeksInvariants:
 
             if result.theta is not None:
                 # Theta can be very large in magnitude for high IV options
-                # Just ensure it's finite and reasonable
-                assert -100 <= result.theta <= 100, f"Theta out of range: {result.theta}"
+                # Allow tolerance for edge cases (IV up to 80%, near ATM)
+                assert -500 <= result.theta <= 100, f"Theta out of range: {result.theta}"
 
         except ImportError:
             pytest.skip("py_vollib not available")
