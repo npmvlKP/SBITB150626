@@ -101,7 +101,16 @@ class DepthAnalyzer:
             ltp: Last traded price (for spread computation in bps)
         """
         if not depth.bid_levels or not depth.ask_levels:
-            return DepthSignals()
+            return DepthSignals(
+                bid_ask_spread_bps=None,
+                depth_imbalance_ratio=None,
+                depth_imbalance_signal=None,
+                total_bid_quantity=None,
+                total_ask_quantity=None,
+                vpin_value=None,
+                vpin_cdf=None,
+                vpin_level=VPINLevel.NORMAL,
+            )
 
         best_bid = depth.bid_levels[0].price
         best_ask = depth.ask_levels[0].price
@@ -129,6 +138,9 @@ class DepthAnalyzer:
             depth_imbalance_signal=imbalance_signal,
             total_bid_quantity=total_bid_qty,
             total_ask_quantity=total_ask_qty,
+            vpin_value=None,
+            vpin_cdf=None,
+            vpin_level=VPINLevel.NORMAL,
         )
 
     def compute_vpin(self, bars_1min: np.ndarray | NDArray[np.float64]) -> DepthSignals:
@@ -151,7 +163,16 @@ class DepthAnalyzer:
         s = self._settings
 
         if not s.VPIN_ENABLED or len(bars_1min) < s.VPIN_MIN_1MIN_BARS:
-            return DepthSignals()
+            return DepthSignals(
+                bid_ask_spread_bps=None,
+                depth_imbalance_ratio=None,
+                depth_imbalance_signal=None,
+                total_bid_quantity=None,
+                total_ask_quantity=None,
+                vpin_value=None,
+                vpin_cdf=None,
+                vpin_level=VPINLevel.NORMAL,
+            )
 
         o = bars_1min[:, 0].astype(np.float64)
         c = bars_1min[:, 3].astype(np.float64)
@@ -161,7 +182,16 @@ class DepthAnalyzer:
         bucket_size = self._compute_bucket_size(s, v)
 
         if bucket_size <= 0:
-            return DepthSignals()
+            return DepthSignals(
+                bid_ask_spread_bps=None,
+                depth_imbalance_ratio=None,
+                depth_imbalance_signal=None,
+                total_bid_quantity=None,
+                total_ask_quantity=None,
+                vpin_value=None,
+                vpin_cdf=None,
+                vpin_level=VPINLevel.NORMAL,
+            )
 
         # Step 2: BVC volume classification
         buy_volumes, sell_volumes = self._bvc_classify(o, c, v)
@@ -173,9 +203,23 @@ class DepthAnalyzer:
         vpin, vpin_cdf, vpin_level = self._compute_vpin_rolling(buckets, bucket_size, s)
 
         if vpin is None:
-            return DepthSignals()
+            return DepthSignals(
+                bid_ask_spread_bps=None,
+                depth_imbalance_ratio=None,
+                depth_imbalance_signal=None,
+                total_bid_quantity=None,
+                total_ask_quantity=None,
+                vpin_value=None,
+                vpin_cdf=None,
+                vpin_level=VPINLevel.NORMAL,
+            )
 
         return DepthSignals(
+            bid_ask_spread_bps=None,
+            depth_imbalance_ratio=None,
+            depth_imbalance_signal=None,
+            total_bid_quantity=None,
+            total_ask_quantity=None,
             vpin_value=round(vpin, 4),
             vpin_cdf=round(vpin_cdf, 4) if vpin_cdf is not None else None,
             vpin_level=vpin_level,
