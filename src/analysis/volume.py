@@ -75,7 +75,11 @@ class VolumeProfileResult(BaseModel):
 
 
 class VolumeSignals(BaseModel):
-    profile: VolumeProfileResult = Field(default=VolumeProfileResult())
+    profile: VolumeProfileResult = Field(
+        default=VolumeProfileResult(
+            poc_price=None, vah=None, val=None, profile={}, total_volume=0.0, relative_position=None
+        )
+    )
     vsa_signals: list[VSASignal] = Field(default_factory=list)
     divergences: list[PriceVolumeDivergence] = Field(default_factory=list)
     anomalies: list[VolumeAnomaly] = Field(default_factory=list)
@@ -102,12 +106,16 @@ class VolumeProfileComputer:
     ) -> VolumeProfileResult:
         """Compute volume profile from OHLCV data."""
         if len(close) < 2:
-            return VolumeProfileResult()
+            return VolumeProfileResult(
+                poc_price=None, vah=None, val=None, profile={}, total_volume=0.0, relative_position=None
+            )
 
         price_min = float(np.min(low))
         price_max = float(np.max(high))
         if price_max == price_min:
-            return VolumeProfileResult()
+            return VolumeProfileResult(
+                poc_price=None, vah=None, val=None, profile={}, total_volume=0.0, relative_position=None
+            )
 
         num_bins = self._settings.NUM_PRICE_BINS
         bin_size = (price_max - price_min) / num_bins
@@ -137,7 +145,9 @@ class VolumeProfileComputer:
 
         total_volume = float(np.sum(bin_volumes))
         if total_volume == 0:
-            return VolumeProfileResult()
+            return VolumeProfileResult(
+                poc_price=None, vah=None, val=None, profile={}, total_volume=0.0, relative_position=None
+            )
 
         # POC: bin with highest volume
         poc_bin = int(np.argmax(bin_volumes))
@@ -169,13 +179,16 @@ class VolumeProfileComputer:
         val = float(bin_prices[val_idx] - bin_size / 2)
 
         # Relative position of current price to profile
+        # CRITICAL: POC check MUST come before VA boundary checks
+        # because a price can be AT the POC while also being at/below VAL.
+        # Dalton "Mind Over Markets": POC is the fairest price = highest acceptance.
         last_close = float(close[-1])
-        if last_close > vah:
+        if abs(last_close - poc_price) < bin_size:
+            rel_pos = "CURRENT_AT_POC"
+        elif last_close > vah:
             rel_pos = "CURRENT_ABOVE_VA"
         elif last_close < val:
             rel_pos = "CURRENT_BELOW_VA"
-        elif abs(last_close - poc_price) < bin_size:
-            rel_pos = "CURRENT_AT_POC"
         else:
             rel_pos = "CURRENT_IN_VA"
 
@@ -434,7 +447,7 @@ class PriceVolumeDivergenceDetector:
         if len(close) < self._settings.DIVERGENCE_LOOKBACK:
             return []
 
-        divergences = []
+        divergences: list[PriceVolumeDivergence] = []
 
         # Find swing highs and lows in price and volume
         lookback = self._settings.DIVERGENCE_LOOKBACK
@@ -451,8 +464,8 @@ class PriceVolumeDivergenceDetector:
             len(price_swings_high) >= self._settings.DIVERGENCE_MIN_SWINGS
             and len(vol_swings) >= self._settings.DIVERGENCE_MIN_SWINGS
         ):
-            price_trend = self._trend_direction(price_swings_high)
-            vol_trend = self._trend_direction(vol_swings)
+            price_trend = self._trend_direction(recent_high, price_swings_high)
+            vol_trend = self._trend_direction(recent_vol, vol_swings)
 
             if price_trend > 0 and vol_trend < 0:
                 strength = min(abs(price_trend), abs(vol_trend))
@@ -471,8 +484,8 @@ class PriceVolumeDivergenceDetector:
             len(price_swings_low) >= self._settings.DIVERGENCE_MIN_SWINGS
             and len(vol_swings) >= self._settings.DIVERGENCE_MIN_SWINGS
         ):
-            price_trend = self._trend_direction(price_swings_low)
-            vol_trend = self._trend_direction(vol_swings)
+            price_trend = self._trend_direction(recent_low, price_swings_low)
+            vol_trend = self._trend_direction(recent_vol, vol_swings)
 
             if price_trend < 0 and vol_trend < 0:
                 strength = min(abs(price_trend), abs(vol_trend))
@@ -491,29 +504,37 @@ class PriceVolumeDivergenceDetector:
     @staticmethod
     def _find_swing_points(data: NDArray[np.float64], window: int = 3) -> list[int]:
         """Find local maxima/minima indices (swing points)."""
-        swings = []
+        swings: list[int] = []
         for i in range(window, len(data) - window):
-            if all(data[i] >= data[i - j] for j in range(1, window + 1)) and all(
+            is_max = all(data[i] >= data[i - j] for j in range(1, window + 1)) and all(
                 data[i] >= data[i + j] for j in range(1, window + 1)
-            ):
-                swings.append(i)
-            elif all(data[i] <= data[i - j] for j in range(1, window + 1)) and all(
+            )
+            is_min = all(data[i] <= data[i - j] for j in range(1, window + 1)) and all(
                 data[i] <= data[i + j] for j in range(1, window + 1)
-            ):
+            )
+            if is_max or is_min:
                 swings.append(i)
         return swings
 
     @staticmethod
-    def _trend_direction(swing_indices: list[int]) -> float:
-        """Determine trend direction from swing points. Returns +1 (up), -1 (down), 0 (flat)."""
+    def _trend_direction(data: NDArray[np.float64], swing_indices: list[int]) -> float:
+        """Determine trend direction from swing point DATA VALUES (not indices).
+
+        Compares actual price/volume values at the last two swing points.
+        Returns +1 (up), -1 (down), 0 (flat).
+        Normalized by data range so strength is comparable across instruments.
+        """
         if len(swing_indices) < 2:
             return 0.0
-        recent = swing_indices[-2:]
-        diff = recent[1] - recent[0]
-        if diff > 0:
-            return 1.0
-        elif diff < 0:
-            return -1.0
+        val_prev = float(data[swing_indices[-2]])
+        val_curr = float(data[swing_indices[-1]])
+        if val_prev == 0:
+            return 0.0
+        pct_change = (val_curr - val_prev) / abs(val_prev)
+        if pct_change > 0.01:
+            return min(1.0, abs(pct_change))
+        elif pct_change < -0.01:
+            return -min(1.0, abs(pct_change))
         return 0.0
 
 
@@ -546,13 +567,13 @@ class VolumeAnomalyDetector:
 
             z_score = (volume[i] - vol_mean) / vol_std
             vol_ratio = volume[i] / vol_mean
-            is_spike = z_score > self._settings.ANOMALY_STDDEV_THRESHOLD
+            is_spike = bool(z_score > self._settings.ANOMALY_STDDEV_THRESHOLD)
 
             # Price rejection: long wick relative to body
             spread = high[i] - low[i]
             body = abs(close[i] - open_[i])
             wick_ratio = (spread - body) / spread if spread > 0 else 0.0
-            price_rejection = wick_ratio > self._settings.VSA_WICK_RATIO_THRESHOLD and is_spike
+            price_rejection = bool(wick_ratio > self._settings.VSA_WICK_RATIO_THRESHOLD and is_spike)
 
             if is_spike:
                 anomalies.append(

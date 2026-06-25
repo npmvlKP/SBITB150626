@@ -16,8 +16,21 @@ from src.analysis.technical import (
     VolatilityIndicators,
     VolumeIndicators,
 )
+from src.analysis.volume import (
+    PriceVolumeDivergence,
+    PriceVolumeDivergenceDetector,
+    VolumeAnomaly,
+    VolumeAnomalyDetector,
+    VolumeProfileComputer,
+    VolumeProfileResult,
+    VolumeSignals,
+    VSASignal,
+    VSASignalDetector,
+    VSASignalType,
+)
 
 __all__ = [
+    # Technical indicators
     "MarketRegime",
     "MomentumIndicators",
     "TechnicalIndicatorPipeline",
@@ -26,4 +39,15 @@ __all__ = [
     "VIXLevel",
     "VolatilityIndicators",
     "VolumeIndicators",
+    # Volume analysis
+    "PriceVolumeDivergence",
+    "PriceVolumeDivergenceDetector",
+    "VolumeAnomaly",
+    "VolumeAnomalyDetector",
+    "VolumeProfileComputer",
+    "VolumeProfileResult",
+    "VolumeSignals",
+    "VSASignal",
+    "VSASignalDetector",
+    "VSASignalType",
 ]
