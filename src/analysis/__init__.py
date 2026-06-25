@@ -6,6 +6,13 @@ References:
 - Wilder (1978): RSI, ATR smoothing (EWMA alpha=1/period)
 """
 
+from src.analysis.depth import (
+    DepthAnalyzer,
+    DepthData,
+    DepthLevel,
+    DepthSignals,
+    VPINLevel,
+)
 from src.analysis.technical import (
     MarketRegime,
     MomentumIndicators,
@@ -50,4 +57,10 @@ __all__ = [
     "VSASignal",
     "VSASignalDetector",
     "VSASignalType",
+    # Depth analysis
+    "DepthAnalyzer",
+    "DepthData",
+    "DepthLevel",
+    "DepthSignals",
+    "VPINLevel",
 ]
