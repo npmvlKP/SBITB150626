@@ -113,7 +113,7 @@ class RiskFreeRateProvider:
 
         self._settings = settings
         self._db_url = db_url
-        self._redis: redis_lib.Redis | None = None
+        self._redis: redis_lib.Redis[Any] | None = None
         self._redis_lib = redis_lib
 
         # Lazy Redis connection — do NOT ping in __init__ (blocks event loop / tests).
@@ -128,7 +128,7 @@ class RiskFreeRateProvider:
         )
         self._redis_available: bool | None = None  # None = not yet checked
 
-    def _get_redis(self) -> redis.Redis | None:
+    def _get_redis(self) -> redis.Redis[Any] | None:
         """Get Redis connection if available (cached after first check).
 
         Uses the socket_connect_timeout/socket_timeout set in __init__ so
@@ -599,13 +599,15 @@ class OptionMetricsComputer:
         """
         try:
             # Compute implied volatility
-            iv = self._implied_volatility(
-                option_ltp,
-                spot,
-                strike,
-                t,
-                risk_free_rate,
-                flag,
+            iv = float(
+                self._implied_volatility(
+                    option_ltp,
+                    spot,
+                    strike,
+                    t,
+                    risk_free_rate,
+                    flag,
+                )
             )
 
             # Clamp IV to bounds
@@ -777,7 +779,7 @@ class OptionMetricsComputer:
         """Get risk-free rate for the given date."""
         return await self._rfr_provider.get_rate(as_of_date)
 
-    async def _get_database_connection(self):
+    async def _get_database_connection(self) -> Any:
         """Get database connection."""
         import psycopg
 
@@ -787,10 +789,10 @@ class OptionMetricsComputer:
 
     async def _fetch_option_chain(
         self,
-        conn,
+        conn: Any,
         symbol: str,
         as_of_date: date,
-    ) -> list:
+    ) -> list[tuple[Any, ...]]:
         """Fetch option chain data for the given symbol and date."""
         async with conn.cursor() as cur:
             await cur.execute(
@@ -801,11 +803,12 @@ class OptionMetricsComputer:
                 """,
                 (symbol, as_of_date),
             )
-            return await cur.fetchall()
+            result: list[tuple[Any, ...]] = await cur.fetchall()
+            return result
 
     async def _fetch_spot_price(
         self,
-        conn,
+        conn: Any,
         symbol: str,
         as_of_date: date,
     ) -> float | None:
@@ -825,8 +828,8 @@ class OptionMetricsComputer:
 
     async def _process_option_batches(
         self,
-        conn,
-        options_rows: list,
+        conn: Any,
+        options_rows: list[Any],
         spot: float,
         as_of_date: date,
         symbol: str,
@@ -837,7 +840,7 @@ class OptionMetricsComputer:
         successful_count = 0
         for i in range(0, len(options_rows), batch_size):
             batch = options_rows[i : i + batch_size]
-            batch_metrics, batch_events = await self._process_batch(batch, spot, as_of_date, symbol, rfr)
+            batch_metrics, batch_events = await self._process_batch(conn, batch, spot, as_of_date, symbol, rfr)
 
             # Insert metrics to database
             if batch_metrics:
@@ -854,12 +857,13 @@ class OptionMetricsComputer:
 
     async def _process_batch(
         self,
-        batch: list,
+        conn: Any,
+        batch: list[Any],
         spot: float,
         as_of_date: date,
         symbol: str,
         rfr: float,
-    ) -> tuple[list, list]:
+    ) -> tuple[list[Any], list[MarketEvent]]:
         """Process a single batch of options and return metrics and events."""
         batch_metrics: list[tuple[Any, ...]] = []
         batch_events: list[MarketEvent] = []
@@ -937,7 +941,7 @@ class OptionMetricsComputer:
 
         return batch_metrics, batch_events
 
-    async def _insert_greeks_batch(self, conn, batch_metrics: list[tuple]) -> None:
+    async def _insert_greeks_batch(self, conn: Any, batch_metrics: list[tuple[Any, ...]]) -> None:
         """Insert batch of Greeks data into database."""
         async with conn.cursor() as cur:
             await cur.executemany(
@@ -951,7 +955,7 @@ class OptionMetricsComputer:
                 batch_metrics,
             )
 
-    async def _insert_events_batch(self, conn, batch_events: list[MarketEvent]) -> None:
+    async def _insert_events_batch(self, conn: Any, batch_events: list[MarketEvent]) -> None:
         """Insert batch of events into event log."""
         async with conn.cursor() as cur:
             await cur.executemany(

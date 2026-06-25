@@ -244,10 +244,19 @@ module = [
     "kiteconnect.*",
     "py_vollib.*",
     "QuantLib.*",
+    "talib",
     "talib.*",
     "flowrisk.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "redis",
+    "redis.*",
+]
+ignore_missing_imports = true
+
 
 # redis.Redis is generic (CommandsProtocol TypeVar) in redis-types stubs;
 # the TypeVar is internal implementation detail, not user-facing.

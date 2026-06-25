@@ -37,11 +37,6 @@ from config.settings import TechnicalIndicatorSettings
 logger = structlog.get_logger(__name__)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 3.1 Pydantic Output Models
-# ══════════════════════════════════════════════════════════════════════════════
-
-
 class MarketRegime(StrEnum):
     """Market regime classification — Chan Ch.1-4 methodology."""
 
@@ -114,18 +109,71 @@ class VolumeIndicators(BaseModel):
     volume_rate_percentile: float | None = Field(None, description="Volume rate percentile rank [0, 1]")
 
 
+def _default_momentum_indicators() -> MomentumIndicators:
+    return MomentumIndicators(
+        rsi_14=None,
+        rsi_percentile=None,
+        macd_line=None,
+        macd_signal=None,
+        macd_histogram=None,
+        adx_14=None,
+        adx_percentile=None,
+        cci_20=None,
+    )
+
+
+def _default_volatility_indicators() -> VolatilityIndicators:
+    return VolatilityIndicators(
+        bbands_upper=None,
+        bbands_middle=None,
+        bbands_lower=None,
+        bbands_width=None,
+        bbands_pctb=None,
+        atr_14=None,
+        atr_percentile=None,
+        vix_level=VIXLevel.UNKNOWN,
+        vix_value=None,
+    )
+
+
+def _default_trend_indicators() -> TrendIndicators:
+    return TrendIndicators(
+        supertrend_value=None,
+        supertrend_direction=None,
+        ema_9=None,
+        ema_21=None,
+        ema_50=None,
+        ema_200=None,
+        ema_signal_fast=None,
+        ema_signal_macro=None,
+        vwap=None,
+    )
+
+
+def _default_volume_indicators() -> VolumeIndicators:
+    return VolumeIndicators(
+        obv=None,
+        obv_ema_21=None,
+        mfi_14=None,
+        cmf_20=None,
+        volume_rate=None,
+        volume_rate_percentile=None,
+    )
+
+
 class TechnicalIndicators(BaseModel):
     """Complete technical indicator output — all indicator groups combined."""
 
-    momentum: MomentumIndicators = Field(default_factory=MomentumIndicators)
-    volatility: VolatilityIndicators = Field(default_factory=VolatilityIndicators)
-    trend: TrendIndicators = Field(default_factory=TrendIndicators)
-    volume: VolumeIndicators = Field(default_factory=VolumeIndicators)
+    momentum: MomentumIndicators = Field(default_factory=_default_momentum_indicators)
+    volatility: VolatilityIndicators = Field(default_factory=_default_volatility_indicators)
+    trend: TrendIndicators = Field(default_factory=_default_trend_indicators)
+    volume: VolumeIndicators = Field(default_factory=_default_volume_indicators)
     regime: MarketRegime = Field(MarketRegime.UNKNOWN)
     hurst_exponent: float | None = Field(None, description="Hurst exponent via R/S analysis")
     timestamp: Datetime | None = Field(None, description="Timestamp of the last bar in the input data")
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
 # 3.2 TechnicalIndicatorPipeline Class
 # ══════════════════════════════════════════════════════════════════════════════
@@ -173,10 +221,48 @@ class TechnicalIndicatorPipeline:
                 bars=len(ohlcv) if ohlcv is not None else 0,
             )
             return TechnicalIndicators(
-                momentum=MomentumIndicators(),
-                volatility=VolatilityIndicators(),
-                trend=TrendIndicators(),
-                volume=VolumeIndicators(),
+                momentum=MomentumIndicators(
+                    rsi_14=None,
+                    rsi_percentile=None,
+                    macd_line=None,
+                    macd_signal=None,
+                    macd_histogram=None,
+                    adx_14=None,
+                    adx_percentile=None,
+                    cci_20=None,
+                ),
+                volatility=VolatilityIndicators(
+                    bbands_upper=None,
+                    bbands_middle=None,
+                    bbands_lower=None,
+                    bbands_width=None,
+                    bbands_pctb=None,
+                    atr_14=None,
+                    atr_percentile=None,
+                    vix_level=VIXLevel.UNKNOWN,
+                    vix_value=None,
+                ),
+                trend=TrendIndicators(
+                    supertrend_value=None,
+                    supertrend_direction=None,
+                    ema_9=None,
+                    ema_21=None,
+                    ema_50=None,
+                    ema_200=None,
+                    ema_signal_fast=None,
+                    ema_signal_macro=None,
+                    vwap=None,
+                ),
+                volume=VolumeIndicators(
+                    obv=None,
+                    obv_ema_21=None,
+                    mfi_14=None,
+                    cmf_20=None,
+                    volume_rate=None,
+                    volume_rate_percentile=None,
+                ),
+                regime=MarketRegime.UNKNOWN,
+                hurst_exponent=None,
                 timestamp=Datetime.now(UTC),
             )
 
@@ -269,7 +355,7 @@ class TechnicalIndicatorPipeline:
             timeperiod=s.BBANDS_PERIOD,
             nbdevup=s.BBANDS_STDDEV,
             nbdevdn=s.BBANDS_STDDEV,
-            matype=talib.MA_Type.SMA,
+            matype=talib.MA_Type.SMA,  # type: ignore
         )
         last_close = c[-1]
         bb_u = self._safe_last(bb_upper)
@@ -413,9 +499,9 @@ class TechnicalIndicatorPipeline:
 
     def _compute_supertrend(
         self,
-        close: np.ndarray,
-        high: np.ndarray,
-        low: np.ndarray,
+        close: NDArray[np.float64],
+        high: NDArray[np.float64],
+        low: NDArray[np.float64],
         period: int,
         multiplier: float,
     ) -> tuple[float | None, int | None]:
@@ -554,7 +640,7 @@ class TechnicalIndicatorPipeline:
 
     # ── 3.8 Market Regime Detection ─────────────────────────────────────────
 
-    def _compute_regime(self, close: np.ndarray, adx_value: float | None) -> tuple[MarketRegime, float | None]:
+    def _compute_regime(self, close: NDArray[np.float64], adx_value: float | None) -> tuple[MarketRegime, float | None]:
         """Determine market regime using Chan Ch.1-4 methodology.
 
         Regime switching logic (Chan):
@@ -583,7 +669,7 @@ class TechnicalIndicatorPipeline:
 
         return MarketRegime.RANDOM_WALK, hurst
 
-    def _compute_hurst(self, close: np.ndarray) -> float | None:
+    def _compute_hurst(self, close: NDArray[np.float64]) -> float | None:
         """Hurst exponent via R/S (Rescaled Range) analysis.
 
         Uses scipy for linear regression on log-log plot of R/S vs
@@ -637,7 +723,7 @@ class TechnicalIndicatorPipeline:
     # ── 3.9 Helper Methods ─────────────────────────────────────────────────
 
     @staticmethod
-    def _safe_last(arr: np.ndarray | None) -> float | None:
+    def _safe_last(arr: NDArray[np.float64] | None) -> float | None:
         """Safely extract the last non-NaN value from a TA-Lib output array."""
         if arr is None or len(arr) == 0:
             return None
@@ -647,7 +733,7 @@ class TechnicalIndicatorPipeline:
         return float(val)
 
     @staticmethod
-    def _safe_last_int(arr: np.ndarray | None) -> int | None:
+    def _safe_last_int(arr: NDArray[np.float64] | None) -> int | None:
         """Safely extract the last value as int from an array."""
         if arr is None or len(arr) == 0:
             return None
@@ -659,7 +745,7 @@ class TechnicalIndicatorPipeline:
     def _percentile_rank(
         self,
         current_value: float | None,
-        close: np.ndarray,
+        close: NDArray[np.float64],
         indicator_period: int,
     ) -> float | None:
         """Kaufman Ch.7 percentile ranking over 252-day lookback.

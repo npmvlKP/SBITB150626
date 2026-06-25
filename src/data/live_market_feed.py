@@ -180,7 +180,7 @@ class LiveMarketFeed:
         kite_api: KiteBrokerProtocol,
         settings: WebSocketSettings,
         event_writer: EventLogWriter,
-        redis_client: redis.Redis,
+        redis_client: redis.Redis[bytes],
         audit_logger: AuditLogger,
     ) -> None:
         """Initialize LiveMarketFeed."""

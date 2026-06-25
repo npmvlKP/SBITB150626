@@ -1,0 +1,153 @@
+
+import numpy as np
+import pytest
+
+from config.settings import VolumeProfileSettings
+from src.analysis.volume import (
+    VolumeProfileComputer,
+)
+
+
+# Fixture for default settings
+@pytest.fixture
+def default_volume_profile_settings():
+    return VolumeProfileSettings(
+        NUM_PRICE_BINS=10,
+        VALUE_AREA_PCT=0.682,
+        VSA_CONTEXT_WINDOW=5,
+        VSA_SPREAD_COMPARISON_PERIOD=20,
+        VSA_VOLUME_SPIKE_MULTIPLIER=1.5,
+        VSA_WICK_RATIO_THRESHOLD=0.7,
+        DIVERGENCE_LOOKBACK=20,
+        DIVERGENCE_MIN_SWINGS=2,
+        ANOMALY_LOOKBACK=20,
+        ANOMALY_STDDEV_THRESHOLD=2.0,
+    )
+
+
+# Fixture for OHLCV data
+@pytest.fixture
+def sample_ohlcv_data():
+    # Example data: Open, High, Low, Close, Volume
+    return np.array([
+        [100, 105, 98, 102, 1000],
+        [102, 108, 101, 106, 1200],
+        [106, 110, 105, 109, 1500],
+        [109, 107, 100, 103, 800],
+        [103, 105, 99, 101, 900],
+        [101, 103, 97, 100, 700],
+        [100, 104, 98, 102, 1100],
+        [102, 106, 100, 104, 1300],
+        [104, 108, 103, 107, 1600],
+        [107, 112, 106, 111, 2000],
+    ], dtype=np.float64)
+
+
+# Test cases for VolumeProfileComputer
+class TestVolumeProfileComputer:
+    def test_compute_insufficient_data(self, default_volume_profile_settings):
+        computer = VolumeProfileComputer(default_volume_profile_settings)
+        ohlcv = np.array([[100, 101, 99, 100, 1000]], dtype=np.float64)
+        result = computer.compute(ohlcv[:, 1], ohlcv[:, 2], ohlcv[:, 3], ohlcv[:, 4])
+        assert result.poc_price is None
+        assert result.total_volume == 0.0
+
+    def test_compute_single_price_bin(self, default_volume_profile_settings):
+        settings = VolumeProfileSettings(
+            NUM_PRICE_BINS=1,
+            VALUE_AREA_PCT=0.682,
+            VSA_CONTEXT_WINDOW=5,
+            VSA_SPREAD_COMPARISON_PERIOD=20,
+            VSA_VOLUME_SPIKE_MULTIPLIER=1.5,
+            VSA_WICK_RATIO_THRESHOLD=0.7,
+            DIVERGENCE_LOOKBACK=20,
+            DIVERGENCE_MIN_SWINGS=2,
+            ANOMALY_LOOKBACK=20,
+            ANOMALY_STDDEV_THRESHOLD=2.0,
+        )
+        computer = VolumeProfileComputer(settings)
+        high = np.array([100], dtype=np.float64)
+        low = np.array([100], dtype=np.float64)
+        close = np.array([100], dtype=np.float64)
+        volume = np.array([1000], dtype=np.float64)
+        result = computer.compute(high, low, close, volume)
+        assert result.poc_price is None
+        assert result.total_volume == 0.0
+
+    def test_compute_no_volume(self, default_volume_profile_settings):
+        computer = VolumeProfileComputer(default_volume_profile_settings)
+        ohlcv = np.array([
+            [100, 105, 98, 102, 0],
+            [102, 108, 101, 106, 0],
+        ], dtype=np.float64)
+        result = computer.compute(ohlcv[:, 1], ohlcv[:, 2], ohlcv[:, 3], ohlcv[:, 4])
+        assert result.poc_price is None
+        assert result.total_volume == 0.0
+
+    def test_compute_valid_profile(self, default_volume_profile_settings, sample_ohlcv_data):
+        computer = VolumeProfileComputer(default_volume_profile_settings)
+        high = sample_ohlcv_data[:, 1]
+        low = sample_ohlcv_data[:, 2]
+        close = sample_ohlcv_data[:, 3]
+        volume = sample_ohlcv_data[:, 4]
+
+        result = computer.compute(high, low, close, volume)
+
+        assert result.poc_price is not None
+        assert result.vah is not None
+        assert result.val is not None
+        assert isinstance(result.profile, dict)
+        assert result.total_volume > 0.0
+        assert result.relative_position is not None
+
+        # Basic sanity checks (values will depend on specific data and bins)
+        assert result.poc_price >= result.val
+        assert result.poc_price <= result.vah
+        assert result.vah >= result.val
+        assert len(result.profile) == default_volume_profile_settings.NUM_PRICE_BINS
+
+    def test_relative_position_above_va(self, default_volume_profile_settings):
+        computer = VolumeProfileComputer(default_volume_profile_settings)
+        high = np.array([100, 105, 110, 115, 120], dtype=np.float64)
+        low = np.array([95, 100, 105, 110, 115], dtype=np.float64)
+        close = np.array([98, 103, 108, 118, 120], dtype=np.float64)
+        volume = np.array([1000, 1000, 1000, 1000, 1000], dtype=np.float64)
+
+        result = computer.compute(high, low, close, volume)
+        # Assuming that with this upward trend, the last close will be above VA
+        # This might need adjustment based on exact binning logic
+        assert result.relative_position == "CURRENT_ABOVE_VA"
+
+    def test_relative_position_below_va(self, default_volume_profile_settings):
+        computer = VolumeProfileComputer(default_volume_profile_settings)
+        high = np.array([120, 115, 110, 105, 100], dtype=np.float64)
+        low = np.array([115, 110, 105, 100, 95], dtype=np.float64)
+        close = np.array([118, 113, 108, 98, 95], dtype=np.float64)
+        volume = np.array([1000, 1000, 1000, 1000, 1000], dtype=np.float64)
+
+        result = computer.compute(high, low, close, volume)
+        # Assuming that with this downward trend, the last close will be below VA
+        # This might need adjustment based on exact binning logic
+        assert result.relative_position == "CURRENT_BELOW_VA"
+
+    def test_relative_position_in_va(self, default_volume_profile_settings):
+        computer = VolumeProfileComputer(default_volume_profile_settings)
+        high = np.array([100, 105, 110, 105, 100], dtype=np.float64)
+        low = np.array([95, 100, 105, 100, 95], dtype=np.float64)
+        close = np.array([98, 103, 108, 103, 98], dtype=np.float64)
+        volume = np.array([1000, 1000, 1000, 1000, 1000], dtype=np.float64)
+
+        result = computer.compute(high, low, close, volume)
+        # Assuming the last close is within the calculated value area
+        assert result.relative_position == "CURRENT_IN_VA"
+
+    def test_relative_position_at_poc(self, default_volume_profile_settings):
+        computer = VolumeProfileComputer(default_volume_profile_settings)
+        high = np.array([100, 105, 110, 105, 100], dtype=np.float64)
+        low = np.array([95, 100, 105, 100, 95], dtype=np.float64)
+        close = np.array([98, 103, 108, 103, 98], dtype=np.float64)
+        volume = np.array([1000, 5000, 1000, 1000, 1000], dtype=np.float64) # Spiking volume at 103-108 range to make it POC
+
+        result = computer.compute(high, low, close, volume)
+        # Assuming the last close is very close to POC
+        assert result.relative_position == "CURRENT_AT_POC"
