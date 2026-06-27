@@ -6,7 +6,7 @@ Greeks calculations meet latency requirements for live trading.
 
 import asyncio
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast  # noqa: UP035 – cast needed for mypy list[Literal] narrowing
 
 import pytest
 
@@ -35,7 +35,7 @@ def test_benchmark_single_option_greeks(
     expiry = date(2026, 6, 26)
     as_of = date(2026, 6, 20)
     option_ltp = 492.35
-    option_type = "CE"
+    option_type: Literal["CE", "PE"] = "CE"
     rfr = 0.065
 
     def compute_greeks() -> OptionMetrics:
@@ -81,7 +81,7 @@ def test_benchmark_batch_100_greeks(
         results = []
         for i in range(100):
             strike = base_strike + (i * 100)
-            option_type: str = "CE" if i % 2 == 0 else "PE"
+            option_type: Literal["CE", "PE"] = "CE" if i % 2 == 0 else "PE"
             # Use synthetic LTP based on strike to ensure valid computation
             option_ltp = 100.0 + (i % 50) * 5
 
@@ -136,7 +136,7 @@ def test_benchmark_rfr_lookup(
         return await rfr_provider.get_rate(test_date)
 
     def run() -> float:
-        return asyncio.run(lookup_rfr())
+        return float(asyncio.run(lookup_rfr()))
 
     result = benchmark.pedantic(run, rounds=10, iterations=5)
 
@@ -172,7 +172,7 @@ def test_benchmark_full_option_chain(
         for i in range(-25, 26):
             strike = atm_strike + (i * 100)
 
-            for option_type in ["CE", "PE"]:
+            for option_type in cast(list[Literal["CE", "PE"]], ["CE", "PE"]):
                 # Vary LTP by moneyness to ensure valid computation
                 moneyness = (strike - spot) / spot
                 itm_offset = abs(moneyness)

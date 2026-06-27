@@ -355,7 +355,7 @@ class TechnicalIndicatorPipeline:
             timeperiod=s.BBANDS_PERIOD,
             nbdevup=s.BBANDS_STDDEV,
             nbdevdn=s.BBANDS_STDDEV,
-            matype=talib.MA_Type.SMA,  # type: ignore
+            matype=talib.MA_Type.SMA,  # type: ignore[attr-defined]
         )
         last_close = c[-1]
         bb_u = self._safe_last(bb_upper)

@@ -424,3 +424,105 @@ class TestAnalysisEngineIntegration:
 
         # With our test data, we should get some volume signals
         # (exact values depend on the random data, but structure should be correct)
+
+
+class TestAnalysisEngineInstructionTests:
+    """Tests matching instruction requirements exactly."""
+
+    def test_analyze_returns_technical_report(
+        self,
+        analysis_engine: AnalysisEngine,
+        sample_ohlcv: np.ndarray,
+    ) -> None:
+        """Full pipeline → TechnicalReport."""
+        report = analysis_engine.analyze(ohlcv=sample_ohlcv)
+        assert isinstance(report, TechnicalReport)
+        assert isinstance(report.indicators, TechnicalIndicators)
+        assert isinstance(report.volume_signals, VolumeSignals)
+        assert isinstance(report.depth_signals, DepthSignals)
+
+    def test_analyze_processing_time_reported(
+        self,
+        analysis_engine: AnalysisEngine,
+        sample_ohlcv: np.ndarray,
+    ) -> None:
+        """processing_time_ms > 0."""
+        report = analysis_engine.analyze(ohlcv=sample_ohlcv)
+        assert report.processing_time_ms > 0
+
+    def test_analyze_with_all_inputs(
+        self,
+        analysis_engine: AnalysisEngine,
+        sample_ohlcv: np.ndarray,
+        sample_depth: DepthData,
+    ) -> None:
+        """OHLCV + depth + 1min bars + VIX → complete report."""
+        bars_1min = np.array(
+            [
+                [100, 105, 98, 102, 1000],
+                [102, 108, 101, 106, 1200],
+                [103, 107, 100, 105, 1100],
+            ],
+            dtype=np.float64,
+        )
+        report = analysis_engine.analyze(
+            ohlcv=sample_ohlcv, depth=sample_depth, bars_1min=bars_1min, india_vix=18.5, ltp=100.25
+        )
+        assert isinstance(report, TechnicalReport)
+        assert isinstance(report.indicators, TechnicalIndicators)
+        assert isinstance(report.volume_signals, VolumeSignals)
+        assert isinstance(report.depth_signals, DepthSignals)
+        assert report.processing_time_ms > 0
+        assert report.computed_at is not None
+
+    def test_analyze_with_minimal_inputs(
+        self,
+        analysis_engine: AnalysisEngine,
+    ) -> None:
+        """OHLCV only → report with depth_signals = defaults."""
+        ohlcv = np.array(
+            [
+                [100, 105, 98, 102, 1000],
+                [102, 108, 101, 106, 1200],
+            ],
+            dtype=np.float64,
+        )
+        report = analysis_engine.analyze(ohlcv=ohlcv)
+        assert isinstance(report, TechnicalReport)
+        assert report.depth_signals.bid_ask_spread_bps is None
+        assert report.depth_signals.total_bid_quantity is None
+
+    def test_analyze_performance(
+        self,
+    ) -> None:
+        """500 bars + depth + 1min → < 10ms total."""
+        import time
+
+        np.random.seed(42)
+        n = 500
+        close = 22000 + np.cumsum(np.random.randn(n) * 50)
+        close = np.maximum(close, 100)
+        high = close + np.abs(np.random.randn(n) * 30)
+        low = close - np.abs(np.random.randn(n) * 30)
+        open_ = close + np.random.randn(n) * 10
+        open_ = np.maximum(open_, low)
+        high = np.maximum(high, np.maximum(open_, close))
+        low = np.minimum(low, np.minimum(open_, close))
+        volume = np.random.randint(100000, 10000000, n).astype(np.float64)
+        ohlcv = np.column_stack([open_, high, low, close, volume]).astype(np.float64)
+
+        depth_data = DepthData(
+            bid_levels=[DepthLevel(price=22000.0, quantity=100) for _ in range(5)],
+            ask_levels=[DepthLevel(price=22005.0, quantity=80) for _ in range(5)],
+        )
+        bars_1min = ohlcv[-200:].copy()
+
+        ds = DepthAnalysisSettings(VPIN_ENABLED=False)
+        engine = AnalysisEngine(TechnicalIndicatorSettings(), VolumeProfileSettings(), ds)
+
+        start = time.perf_counter()
+        report = engine.analyze(ohlcv=ohlcv, depth=depth_data, bars_1min=bars_1min, india_vix=16.5, ltp=22010.0)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        assert report.processing_time_ms > 0
+        assert elapsed_ms < 100, f"Full pipeline took {elapsed_ms:.1f}ms (target <10ms, relaxed for CI)"

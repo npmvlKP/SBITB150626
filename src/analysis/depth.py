@@ -143,7 +143,7 @@ class DepthAnalyzer:
             vpin_level=VPINLevel.NORMAL,
         )
 
-    def compute_vpin(self, bars_1min: np.ndarray | NDArray[np.float64]) -> DepthSignals:
+    def compute_vpin(self, bars_1min: NDArray[np.float64]) -> DepthSignals:
         """Compute VPIN from 1-minute OHLCV bars.
 
         Args:

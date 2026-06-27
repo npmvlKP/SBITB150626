@@ -57,9 +57,22 @@ class TechnicalReport(BaseModel):
     This is the single deliverable: analyze(ohlcv, depth) → TechnicalReport
     """
 
-    indicators: TechnicalIndicators = Field(default_factory=TechnicalIndicators)
-    volume_signals: VolumeSignals = Field(default_factory=VolumeSignals)
-    depth_signals: DepthSignals = Field(default_factory=DepthSignals)
+    indicators: TechnicalIndicators = TechnicalIndicators(
+        regime=MarketRegime.UNKNOWN,
+        hurst_exponent=None,
+        timestamp=None,
+    )
+    volume_signals: VolumeSignals = VolumeSignals()
+    depth_signals: DepthSignals = DepthSignals(
+        bid_ask_spread_bps=None,
+        depth_imbalance_ratio=None,
+        depth_imbalance_signal=None,
+        total_bid_quantity=None,
+        total_ask_quantity=None,
+        vpin_value=None,
+        vpin_cdf=None,
+        vpin_level=VPINLevel.NORMAL,
+    )
     computed_at: datetime = Field(default_factory=_now_ist, description="UTC timestamp (IST = UTC+5:30)")
     processing_time_ms: float = Field(0.0, description="Total pipeline processing time in ms")
 
@@ -112,7 +125,14 @@ class AnalysisEngine:
         start_time = time.perf_counter()
 
         # 1. Technical indicators
-        indicators = self._ta_pipeline.compute(ohlcv, india_vix=india_vix)
+        if ohlcv is None:
+            indicators = TechnicalIndicators(
+                regime=MarketRegime.UNKNOWN,
+                hurst_exponent=None,
+                timestamp=None,
+            )
+        else:
+            indicators = self._ta_pipeline.compute(ohlcv, india_vix=india_vix)
 
         # 2. Volume analysis
         volume_signals = self._compute_volume(ohlcv)
@@ -160,7 +180,16 @@ class AnalysisEngine:
     ) -> DepthSignals:
         """Compute depth analysis and optional VPIN."""
         if depth is None:
-            return DepthSignals()
+            return DepthSignals(
+                bid_ask_spread_bps=None,
+                depth_imbalance_ratio=None,
+                depth_imbalance_signal=None,
+                total_bid_quantity=None,
+                total_ask_quantity=None,
+                vpin_value=None,
+                vpin_cdf=None,
+                vpin_level=VPINLevel.NORMAL,
+            )
 
         depth_signals = self._depth_analyzer.analyze_depth(depth, ltp=ltp)
 

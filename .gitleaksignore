@@ -1,11 +1,15 @@
 # Gitleaks ignore file - exclude example/template files with placeholder secrets
-# Format: commit:file:rule:line (fingerprint format)
+# Format for --no-git mode: file:rule:line (fingerprint format without commit hash)
 
-# config/secrets.env.example - placeholder values for documentation
-45641aa14ff54c19069a023f5036c3e33b28d6df:config/secrets.env.example:generic-api-key:4
-45641aa14ff54c19069a023f5036c3e33b28d6df:config/secrets.env.example:generic-api-key:5
-45641aa14ff54c19069a023f5036c3e33b28d6df:config/secrets.env.example:generic-api-key:7
+# src/sbitb150626/config/secrets.env.example - placeholder values for documentation
+src/sbitb150626/config/secrets.env.example:generic-api-key:4
+src/sbitb150626/config/secrets.env.example:generic-api-key:5
+src/sbitb150626/config/secrets.env.example:generic-api-key:7
 
 # SBITB-150626-Plan - documentation references to placeholder API names
-1afbf5c97bc12f2e018a0222c83aefc5d6e45ac6:SBITB-150626-Plan/Ph16-Multi-Broker Redundancy.txt:generic-api-key:631
-6e36b5bab2580da928844723e38b8bd1593a7499:SBITB-150626-Plan/Ph16-Multi-Broker Redundancy.txt:generic-api-key:631
+src/sbitb150626/SBITB-150626-Plan/Ph16-Multi-Broker Redundancy.txt:generic-api-key:631
+
+# Also check config/ at root level
+config/secrets.env.example:generic-api-key:4
+config/secrets.env.example:generic-api-key:5
+config/secrets.env.example:generic-api-key:7

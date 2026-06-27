@@ -242,32 +242,12 @@ warn_no_return = true
 follow_imports = "silent"
 
 # mypy overrides for third-party libraries
-[[tool.mypy.overrides]]
-module = [
-    "kiteconnect.*",
-    "py_vollib.*",
-    "QuantLib.*",
-    "talib",
-    "talib.*",
-    "flowrisk.*",
-    "prometheus_client",
-    "prometheus_client.*",
-]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = [
-    "redis",
-    "redis.*",
-]
-ignore_missing_imports = true
-
-
 # redis.Redis is generic (CommandsProtocol TypeVar) in redis-types stubs;
 # the TypeVar is internal implementation detail, not user-facing.
 # Disable type-arg (bare Redis) and disallow-any-generics (Redis[Any]) noise.
 [[tool.mypy.overrides]]
 module = ["redis", "redis.*"]
+ignore_missing_imports = true
 disable_error_code = ["type-arg", "type-abstract"]
 disallow_any_generics = false
 

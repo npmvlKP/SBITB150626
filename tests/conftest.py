@@ -5,17 +5,23 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 
 from config.settings import (
     AuditSettings,
     ComplianceSettings,
     DataPipelineSettings,
+    DepthAnalysisSettings,
     GreeksSettings,
     KillSwitchSettings,
     RiskSettings,
+    TechnicalIndicatorSettings,
+    VolumeProfileSettings,
     WebSocketSettings,
 )
+from src.analysis import AnalysisEngine
+from src.analysis.depth import DepthData, DepthLevel
 from src.data.option_chain import OptionMetrics, OptionMetricsComputer, RiskFreeRateProvider
 from src.risk.audit import AuditLogger
 from src.risk.kill_switch import KillSwitch
@@ -303,3 +309,96 @@ def event_writer() -> AsyncMock:
     writer.flush = AsyncMock(return_value=True)
     writer.close = AsyncMock(return_value=True)
     return writer
+
+
+# =============================================================================
+# Phase 3: TA/VA Engine Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def ta_settings() -> TechnicalIndicatorSettings:
+    """Default TechnicalIndicatorSettings for testing."""
+    return TechnicalIndicatorSettings()
+
+
+@pytest.fixture
+def vol_settings() -> VolumeProfileSettings:
+    """Default VolumeProfileSettings for testing."""
+    return VolumeProfileSettings()
+
+
+@pytest.fixture
+def depth_settings() -> DepthAnalysisSettings:
+    """Default DepthAnalysisSettings for testing."""
+    return DepthAnalysisSettings()
+
+
+@pytest.fixture
+def analysis_engine(
+    ta_settings: TechnicalIndicatorSettings,
+    vol_settings: VolumeProfileSettings,
+    depth_settings: DepthAnalysisSettings,
+) -> AnalysisEngine:
+    """AnalysisEngine instance wired with Phase 3 settings."""
+    return AnalysisEngine(ta_settings, vol_settings, depth_settings)
+
+
+@pytest.fixture
+def sample_ohlcv_500() -> np.ndarray:
+    """Generate 500 bars of realistic OHLCV data for testing."""
+    np.random.seed(42)
+    n = 500
+    close = 22000 + np.cumsum(np.random.randn(n) * 50)
+    close = np.maximum(close, 100)  # Ensure positive prices
+    high = close + np.abs(np.random.randn(n) * 30)
+    low = close - np.abs(np.random.randn(n) * 30)
+    open_ = close + np.random.randn(n) * 10
+    open_ = np.maximum(open_, low)
+    high = np.maximum(high, np.maximum(open_, close))
+    low = np.minimum(low, np.minimum(open_, close))
+    volume = np.random.randint(100000, 10000000, n).astype(np.float64)
+    return np.column_stack([open_, high, low, close, volume]).astype(np.float64)
+
+
+@pytest.fixture
+def sample_ohlcv_100() -> np.ndarray:
+    """Generate 100 bars of OHLCV data."""
+    np.random.seed(123)
+    n = 100
+    close = 45000 + np.cumsum(np.random.randn(n) * 100)
+    close = np.maximum(close, 100)
+    high = close + np.abs(np.random.randn(n) * 50)
+    low = close - np.abs(np.random.randn(n) * 50)
+    open_ = close + np.random.randn(n) * 20
+    open_ = np.maximum(open_, low)
+    high = np.maximum(high, np.maximum(open_, close))
+    low = np.minimum(low, np.minimum(open_, close))
+    volume = np.random.randint(500000, 50000000, n).astype(np.float64)
+    return np.column_stack([open_, high, low, close, volume]).astype(np.float64)
+
+
+@pytest.fixture
+def sample_depth() -> DepthData:
+    """Sample DepthData for testing."""
+    return DepthData(
+        bid_levels=[DepthLevel(price=22000.0, quantity=1000) for _ in range(5)],
+        ask_levels=[DepthLevel(price=22001.0, quantity=800) for _ in range(5)],
+    )
+
+
+@pytest.fixture
+def sample_1min_bars() -> np.ndarray:
+    """Generate 375 1-min bars (1 trading day) for VPIN testing."""
+    np.random.seed(99)
+    n = 375
+    close = 22000 + np.cumsum(np.random.randn(n) * 5)
+    close = np.maximum(close, 100)
+    high = close + np.abs(np.random.randn(n) * 3)
+    low = close - np.abs(np.random.randn(n) * 3)
+    open_ = close + np.random.randn(n) * 2
+    open_ = np.maximum(open_, low)
+    high = np.maximum(high, np.maximum(open_, close))
+    low = np.minimum(low, np.minimum(open_, close))
+    volume = np.random.randint(10000, 500000, n).astype(np.float64)
+    return np.column_stack([open_, high, low, close, volume]).astype(np.float64)
