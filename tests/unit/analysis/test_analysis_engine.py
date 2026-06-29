@@ -319,9 +319,9 @@ class TestAnalysisEngine:
         """Per SBITB contract G8: computed_at must be timezone-aware (no naive datetime)."""
         report = analysis_engine.analyze(ohlcv=sample_ohlcv)
 
-        assert (
-            report.computed_at.tzinfo is not None
-        ), f"computed_at must be timezone-aware, got naive datetime: {report.computed_at}"
+        assert report.computed_at.tzinfo is not None, (
+            f"computed_at must be timezone-aware, got naive datetime: {report.computed_at}"
+        )
 
     def test_depth_ltp_produces_spread_bps(
         self,

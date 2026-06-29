@@ -364,9 +364,9 @@ class TestPrometheusNamingConventions:
             full_name = metric._name + "_total"
             assert full_name.endswith("_total"), f"Counter full name {full_name} missing _total suffix"
             # Also verify the user-given name doesn't already have _total (avoid double _total_total)
-            assert not metric._name.endswith(
-                "_total"
-            ), f"Counter {metric._name} already has _total suffix (would become _total_total in Prometheus)"
+            assert not metric._name.endswith("_total"), (
+                f"Counter {metric._name} already has _total suffix (would become _total_total in Prometheus)"
+            )
 
     def test_histogram_names_have_seconds_suffix(self) -> None:
         from src.analysis.metrics import (
@@ -396,15 +396,15 @@ class TestLabelEnumConsistency:
         from src.analysis.volume import VSASignalType
 
         enum_values = frozenset(member.value for member in VSASignalType)
-        assert (
-            VALID_VSA_SIGNAL_TYPES == enum_values
-        ), f"VALID_VSA_SIGNAL_TYPES {VALID_VSA_SIGNAL_TYPES} != VSASignalType values {enum_values}"
+        assert VALID_VSA_SIGNAL_TYPES == enum_values, (
+            f"VALID_VSA_SIGNAL_TYPES {VALID_VSA_SIGNAL_TYPES} != VSASignalType values {enum_values}"
+        )
 
     def test_vpin_levels_match_enum(self) -> None:
         from src.analysis.depth import VPINLevel
         from src.analysis.metrics import VALID_VPIN_LEVELS
 
         enum_values = frozenset(member.value for member in VPINLevel)
-        assert (
-            VALID_VPIN_LEVELS == enum_values
-        ), f"VALID_VPIN_LEVELS {VALID_VPIN_LEVELS} != VPINLevel values {enum_values}"
+        assert VALID_VPIN_LEVELS == enum_values, (
+            f"VALID_VPIN_LEVELS {VALID_VPIN_LEVELS} != VPINLevel values {enum_values}"
+        )
