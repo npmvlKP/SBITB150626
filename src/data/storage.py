@@ -16,21 +16,20 @@ from __future__ import annotations
 import asyncio
 import json as json_module
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Any, Self
+from typing import Any, Self
 
 import pandas as pd
+import psycopg_pool
 import redis.asyncio as redis
+import structlog
 
 from config.settings import DataPipelineSettings, WebSocketSettings
 
-if TYPE_CHECKING:
-    # redis.asyncio.Redis is Generic[ResponseT] in type stubs but not at runtime.
-    # Guard with TYPE_CHECKING so the alias only exists for static analysis.
-    # decode_responses=False means the response type is bytes.
-    RedisAsyncClient = redis.Redis[bytes]
-
-import psycopg_pool
-import structlog
+# Type alias for redis async client.
+# NOTE: redis.asyncio.Redis has a Generic TypeVar in its bundled type stubs,
+# but not all mypy/redis-stub versions expose it consistently. We use the bare
+# form (no type arguments) and suppress type-arg via pyproject.toml override.
+RedisAsyncClient = redis.Redis
 
 logger = structlog.get_logger(__name__)
 

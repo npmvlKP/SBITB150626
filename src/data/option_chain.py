@@ -113,7 +113,7 @@ class RiskFreeRateProvider:
 
         self._settings = settings
         self._db_url = db_url
-        self._redis: redis_lib.Redis | None = None  # type: ignore[type-arg]
+        self._redis: redis_lib.Redis | None = None
         self._redis_lib = redis_lib
 
         # Lazy Redis connection — do NOT ping in __init__ (blocks event loop / tests).
@@ -128,7 +128,7 @@ class RiskFreeRateProvider:
         )
         self._redis_available: bool | None = None  # None = not yet checked
 
-    def _get_redis(self) -> redis.Redis[str] | None:
+    def _get_redis(self) -> redis.Redis | None:
         """Get Redis connection if available (cached after first check).
 
         Uses the socket_connect_timeout/socket_timeout set in __init__ so
