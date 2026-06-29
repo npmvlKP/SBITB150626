@@ -454,3 +454,899 @@ class DepthAnalysisSettings(BaseSettings):
     VPIN_MIN_1MIN_BARS: int = Field(
         default=50, ge=20, le=200, description="Minimum 1-min bars required for VPIN computation"
     )
+
+
+# PHASE 4 ADDITIONS ──────────────────────────────────────────────────────────────────────
+# Market Strength Engine Settings
+# Reference: Dalton "Mind Over Markets" Ch.4-6, Weis Ch.2-3, Kaufman Ch.7, Chan Ch.2-3
+
+
+class MarketStrengthSettings(BaseSettings):
+    """Composite market strength scoring configuration — 9-feature weighted model.
+
+    References:
+    - Dalton Ch.6: Market structure (breadth, VIX, flow) > microstructure (OI, PCR)
+    - Weis Ch.3: Volume confirmation > price-only signals
+    - Kaufman Ch.7: Normalize all indicators to [0, 100]; weights must sum to 1.0
+    - Chan Ch.2-3: Contrarian signals (PCR), VIX extreme recovery
+    """
+
+    model_config = SettingsConfigDict(env_prefix="MKTSTR_", env_file=".env", extra="ignore")
+
+    # ── Regime boundaries (Plan.txt line 369-371) ──────────────────────────────────────
+
+    WEAK_THRESHOLD: int = Field(default=30, ge=0, le=50, description="Score <= this = WEAK regime")
+    STRONG_THRESHOLD: int = Field(default=60, ge=40, le=100, description="Score > this = STRONG regime")
+
+    # ── Feature weights (MUST sum to 1.0) ──────────────────────────────────────────────
+    # Dalton Ch.6: Market structure (breadth, VIX, flow) > microstructure (OI, PCR)
+
+    WEIGHT_AD_RATIO: float = Field(default=0.10, ge=0.0, le=1.0, description="Advance/Decline ratio weight")
+    WEIGHT_VWAP_DISTANCE: float = Field(default=0.08, ge=0.0, le=1.0, description="VWAP distance weight")
+    WEIGHT_OI_CHANGE: float = Field(default=0.08, ge=0.0, le=1.0, description="Open Interest change weight")
+    WEIGHT_PCR: float = Field(default=0.08, ge=0.0, le=1.0, description="Put/Call ratio weight")
+    WEIGHT_VOLUME_PROFILE: float = Field(default=0.10, ge=0.0, le=1.0, description="Volume profile position weight")
+    WEIGHT_MARKET_BREADTH: float = Field(
+        default=0.15, ge=0.0, le=1.0, description="Market breadth weight (structural, Dalton Ch.6)"
+    )
+    WEIGHT_SECTOR_MOMENTUM: float = Field(default=0.10, ge=0.0, le=1.0, description="Sector momentum weight")
+    WEIGHT_INDIA_VIX: float = Field(
+        default=0.15, ge=0.0, le=1.0, description="India VIX weight (structural, Weis Ch.3)"
+    )
+    WEIGHT_FII_DII_FLOW: float = Field(
+        default=0.16, ge=0.0, le=1.0, description="FII/DII flow weight (institutional, Dalton Ch.6)"
+    )
+
+    # ── Feature scoring ranges ─────────────────────────────────────────────────────────
+
+    AD_RATIO_EXTREME_BULLISH: float = Field(default=3.0, ge=1.0, le=10.0, description="A/D ratio >= this = 100 score")
+    AD_RATIO_EXTREME_BEARISH: float = Field(default=0.33, ge=0.1, le=1.0, description="A/D ratio <= this = 0 score")
+    VWAP_DISTANCE_EXTREME: float = Field(
+        default=2.0, ge=0.5, le=5.0, description="VWAP distance (in ATR units) >= this = extreme"
+    )
+    OI_CHANGE_SPIKE_THRESHOLD: float = Field(
+        default=10.0, ge=1.0, le=50.0, description="OI change % >= this = significant participation"
+    )
+    OI_CHANGE_LOOKBACK_DAYS: int = Field(default=5, ge=1, le=20, description="Days for OI change baseline")
+    PCR_EXTREME_BULLISH: float = Field(default=1.5, ge=0.5, le=3.0, description="PCR >= this = contrarian bullish")
+    PCR_EXTREME_BEARISH: float = Field(default=0.4, ge=0.1, le=0.8, description="PCR <= this = contrarian bearish")
+    PCR_NEUTRAL: float = Field(default=0.9, ge=0.5, le=1.5, description="PCR around this = neutral")
+    BREADTH_EXTREME_BULLISH: float = Field(
+        default=0.80, ge=0.5, le=1.0, description="% stocks above 20-EMA >= this = 100 score"
+    )
+    BREADTH_EXTREME_BEARISH: float = Field(
+        default=0.20, ge=0.0, le=0.5, description="% stocks above 20-EMA <= this = 0 score"
+    )
+    SECTOR_MOMENTUM_LOOKBACK: int = Field(default=20, ge=5, le=60, description="Days for sector momentum calculation")
+    SECTOR_MOMENTUM_EXTREME: float = Field(
+        default=5.0, ge=1.0, le=15.0, description="Sector relative strength >= this % = extreme"
+    )
+    VIX_BULLISH_THRESHOLD: float = Field(
+        default=15.0, ge=5.0, le=25.0, description="VIX < this = bullish (complacency)"
+    )
+    VIX_BEARISH_THRESHOLD: float = Field(default=25.0, ge=15.0, le=40.0, description="VIX > this = bearish (fear)")
+    VIX_EXTREME_THRESHOLD: float = Field(
+        default=35.0, ge=25.0, le=60.0, description="VIX > this = extreme (contrarian bullish possible)"
+    )
+    VIX_TREND_MODIFIER: float = Field(
+        default=8.0, ge=0.0, le=20.0, description="Points to add/subtract for VIX trend direction"
+    )
+    FII_DII_FLOW_LOOKBACK: int = Field(default=5, ge=1, le=30, description="Days for FII/DII net flow aggregation")
+    FII_DII_EXTREME_BUY: float = Field(
+        default=5000.0, ge=100.0, le=50000.0, description="Net FII+DII buy >= this Cr = extreme bullish"
+    )
+    FII_DII_EXTREME_SELL: float = Field(
+        default=-5000.0, ge=-50000.0, le=-100.0, description="Net FII+DII sell <= this Cr = extreme bearish"
+    )
+
+    # ── Sector indices for momentum ────────────────────────────────────────────────────
+
+    SECTOR_INDICES: list[str] = Field(
+        default=["NIFTY IT", "NIFTY BANK", "NIFTY PHARMA", "NIFTY FMCG", "NIFTY METAL"],
+        description="NSE sector indices for relative strength computation",
+    )
+
+    # ── Data source configuration ──────────────────────────────────────────────────────
+
+    AD_RATIO_SOURCE: Literal["jugaad_data", "manual"] = Field(default="jugaad_data")
+    FII_DII_SOURCE: Literal["kite_historical", "jugaad_data", "manual"] = Field(default="kite_historical")
+    SECTOR_DATA_SOURCE: Literal["jugaad_data", "manual"] = Field(default="jugaad_data")
+
+    # ── Caching ────────────────────────────────────────────────────────────────────────
+
+    FEATURE_CACHE_TTL_SECONDS: int = Field(
+        default=300, ge=60, le=3600, description="Feature cache TTL in seconds (5 min default)"
+    )
+
+    @model_validator(mode="after")
+    def validate_market_strength_settings(self) -> "MarketStrengthSettings":
+        """Feature weights MUST sum to 1.0 (Kaufman Ch.7 normalization)."""
+        total = (
+            self.WEIGHT_AD_RATIO
+            + self.WEIGHT_VWAP_DISTANCE
+            + self.WEIGHT_OI_CHANGE
+            + self.WEIGHT_PCR
+            + self.WEIGHT_VOLUME_PROFILE
+            + self.WEIGHT_MARKET_BREADTH
+            + self.WEIGHT_SECTOR_MOMENTUM
+            + self.WEIGHT_INDIA_VIX
+            + self.WEIGHT_FII_DII_FLOW
+        )
+        if not (0.99 <= total <= 1.01):
+            raise ValueError(f"Feature weights must sum to 1.0, got {total:.4f}")
+        if self.WEAK_THRESHOLD >= self.STRONG_THRESHOLD:
+            raise ValueError(
+                f"WEAK_THRESHOLD ({self.WEAK_THRESHOLD}) must be < STRONG_THRESHOLD ({self.STRONG_THRESHOLD})"
+            )
+        return self
+
+
+# PHASE 5 ADDITIONS ──────────────────────────────────────────────────────────────────────
+# Rule-Based Options Strategy Settings
+# Reference: Kaufman Ch.9-12, Chan Ch.5-8
+
+
+class StrategySettings(BaseSettings):
+    """Options selling + buying strategy configuration.
+
+    References:
+    - Kaufman Ch.9-10: Position sizing (fixed-fractional, Kelly, optimal-f), strangle exits
+    - Chan Ch.5-6: Mean-reversion (high IV selling) vs momentum (low IV buying)
+    - Chan Ch.6: Minimum 2:1 R:R for directional options
+    """
+
+    model_config = SettingsConfigDict(env_prefix="STRAT_", env_file=".env", extra="ignore")
+
+    # ── Signal evaluation interval ─────────────────────────────────────────────────────
+    SIGNAL_EVAL_INTERVAL_SECONDS: int = Field(
+        default=300, ge=60, le=3600, description="Seconds between signal evaluations (default 5 min)"
+    )
+
+    # ── NIFTY lot size (Correction #1) ─────────────────────────────────────────────────
+    NIFTY_LOT_SIZE: int = Field(default=25, ge=1, description="NIFTY options lot size (25 since Nov 2021)")
+
+    # ── Options Selling Strategy (mean-reversion) ──────────────────────────────────────
+    SELLING_IV_RANK_MIN: float = Field(
+        default=40.0, ge=0.0, le=100.0, description="Minimum IV rank for selling entry (Chan Ch.5)"
+    )
+    SELLING_ADX_MAX: float = Field(
+        default=25.0, ge=10.0, le=50.0, description="Maximum ADX for selling entry (range-bound filter)"
+    )
+    SELLING_MKT_STRENGTH_MIN: float = Field(
+        default=31.0, ge=0.0, le=100.0, description="Minimum market strength score for selling (NEUTRAL regime)"
+    )
+    SELLING_MKT_STRENGTH_MAX: float = Field(
+        default=60.0, ge=0.0, le=100.0, description="Maximum market strength score for selling (NEUTRAL regime)"
+    )
+    SELLING_VIX_MIN: float = Field(default=15.0, ge=5.0, le=40.0, description="Minimum India VIX for selling entry")
+
+    # ── Strike selection: Selling ──────────────────────────────────────────────────────
+    SELLING_STRIKE_SD_MULTIPLIER: float = Field(
+        default=2.0, ge=1.0, le=4.0, description="SD multiplier for selling strike selection (2SD default)"
+    )
+    SELLING_STRIKE_MIN_OI: int = Field(default=10000, ge=100, description="Minimum OI on selected strike")
+    SELLING_STRIKE_MIN_VOLUME: int = Field(default=1000, ge=100, description="Minimum volume on selected strike")
+
+    # ── Exit: Selling ──────────────────────────────────────────────────────────────────
+    SELLING_PREMIUM_DECAY_EXIT_PCT: float = Field(
+        default=0.50,
+        ge=0.20,
+        le=0.90,
+        description="Exit when premium decays >= this fraction (50% default, Kaufman Ch.10)",
+    )
+    SELLING_PREMIUM_DECAY_SCOPE: Literal["combined", "either_leg"] = Field(
+        default="combined", description="Decay exit: 'combined' = total premium, 'either_leg' = any single leg"
+    )
+    SELLING_SL_MULTIPLIER: float = Field(
+        default=2.0, ge=1.0, le=5.0, description="Stop loss = SL_MULTIPLIER * combined premium received"
+    )
+    SELLING_DAYS_BEFORE_EXPIRY_EXIT: int = Field(
+        default=2, ge=1, le=5, description="Exit N trading days before expiry (gamma risk)"
+    )
+    SELLING_REGIME_CHANGE_EXIT: bool = Field(default=True, description="Exit on regime change outside NEUTRAL")
+
+    # ── Options Buying Strategy (momentum) ─────────────────────────────────────────────
+    BUYING_IV_RANK_MAX: float = Field(
+        default=30.0, ge=0.0, le=60.0, description="Maximum IV rank for buying entry (Chan Ch.6: low IV = underpriced)"
+    )
+    BUYING_ADX_MIN: float = Field(
+        default=25.0, ge=10.0, le=50.0, description="Minimum ADX for buying entry (trending filter)"
+    )
+    BUYING_MKT_STRENGTH_BULLISH: float = Field(
+        default=60.0, ge=0.0, le=100.0, description="Market strength > this = bullish entry"
+    )
+    BUYING_MKT_STRENGTH_BEARISH: float = Field(
+        default=30.0, ge=0.0, le=50.0, description="Market strength < this = bearish entry"
+    )
+    BUYING_SENTIMENT_WEIGHT: float = Field(
+        default=0.0, ge=0.0, le=0.5, description="Sentiment confirmation weight (0.0 = stubbed, Phase 8)"
+    )
+
+    # ── Strike selection: Buying ───────────────────────────────────────────────────────
+    BUYING_DELTA_MIN: float = Field(default=0.50, ge=0.30, le=0.70, description="Minimum delta for buying strike")
+    BUYING_DELTA_MAX: float = Field(default=0.60, ge=0.40, le=0.80, description="Maximum delta for buying strike")
+    BUYING_DELTA_WIDEN_MIN: float = Field(
+        default=0.45, ge=0.30, le=0.60, description="Widened delta range min if no strike in primary range"
+    )
+    BUYING_DELTA_WIDEN_MAX: float = Field(
+        default=0.65, ge=0.50, le=0.80, description="Widened delta range max if no strike in primary range"
+    )
+    BUYING_STRIKE_MIN_OI: int = Field(default=10000, ge=100, description="Minimum OI on selected strike")
+    BUYING_STRIKE_MIN_VOLUME: int = Field(default=1000, ge=100, description="Minimum volume on selected strike")
+
+    # ── Exit: Buying ───────────────────────────────────────────────────────────────────
+    BUYING_TRAILING_SL_ATR_MULT: float = Field(
+        default=1.5, ge=0.5, le=4.0, description="Base trailing SL = ATR(14) * this multiplier"
+    )
+    BUYING_TARGET_RR_MIN: float = Field(
+        default=2.0, ge=1.0, le=5.0, description="Minimum reward:risk ratio for entry (Chan Ch.6)"
+    )
+    BUYING_DAYS_BEFORE_EXPIRY_EXIT: int = Field(
+        default=3, ge=1, le=7, description="Exit N trading days before expiry (time stop)"
+    )
+
+    # ── Adaptive trailing stop factors ─────────────────────────────────────────────────
+    TRAIL_VIX_SCALE_FACTOR: float = Field(
+        default=0.1, ge=0.0, le=0.5, description="VIX adjustment: trail * (1 + VIX/100 * this factor)"
+    )
+    TRAIL_STRENGTH_SCALE_FACTOR: float = Field(
+        default=0.05, ge=0.0, le=0.3, description="Market strength adjustment: stronger = wider trail"
+    )
+    TRAIL_VOLUME_SPIKE_THRESHOLD: float = Field(
+        default=2.0, ge=1.0, le=5.0, description="Volume > this * average = spike -> tighten trail"
+    )
+    TRAIL_VOLUME_SPIKE_TIGHTEN: float = Field(
+        default=0.10, ge=0.0, le=0.3, description="Tightening fraction on volume spike"
+    )
+
+    # ── Position sizing (Kaufman Ch.9-10) ──────────────────────────────────────────────
+    POSITION_SIZING_METHOD: Literal["fixed_fractional", "kelly", "optimal_f"] = Field(
+        default="fixed_fractional", description="Position sizing method"
+    )
+    FIXED_FRACTIONAL_PCT: float = Field(
+        default=0.02, ge=0.01, le=0.05, description="Fixed fractional risk per trade (1-3%, default 2%)"
+    )
+    KELLY_USE_HALF: bool = Field(default=True, description="Use half-Kelly for options (fat tails, Kaufman Ch.9)")
+    OPTIMAL_F_LOOKBACK_TRADES: int = Field(
+        default=100, ge=20, le=500, description="Number of historical trades for optimal-f calculation"
+    )
+
+    # ── Risk limits ────────────────────────────────────────────────────────────────────
+    MAX_LOTS_PER_TRADE: int = Field(default=10, ge=1, le=50, description="Maximum lots per single trade signal")
+    MAX_DAILY_SIGNALS: int = Field(default=6, ge=1, le=20, description="Maximum signals per day (avoid overtrading)")
+    MAX_OPEN_POSITIONS: int = Field(default=4, ge=1, le=10, description="Maximum concurrent open positions")
+
+    # ── SEBI compliance ────────────────────────────────────────────────────────────────
+    SEBI_MAX_OPS: int = Field(
+        default=3, ge=1, le=10, description="Self-imposed max orders per second (safety margin under 10 OPS)"
+    )
+
+    @model_validator(mode="after")
+    def validate_strategy_settings(self) -> "StrategySettings":
+        if self.SELLING_MKT_STRENGTH_MIN >= self.SELLING_MKT_STRENGTH_MAX:
+            raise ValueError(
+                f"SELLING_MKT_STRENGTH_MIN ({self.SELLING_MKT_STRENGTH_MIN}) must be < SELLING_MKT_STRENGTH_MAX ({self.SELLING_MKT_STRENGTH_MAX})"
+            )
+        if self.BUYING_MKT_STRENGTH_BEARISH >= self.BUYING_MKT_STRENGTH_BULLISH:
+            raise ValueError(
+                f"BUYING_MKT_STRENGTH_BEARISH ({self.BUYING_MKT_STRENGTH_BEARISH}) must be < BUYING_MKT_STRENGTH_BULLISH ({self.BUYING_MKT_STRENGTH_BULLISH})"
+            )
+        if self.BUYING_DELTA_MIN >= self.BUYING_DELTA_MAX:
+            raise ValueError(
+                f"BUYING_DELTA_MIN ({self.BUYING_DELTA_MIN}) must be < BUYING_DELTA_MAX ({self.BUYING_DELTA_MAX})"
+            )
+        if self.BUYING_DELTA_WIDEN_MIN >= self.BUYING_DELTA_WIDEN_MAX:
+            raise ValueError(
+                f"BUYING_DELTA_WIDEN_MIN ({self.BUYING_DELTA_WIDEN_MIN}) must be < BUYING_DELTA_WIDEN_MAX ({self.BUYING_DELTA_WIDEN_MAX})"
+            )
+        if self.BUYING_DELTA_WIDEN_MIN > self.BUYING_DELTA_MIN:
+            raise ValueError(
+                f"BUYING_DELTA_WIDEN_MIN ({self.BUYING_DELTA_WIDEN_MIN}) must be <= BUYING_DELTA_MIN ({self.BUYING_DELTA_MIN})"
+            )
+        if self.BUYING_DELTA_WIDEN_MAX < self.BUYING_DELTA_MAX:
+            raise ValueError(
+                f"BUYING_DELTA_WIDEN_MAX ({self.BUYING_DELTA_WIDEN_MAX}) must be >= BUYING_DELTA_MAX ({self.BUYING_DELTA_MAX})"
+            )
+        return self
+
+
+# PHASE 7 ADDITIONS ──────────────────────────────────────────────────────────────────────
+# Options Strike Auto-Selection + Adaptive Trailing Stop Loss Settings
+# Reference: Natenberg Ch.4-8, Zerodha Varsity Options Module, Kaufman Ch.10
+
+
+class StrikeSelectionSettings(BaseSettings):
+    """Strike auto-selection engine configuration — delta-targeted buying + sigma-based selling.
+
+    References:
+    - Natenberg Ch.4: Delta-targeted strike selection (delta 0.50-0.60 for ATM/1-ITM)
+    - Natenberg Ch.5: IV skew awareness (PE typically has higher IV than CE at same SD)
+    - Natenberg Ch.5-6: Gamma risk scaling near expiry
+    - Zerodha Varsity Module 6: Moneyness classification (ITM/ATM/OTM)
+    - Kaufman Ch.7: 2SD ≈ 2*ATR(14) for normal distribution
+    """
+
+    model_config = SettingsConfigDict(env_prefix="STRIKE_", env_file=".env", extra="ignore")
+
+    # ── NIFTY lot size ─────────────────────────────────────────────────────────────────
+    NIFTY_LOT_SIZE: int = Field(default=25, ge=1, description="NIFTY options lot size (25 since Nov 2021)")
+
+    # ── Strike interval ────────────────────────────────────────────────────────────────
+    NIFTY_STRIKE_INTERVAL: int = Field(
+        default=50, ge=5, description="NIFTY strike interval in rupees (multiples of 50)"
+    )
+
+    # ── Selling strike selection (2SD / ATR-based) ─────────────────────────────────────
+    SELLING_STRIKE_SD_MULTIPLIER: float = Field(
+        default=2.0, ge=1.0, le=4.0, description="SD multiplier for selling strike selection (2SD default)"
+    )
+    SELLING_STRIKE_MIN_OI: int = Field(default=10000, ge=100, description="Minimum OI on selected strike")
+    SELLING_STRIKE_MIN_VOLUME: int = Field(default=1000, ge=100, description="Minimum volume on selected strike")
+    SELLING_STRIKE_MAX_SEARCH_OFFSETS: int = Field(
+        default=4, ge=1, le=10, description="Max +/- offset intervals to search if primary strike fails validation"
+    )
+
+    # ── Buying strike selection (delta-targeted) ───────────────────────────────────────
+    BUYING_DELTA_MIN: float = Field(default=0.50, ge=0.30, le=0.70, description="Minimum delta for buying strike")
+    BUYING_DELTA_MAX: float = Field(default=0.60, ge=0.40, le=0.80, description="Maximum delta for buying strike")
+    BUYING_DELTA_TARGET: float = Field(
+        default=0.55, ge=0.35, le=0.75, description="Target delta for strike ranking (midpoint preference)"
+    )
+    BUYING_DELTA_WIDEN_MIN: float = Field(
+        default=0.45, ge=0.30, le=0.60, description="Widened delta range min if no strike in primary range"
+    )
+    BUYING_DELTA_WIDEN_MAX: float = Field(
+        default=0.65, ge=0.50, le=0.80, description="Widened delta range max if no strike in primary range"
+    )
+    BUYING_STRIKE_MIN_OI: int = Field(default=10000, ge=100, description="Minimum OI on selected strike")
+    BUYING_STRIKE_MIN_VOLUME: int = Field(default=1000, ge=100, description="Minimum volume on selected strike")
+
+    # ── IV skew adjustment (Natenberg Ch.5) ────────────────────────────────────────────
+    IV_SKEW_AWARENESS: bool = Field(default=True, description="Account for IV skew in strike selection")
+    IV_SKEW_PE_ADJUSTMENT_PCT: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=0.20,
+        description="PE strike distance adjustment: push PE slightly further OTM to account for higher IV",
+    )
+
+    # ── Gamma risk scaling near expiry (Natenberg Ch.5-6, Zerodha Varsity Module 14) ───
+    GAMMA_RISK_DAYS_THRESHOLD: int = Field(
+        default=5, ge=1, le=10, description="Days to expiry below which gamma risk scaling activates"
+    )
+    GAMMA_RISK_LOT_REDUCTION_PCT: float = Field(
+        default=0.25, ge=0.0, le=0.50, description="Reduce lot size by this percentage when within gamma risk threshold"
+    )
+    GAMMA_RISK_SELLING_PUSH_OTM_STRIKES: int = Field(
+        default=1, ge=0, le=3, description="Push selling strikes this many intervals further OTM near expiry"
+    )
+
+    # ── Strike ranking weights (Natenberg Ch.4, Ch.8) ──────────────────────────────────
+    RANK_WEIGHT_DELTA_PROXIMITY: float = Field(
+        default=0.30, ge=0.0, le=1.0, description="Weight: delta proximity to target in strike ranking"
+    )
+    RANK_WEIGHT_LIQUIDITY: float = Field(
+        default=0.25, ge=0.0, le=1.0, description="Weight: OI + volume composite in strike ranking"
+    )
+    RANK_WEIGHT_IV_FAVORABILITY: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description="Weight: IV favorability (low IV for buying, high IV for selling) in strike ranking",
+    )
+    RANK_WEIGHT_BID_ASK_SPREAD: float = Field(
+        default=0.20, ge=0.0, le=1.0, description="Weight: bid-ask spread tightness in strike ranking"
+    )
+
+    @model_validator(mode="after")
+    def validate_strike_selection_settings(self) -> "StrikeSelectionSettings":
+        if self.BUYING_DELTA_MIN >= self.BUYING_DELTA_MAX:
+            raise ValueError(
+                f"BUYING_DELTA_MIN ({self.BUYING_DELTA_MIN}) must be < BUYING_DELTA_MAX ({self.BUYING_DELTA_MAX})"
+            )
+        if self.BUYING_DELTA_WIDEN_MIN >= self.BUYING_DELTA_WIDEN_MAX:
+            raise ValueError(
+                f"BUYING_DELTA_WIDEN_MIN ({self.BUYING_DELTA_WIDEN_MIN}) must be < BUYING_DELTA_WIDEN_MAX ({self.BUYING_DELTA_WIDEN_MAX})"
+            )
+        if self.BUYING_DELTA_WIDEN_MIN > self.BUYING_DELTA_MIN:
+            raise ValueError(
+                f"BUYING_DELTA_WIDEN_MIN ({self.BUYING_DELTA_WIDEN_MIN}) must be <= BUYING_DELTA_MIN ({self.BUYING_DELTA_MIN})"
+            )
+        if self.BUYING_DELTA_WIDEN_MAX < self.BUYING_DELTA_MAX:
+            raise ValueError(
+                f"BUYING_DELTA_WIDEN_MAX ({self.BUYING_DELTA_WIDEN_MAX}) must be >= BUYING_DELTA_MAX ({self.BUYING_DELTA_MAX})"
+            )
+        total_weight = (
+            self.RANK_WEIGHT_DELTA_PROXIMITY
+            + self.RANK_WEIGHT_LIQUIDITY
+            + self.RANK_WEIGHT_IV_FAVORABILITY
+            + self.RANK_WEIGHT_BID_ASK_SPREAD
+        )
+        if abs(total_weight - 1.0) > 0.01:
+            raise ValueError(f"Strike ranking weights must sum to 1.0, got {total_weight:.4f}")
+        return self
+
+
+class PositionSizingSettings(BaseSettings):
+    """Position sizing engine configuration with cost deduction, margin checking, and gamma risk scaling.
+
+    References:
+    - Kaufman Ch.9-10: Three sizing methods (fixed-fractional, Kelly, optimal-f)
+    - Natenberg Ch.5-6: Gamma risk lot reduction near expiry
+    - Phase 6 cost model: Zerodha transaction cost rates
+    """
+
+    model_config = SettingsConfigDict(env_prefix="POSIZE_", env_file=".env", extra="ignore")
+
+    # ── Lot size ───────────────────────────────────────────────────────────────────────
+    NIFTY_LOT_SIZE: int = Field(default=25, ge=1, description="NIFTY options lot size (25 since Nov 2021)")
+
+    # ── Position sizing method ─────────────────────────────────────────────────────────
+    POSITION_SIZING_METHOD: Literal["fixed_fractional", "kelly", "optimal_f"] = Field(
+        default="fixed_fractional", description="Position sizing method (Kaufman Ch.9)"
+    )
+    FIXED_FRACTIONAL_PCT: float = Field(
+        default=0.02, ge=0.01, le=0.05, description="Fixed fractional risk per trade (1-3%, default 2%)"
+    )
+    KELLY_USE_HALF: bool = Field(default=True, description="Use half-Kelly for options (fat tails, Kaufman Ch.9)")
+    OPTIMAL_F_LOOKBACK_TRADES: int = Field(
+        default=100, ge=20, le=500, description="Number of historical trades for optimal-f calculation"
+    )
+
+    # ── Risk limits ────────────────────────────────────────────────────────────────────
+    MAX_LOTS_PER_TRADE: int = Field(default=10, ge=1, le=50, description="Maximum lots per single trade signal")
+    MAX_DAILY_NOTIONAL: float = Field(
+        default=500000.0, ge=100000.0, description="Maximum daily notional exposure in INR (5 lakh)"
+    )
+    MAX_OPEN_POSITIONS: int = Field(default=4, ge=1, le=10, description="Maximum concurrent open positions")
+
+    # ── Margin constraint ──────────────────────────────────────────────────────────────
+    MARGIN_CHECK_ENABLED: bool = Field(default=True, description="Check available margin before computing lots")
+    SPAN_MARGIN_PCT: float = Field(
+        default=0.05, ge=0.02, le=0.15, description="SPAN margin ~5% of notional for NIFTY strangle"
+    )
+    MARGIN_SAFETY_BUFFER_PCT: float = Field(
+        default=0.10, ge=0.0, le=0.30, description="Keep this percentage of available margin as buffer (never use 100%)"
+    )
+
+    # ── Cost deduction ─────────────────────────────────────────────────────────────────
+    COST_DEDUCTION_ENABLED: bool = Field(
+        default=True, description="Deduct estimated transaction costs from risk_per_trade before computing lots"
+    )
+    BROKERAGE_PER_ORDER: float = Field(default=20.0, ge=0.0, description="Zerodha brokerage Rs 20 per executed order")
+    STT_SELL_PCT: float = Field(default=0.000625, ge=0.0, description="STT 0.0625% on premium value sell side options")
+    STAMP_DUTY_BUY_PCT: float = Field(default=0.00003, ge=0.0, description="Stamp duty 0.003% buy side options")
+    EXCHANGE_TRANSACTION_PCT: float = Field(
+        default=0.00035, ge=0.0, description="NFO exchange transaction 0.035% of premium value both sides"
+    )
+    SEBI_TURNOVER_FEE_PER_CRORE: float = Field(
+        default=10.0, ge=0.0, description="SEBI turnover fee Rs 10/crore both sides"
+    )
+    SEBI_CTCL_PER_LAKH: float = Field(default=1.50, ge=0.0, description="SEBI CTCL charge Rs 1.50/lakh sell side")
+    GST_PCT: float = Field(default=0.18, ge=0.0, description="GST 18% on (brokerage + SEBI fees + exchange charges)")
+    SLIPPAGE_PCT: float = Field(default=0.0005, ge=0.0, description="Default slippage 0.05% of option price")
+
+    # ── Gamma risk lot reduction ───────────────────────────────────────────────────────
+    GAMMA_RISK_DAYS_THRESHOLD: int = Field(
+        default=5, ge=1, le=10, description="Days to expiry below which gamma risk lot reduction applies"
+    )
+    GAMMA_RISK_LOT_REDUCTION_PCT: float = Field(
+        default=0.25, ge=0.0, le=0.50, description="Reduce lots by this percentage when within gamma risk days"
+    )
+
+    # ── SEBI compliance ────────────────────────────────────────────────────────────────
+    SEBI_MAX_OPS: int = Field(
+        default=3, ge=1, le=10, description="Self-imposed max orders per second (safety margin under 10 OPS)"
+    )
+
+
+class TrailingStopSettings(BaseSettings):
+    """Adaptive trailing stop engine configuration — ATR-based + Chandelier Exit + blended methods.
+
+    References:
+    - Kaufman Ch.10: Adaptive trailing stops, Chandelier Exit
+    - Natenberg Ch.5: IV rank adjustment (vega risk -> wider trail)
+    - Phase 4 MarketRegime: Regime-based adjustment (STRONG wider, WEAK tighter)
+    """
+
+    model_config = SettingsConfigDict(env_prefix="TRAIL_", env_file=".env", extra="ignore")
+
+    # ── Base trailing stop ─────────────────────────────────────────────────────────────
+    BASE_ATR_MULTIPLIER: float = Field(
+        default=1.5, ge=0.5, le=4.0, description="Base trailing SL = ATR(14) * this multiplier"
+    )
+
+    # ── Trailing stop method selection ─────────────────────────────────────────────────
+    TRAILING_METHOD: Literal["atr_only", "chandelier", "blended"] = Field(
+        default="blended", description="Trailing stop method: ATR-based, Chandelier Exit, or blended"
+    )
+    CHANDELIER_ATR_MULTIPLIER: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=5.0,
+        description="Chandelier Exit: ATR * this multiplier subtracted from highest high (Kaufman Ch.10)",
+    )
+    BLENDED_ATR_WEIGHT: float = Field(
+        default=0.60, ge=0.0, le=1.0, description="Weight for ATR-based trail in blended method"
+    )
+    BLENDED_CHANDELIER_WEIGHT: float = Field(
+        default=0.40, ge=0.0, le=1.0, description="Weight for Chandelier trail in blended method"
+    )
+
+    # ── Adaptive factors ───────────────────────────────────────────────────────────────
+    VIX_SCALE_FACTOR: float = Field(
+        default=0.10, ge=0.0, le=0.50, description="VIX adjustment: trail * (1 + VIX/100 * this factor)"
+    )
+    STRENGTH_SCALE_FACTOR: float = Field(
+        default=0.05, ge=0.0, le=0.30, description="Market strength adjustment: stronger = wider trail"
+    )
+    VOLUME_SPIKE_THRESHOLD: float = Field(
+        default=2.0, ge=1.0, le=5.0, description="Volume > this * average = spike -> tighten trail"
+    )
+    VOLUME_SPIKE_TIGHTEN: float = Field(
+        default=0.10, ge=0.0, le=0.30, description="Tightening fraction on volume spike"
+    )
+
+    # ── IV rank adjustment (Natenberg Ch.5) ────────────────────────────────────────────
+    IV_RANK_SCALE_FACTOR: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=0.20,
+        description="IV rank adjustment: trail * (1 + iv_rank/100 * this factor). High IV = wider trail (vega risk)",
+    )
+    IV_RANK_HIGH_THRESHOLD: float = Field(
+        default=60.0, ge=30.0, le=80.0, description="IV rank above this = high IV regime -> extra trail widening"
+    )
+    IV_RANK_HIGH_EXTRA_WIDEN: float = Field(
+        default=0.10, ge=0.0, le=0.30, description="Extra widening fraction when IV rank exceeds high threshold"
+    )
+
+    # ── Regime adjustment ──────────────────────────────────────────────────────────────
+    REGIME_SCALE_FACTOR: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=0.20,
+        description="Regime adjustment: STRONG -> wider, WEAK -> tighter, NEUTRAL -> no change",
+    )
+    REGIME_STRONG_FACTOR: float = Field(
+        default=1.0, ge=0.0, le=2.0, description="Regime factor for STRONG (allows trend to breathe)"
+    )
+    REGIME_NEUTRAL_FACTOR: float = Field(
+        default=0.0, ge=-1.0, le=1.0, description="Regime factor for NEUTRAL (baseline)"
+    )
+    REGIME_WEAK_FACTOR: float = Field(
+        default=-0.5, ge=-2.0, le=0.0, description="Regime factor for WEAK (tighter trail, protect capital)"
+    )
+
+    # ── Monotonicity enforcement ──────────────────────────────────────────────────────
+    MONOTONICITY_ENFORCED: bool = Field(
+        default=True, description="Trailing stop can only move toward profit direction — hard invariant (Kaufman Ch.10)"
+    )
+
+    # ── SL-M order placement ───────────────────────────────────────────────────────────
+    SL_ORDER_TYPE: Literal["SL-M", "SL-L"] = Field(
+        default="SL-M",
+        description="Stop-loss order type: SL-M (market) or SL-L (limit). Default SL-M per Zerodha bracket order workaround",
+    )
+    SL_LIMIT_BUFFER_PCT: float = Field(
+        default=0.001,
+        ge=0.0,
+        le=0.01,
+        description="If SL-L: limit price = trigger_price * (1 - this buffer). Prevents execution failure",
+    )
+
+    # ── Minimum trail floor ────────────────────────────────────────────────────────────
+    MIN_TRAIL_FLOOR_ATR_MULT: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=1.0,
+        description="Minimum trail = ATR * this multiplier. Trail never goes below this floor regardless of adaptive factors",
+    )
+
+    @model_validator(mode="after")
+    def validate_trailing_stop_settings(self) -> "TrailingStopSettings":
+        if self.TRAILING_METHOD == "blended":
+            total = self.BLENDED_ATR_WEIGHT + self.BLENDED_CHANDELIER_WEIGHT
+            if abs(total - 1.0) > 0.01:
+                raise ValueError(f"BLENDED weights must sum to 1.0, got {total:.4f}")
+        if self.SL_ORDER_TYPE == "SL-L" and self.SL_LIMIT_BUFFER_PCT <= 0:
+            raise ValueError("SL_LIMIT_BUFFER_PCT must be > 0 when using SL-L order type")
+        return self
+
+
+# PHASE 8 ADDITIONS ──────────────────────────────────────────────────────────────────────
+# Sentiment Analysis Pipeline Settings
+# Reference: Tunstall "NLP with Transformers" Ch.1-7, Natenberg Ch.7
+
+
+class SentimentSettings(BaseSettings):
+    """Sentiment analysis pipeline configuration — news scrapers, FinBERT + muRIL + VADER, ensemble combiner.
+
+    CRITICAL FinBERT label mapping (Correction #2):
+    - FinBERT config.json: {0: 'positive', 1: 'negative', 2: 'neutral'} — NOT alphabetical
+    - Hardcoding wrong mapping inverts sentiment scores
+
+    References:
+    - Tunstall Ch.6: Pipeline API with top_k=3 for full probability distribution
+    - Tunstall Ch.3: muRIL fine-tuning recipe (lr=2e-5, 4 epochs, warmup_ratio=0.1)
+    - Tunstall Ch.7: Model versioning (pin exact revision), FP16 for production
+    - Hutto & Gilbert 2014: VADER compound score (pre-filter for neutral text)
+    """
+
+    model_config = SettingsConfigDict(env_prefix="SENTIMENT_", env_file=".env", extra="ignore")
+
+    # ── Scraping configuration ─────────────────────────────────────────────────────────
+    SCRAPE_INTERVAL_NEWS_MINUTES: int = Field(
+        default=30, ge=10, le=120, description="News scraping interval in minutes"
+    )
+    SCRAPE_INTERVAL_SOCIAL_MINUTES: int = Field(
+        default=60, ge=15, le=240, description="Social media scraping interval in minutes"
+    )
+    SCRAPE_TIMEOUT_SECONDS: int = Field(default=30, ge=5, le=120, description="HTTP timeout per scrape request")
+    SCRAPE_MAX_CONCURRENT: int = Field(default=5, ge=1, le=20, description="Max concurrent scraper tasks")
+    SCRAPE_USER_AGENT: str = Field(
+        default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        description="User-Agent for HTTP requests",
+    )
+
+    # ── RSS Feed URLs (configurable) ───────────────────────────────────────────────────
+    RSS_ECONOMIC_TIMES: str = Field(
+        default="https://economictimes.indiatimes.com/rssfeedstopstories.cms", description="Economic Times RSS URL"
+    )
+    RSS_GOOGLE_NEWS_FINANCE: str = Field(
+        default="https://news.google.com/rss/search?q=indian+stock+market+finance&hl=en-IN&gl=IN&ceid=IN:en",
+        description="Google News India Finance RSS URL",
+    )
+
+    # ── Newspaper4k article sources ────────────────────────────────────────────────────
+    ARTICLE_SOURCES: list[str] = Field(
+        default=["moneycontrol", "livemint"], description="Sources for newspaper4k full-article scraping"
+    )
+
+    # ── Reddit configuration ───────────────────────────────────────────────────────────
+    REDDIT_CLIENT_ID: str = Field(default="", description="Reddit OAuth client_id")
+    REDDIT_CLIENT_SECRET: str = Field(default="", description="Reddit OAuth client_secret")
+    REDDIT_USER_AGENT: str = Field(default="indian-trading-bot/1.0", description="Reddit API user_agent")
+    REDDIT_SUBREDDITS: list[str] = Field(
+        default=["IndiaInvestments", "IndianStreetBets", "DalalStreet"], description="Subreddits to scrape"
+    )
+    REDDIT_POST_LIMIT: int = Field(default=25, ge=5, le=100, description="Max posts per subreddit per scrape")
+
+    # ── Model configuration ────────────────────────────────────────────────────────────
+    FINBERT_MODEL_NAME: str = Field(default="ProsusAI/finbert", description="FinBERT HuggingFace model identifier")
+    FINBERT_REVISION: str = Field(default="main", description="Pin model revision for reproducibility (Tunstall Ch.7)")
+    MURIL_MODEL_NAME: str = Field(default="google/muril-base-cased", description="muRIL base model identifier")
+    MURIL_FINETUNED_PATH: str = Field(
+        default="data/models/muril-fin-sentiment", description="Local path to fine-tuned muRIL model"
+    )
+    DEVICE: int = Field(default=-1, description="Device: -1=CPU, 0=GPU-0, etc.")
+    TORCH_DTYPE: str = Field(default="float32", description="Torch dtype: float32 or float16 (Tunstall Ch.7)")
+    MODEL_CACHE_DIR: str = Field(
+        default="data/models/huggingface_cache", description="HuggingFace model cache directory"
+    )
+    TRANSFORMERS_OFFLINE: bool = Field(default=False, description="Force offline mode (pre-downloaded models only)")
+
+    # ── VADER pre-filter ───────────────────────────────────────────────────────────────
+    VADER_NEUTRAL_THRESHOLD: float = Field(
+        default=0.05, description="If |compound| < this, skip transformer (clearly neutral)"
+    )
+    VADER_ENABLED: bool = Field(default=True, description="Enable VADER pre-filter gate")
+
+    # ── Language detection ─────────────────────────────────────────────────────────────
+    LANGUAGE_DETECTION_ENABLED: bool = Field(default=True, description="Enable language detection for model routing")
+    LANGUAGE_FALLBACK: str = Field(default="en", description="Fallback language if detection fails")
+
+    # ── Symbol extraction ──────────────────────────────────────────────────────────────
+    SYMBOL_KEYWORDS: dict[str, list[str]] = Field(
+        default={
+            "NIFTY": ["nifty", "nifty 50", "nifty50", "^NSEI", "nse index"],
+            "BANKNIFTY": ["banknifty", "bank nifty", "nifty bank", "^NSEBANK"],
+            "RELIANCE": ["reliance", "reliance industries", "ril"],
+            "HDFCBANK": ["hdfc bank", "hdfcbank"],
+            "ICICIBANK": ["icici bank", "icicibank"],
+            "INFY": ["infosys", "infy"],
+            "TCS": ["tcs", "tata consultancy"],
+            "KOTAKBANK": ["kotak bank", "kotakbank"],
+            "AXISBANK": ["axis bank", "axisbank"],
+            "SBIN": ["sbi", "state bank", "sbin"],
+            "ITC": ["itc limited", "itc ltd"],
+            "BHARTIARTL": ["bharti airtel", "airtel", "bhartiartl"],
+            "LT": ["larsen toubro", "l&t", "l&t finance"],
+            "MARUTI": ["maruti suzuki", "maruti"],
+        },
+        description="Symbol -> keyword mapping for article symbol extraction",
+    )
+    SYMBOL_HEADLINE_WEIGHT: float = Field(
+        default=2.0, ge=1.0, le=5.0, description="Weight multiplier for symbol mention in headline vs body"
+    )
+
+    # ── Ensemble weights ───────────────────────────────────────────────────────────────
+    NEWS_WEIGHT: float = Field(default=0.70, ge=0.0, le=1.0, description="Weight for news sentiment in final ensemble")
+    SOCIAL_WEIGHT: float = Field(
+        default=0.30, ge=0.0, le=1.0, description="Weight for social sentiment in final ensemble"
+    )
+
+    # ── Source credibility ─────────────────────────────────────────────────────────────
+    SOURCE_CREDIBILITY: dict[str, float] = Field(
+        default={
+            "economic_times": 0.85,
+            "moneycontrol": 0.80,
+            "livemint": 0.75,
+            "google_news": 0.60,
+            "reddit": 0.35,
+        },
+        description="Source credibility weights (Reuters/Bloomberg = 1.0 benchmark)",
+    )
+
+    # ── Recency weighting ──────────────────────────────────────────────────────────────
+    HALF_LIFE_HOURS: float = Field(
+        default=4.0, ge=0.5, le=168.0, description="Exponential decay half-life in hours (4h for intraday)"
+    )
+    RECENCY_ENABLED: bool = Field(default=True, description="Apply recency weighting to articles")
+
+    # ── Confidence scoring ─────────────────────────────────────────────────────────────
+    CROSS_MODEL_AGREEMENT_BONUS: float = Field(
+        default=0.10, ge=0.0, le=0.3, description="Confidence bonus when FinBERT + muRIL agree"
+    )
+    CROSS_MODEL_DISAGREEMENT_PENALTY: float = Field(
+        default=0.10, ge=0.0, le=0.3, description="Confidence penalty when models disagree"
+    )
+    MIN_CONFIDENCE_THRESHOLD: float = Field(
+        default=0.30, ge=0.0, le=0.5, description="Below this confidence, sentiment score is dampened"
+    )
+
+    # ── Inference performance ──────────────────────────────────────────────────────────
+    MAX_INFERENCE_QUEUE_SIZE: int = Field(
+        default=100, ge=10, le=1000, description="Max queued inference requests before circuit break (Tunstall Ch.6)"
+    )
+    INFERENCE_TIMEOUT_SECONDS: float = Field(default=5.0, ge=1.0, le=30.0, description="Timeout per inference call")
+
+    # ── Target symbols ─────────────────────────────────────────────────────────────────
+    TARGET_SYMBOLS: list[str] = Field(
+        default=[
+            "NIFTY",
+            "BANKNIFTY",
+            "RELIANCE",
+            "HDFCBANK",
+            "ICICIBANK",
+            "INFY",
+            "TCS",
+            "KOTAKBANK",
+            "AXISBANK",
+            "SBIN",
+            "ITC",
+            "BHARTIARTL",
+        ],
+        description="Symbols for daily sentiment computation",
+    )
+
+    @model_validator(mode="after")
+    def validate_sentiment_settings(self) -> "SentimentSettings":
+        if abs(self.NEWS_WEIGHT + self.SOCIAL_WEIGHT - 1.0) > 0.01:
+            raise ValueError(f"NEWS_WEIGHT ({self.NEWS_WEIGHT}) + SOCIAL_WEIGHT ({self.SOCIAL_WEIGHT}) must sum to 1.0")
+        for source, cred in self.SOURCE_CREDIBILITY.items():
+            if not 0.0 <= cred <= 1.0:
+                raise ValueError(f"SOURCE_CREDIBILITY[{source}] = {cred} must be in [0.0, 1.0]")
+        if self.HALF_LIFE_HOURS <= 0:
+            raise ValueError(f"HALF_LIFE_HOURS ({self.HALF_LIFE_HOURS}) must be > 0")
+        return self
+
+
+# PHASE 11 ADDITIONS ─────────────────────────────────────────────────────────────────────
+# Signal Orchestration Settings
+# Reference: Lopez de Prado Ch.8-9, Kleppmann Ch.7, Kaufman Ch.12
+
+
+class OrchestrationSettings(BaseSettings):
+    """Signal orchestration configuration — combines all signals into unified TradeDecision.
+
+    Signal weights start EQUAL (0.20 each) per Lopez de Prado Ch.9 (avoid overfitting
+    before Phase 6 walk-forward validation). Target weights applied after validation.
+
+    References:
+    - Lopez de Prado Ch.8-9: Ensemble methods, drop-one importance analysis
+    - Kleppmann Ch.7: Circuit breaker pattern, timeouts, fallbacks
+    - Kaufman Ch.12: System robustness, strategy combination
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ORCH_", env_file=".env", extra="ignore")
+
+    # ── Signal evaluation interval ─────────────────────────────────────────────────────
+    SIGNAL_EVAL_INTERVAL_SECONDS: int = Field(
+        default=300, ge=60, le=3600, description="Seconds between signal evaluations (default 5 min)"
+    )
+
+    # ── Signal weights (initially equal per Lopez de Prado Ch.9) ───────────────────────
+    WEIGHT_TECHNICAL: float = Field(default=0.20, ge=0.0, le=1.0)
+    WEIGHT_VOLUME: float = Field(default=0.20, ge=0.0, le=1.0)
+    WEIGHT_SENTIMENT: float = Field(default=0.20, ge=0.0, le=1.0)
+    WEIGHT_MARKET_STRENGTH: float = Field(default=0.20, ge=0.0, le=1.0)
+    WEIGHT_RAG: float = Field(default=0.20, ge=0.0, le=1.0)
+
+    # ── Target weights (after Phase 6 walk-forward validation) ─────────────────────────
+    TARGET_WEIGHT_TECHNICAL: float = Field(default=0.35, ge=0.0, le=1.0)
+    TARGET_WEIGHT_VOLUME: float = Field(default=0.20, ge=0.0, le=1.0)
+    TARGET_WEIGHT_SENTIMENT: float = Field(default=0.20, ge=0.0, le=1.0)
+    TARGET_WEIGHT_MARKET_STRENGTH: float = Field(default=0.15, ge=0.0, le=1.0)
+    TARGET_WEIGHT_RAG: float = Field(default=0.10, ge=0.0, le=1.0)
+
+    # ── Confidence threshold (uses abs(score) for bearish signals) ─────────────────────
+    CONFIDENCE_THRESHOLD: float = Field(
+        default=0.60,
+        ge=0.0,
+        le=1.0,
+        description="Minimum |combined_score| to trade. Uses abs() so bearish signals (negative score) can pass threshold.",
+    )
+
+    # ── Opposition gate ────────────────────────────────────────────────────────────────
+    OPPOSITION_GATE_THRESHOLD: float = Field(
+        default=0.40, ge=0.0, le=1.0, description="If any source opposes with |weight*score| > this, block trade"
+    )
+
+    # ── Data quality gate ──────────────────────────────────────────────────────────────
+    MIN_SOURCES_REQUIRED: int = Field(default=3, ge=1, le=5, description="Minimum signal sources available to trade")
+
+    # ── Circuit breaker (Kleppmann Ch.7) ───────────────────────────────────────────────
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = Field(
+        default=3, ge=1, le=10, description="Consecutive failures before opening circuit breaker"
+    )
+    CIRCUIT_BREAKER_OPEN_DURATION_SECONDS: float = Field(
+        default=300.0, ge=30.0, le=3600.0, description="Duration circuit breaker stays open (default 5 min)"
+    )
+    CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS: int = Field(
+        default=1, ge=1, le=5, description="Calls allowed in half-open state to test recovery"
+    )
+
+    # ── Trailing stop ──────────────────────────────────────────────────────────────────
+    TRAILING_STOP_MIN_MOVE_PCT: float = Field(
+        default=0.003, ge=0.001, le=0.01, description="Min price move (0.3% of entry) before ratchet advances"
+    )
+
+    # ── RAG qualitative-to-numeric mapping ─────────────────────────────────────────────
+    RAG_BULLISH_SCORE: float = Field(default=0.60, ge=0.0, le=1.0)
+    RAG_NEUTRAL_SCORE: float = Field(default=0.0, ge=-1.0, le=1.0)
+    RAG_BEARISH_SCORE: float = Field(default=-0.60, ge=-1.0, le=0.0)
+
+    # ── Per-symbol orchestrator ────────────────────────────────────────────────────────
+    ENABLED_SYMBOLS: list[str] = Field(
+        default=["NIFTY", "BANKNIFTY"], description="Symbols with independent orchestrator instances"
+    )
+
+    # ── Session lifecycle ──────────────────────────────────────────────────────────────
+    PRE_OPEN_WARMUP_SECONDS: int = Field(
+        default=60, ge=30, le=300, description="Seconds before market open to start warmup fetches"
+    )
+    POST_CLOSE_CLEANUP_SECONDS: int = Field(
+        default=60, ge=30, le=300, description="Seconds after market close for P&L logging and cleanup"
+    )
+
+    # ── Audit ──────────────────────────────────────────────────────────────────────────
+    LOG_ALL_SIGNALS: bool = Field(default=True, description="Log all signal payloads even if no trade decision made")
+
+    @model_validator(mode="after")
+    def validate_orchestration_settings(self) -> "OrchestrationSettings":
+        """Signal weights MUST sum to 1.0; opposition gate must be < confidence threshold."""
+        weight_sum = (
+            self.WEIGHT_TECHNICAL
+            + self.WEIGHT_VOLUME
+            + self.WEIGHT_SENTIMENT
+            + self.WEIGHT_MARKET_STRENGTH
+            + self.WEIGHT_RAG
+        )
+        if abs(weight_sum - 1.0) > 0.001:
+            raise ValueError(f"Signal weights must sum to 1.0, got {weight_sum:.4f}")
+        target_sum = (
+            self.TARGET_WEIGHT_TECHNICAL
+            + self.TARGET_WEIGHT_VOLUME
+            + self.TARGET_WEIGHT_SENTIMENT
+            + self.TARGET_WEIGHT_MARKET_STRENGTH
+            + self.TARGET_WEIGHT_RAG
+        )
+        if abs(target_sum - 1.0) > 0.001:
+            raise ValueError(f"Target weights must sum to 1.0, got {target_sum:.4f}")
+        if self.OPPOSITION_GATE_THRESHOLD >= self.CONFIDENCE_THRESHOLD:
+            raise ValueError(
+                f"OPPOSITION_GATE_THRESHOLD ({self.OPPOSITION_GATE_THRESHOLD}) must be < "
+                f"CONFIDENCE_THRESHOLD ({self.CONFIDENCE_THRESHOLD})"
+            )
+        return self
