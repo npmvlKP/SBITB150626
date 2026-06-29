@@ -24,7 +24,10 @@ import redis.asyncio as redis
 from config.settings import DataPipelineSettings, WebSocketSettings
 
 if TYPE_CHECKING:
-    pass
+    # redis.asyncio.Redis is Generic[ResponseT] in type stubs but not at runtime.
+    # Guard with TYPE_CHECKING so the alias only exists for static analysis.
+    # decode_responses=False means the response type is bytes.
+    RedisAsyncClient = redis.Redis[bytes]
 
 import psycopg_pool
 import structlog
@@ -658,7 +661,7 @@ class RedisCache:
         """
         self._redis_url: str = redis_url
         self._settings: WebSocketSettings = settings
-        self._client: redis.Redis[bytes] | None = None
+        self._client: RedisAsyncClient | None = None
         self._retry_attempts: int = MAX_RETRIES
 
         logger.info(
@@ -675,7 +678,7 @@ class RedisCache:
         match = re.search(r":([^@]+)@", url)
         return match.group(1) if match else ""
 
-    async def _ensure_client(self: Self) -> redis.Redis[bytes]:
+    async def _ensure_client(self: Self) -> RedisAsyncClient:
         """Ensure Redis client is initialized with lazy creation.
 
         Returns:
@@ -838,7 +841,7 @@ class RedisCache:
         key = self._tick_key(instrument_token)
         json_data = json_module.dumps(data)
 
-        async def _set(client: redis.Redis[bytes]) -> None:
+        async def _set(client: RedisAsyncClient) -> None:
             await client.setex(key, self._settings.REDIS_TTL_SEC, json_data)
 
         await self._execute_with_retry("set_tick", _set)
@@ -863,7 +866,7 @@ class RedisCache:
         """
         key = self._tick_key(instrument_token)
 
-        async def _get(client: redis.Redis[bytes]) -> dict[str, Any] | None:
+        async def _get(client: RedisAsyncClient) -> dict[str, Any] | None:
             data = await client.get(key)
             if data is None:
                 return None
@@ -887,7 +890,7 @@ class RedisCache:
         if not tokens:
             return {}
 
-        async def _pipeline_get(client: redis.Redis[bytes]) -> dict[int, dict[str, Any]]:
+        async def _pipeline_get(client: RedisAsyncClient) -> dict[int, dict[str, Any]]:
             keys = [self._tick_key(token) for token in tokens]
 
             # Use pipeline for atomic batch get
@@ -925,7 +928,7 @@ class RedisCache:
         key = self._rfr_key(date, method)
         ttl = 86400  # 24 hours
 
-        async def _set(client: redis.Redis[bytes]) -> None:
+        async def _set(client: RedisAsyncClient) -> None:
             await client.setex(key, ttl, str(rate))
 
         await self._execute_with_retry("set_rfr", _set)
@@ -952,7 +955,7 @@ class RedisCache:
         """
         key = self._rfr_key(date, method)
 
-        async def _get(client: redis.Redis[bytes]) -> float | None:
+        async def _get(client: RedisAsyncClient) -> float | None:
             data = await client.get(key)
             if data is None:
                 return None
@@ -974,7 +977,7 @@ class RedisCache:
         cache_key = f"nse_holidays:{key}"
         json_data = json_module.dumps(days)
 
-        async def _set(client: redis.Redis[bytes]) -> None:
+        async def _set(client: RedisAsyncClient) -> None:
             await client.setex(cache_key, ttl, json_data)
 
         await self._execute_with_retry("set_holiday_cache", _set)

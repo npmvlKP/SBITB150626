@@ -85,6 +85,11 @@ class VolumeSignals(BaseModel):
     anomalies: list[VolumeAnomaly] = Field(default_factory=list)
 
 
+def _empty_profile_result() -> VolumeProfileResult:
+    """Return an empty volume profile result (no data / degenerate input)."""
+    return VolumeProfileResult(poc_price=None, vah=None, val=None, profile={}, total_volume=0.0, relative_position=None)
+
+
 class VolumeProfileComputer:
     """Computes volume profile: POC, Value Area, VAH, VAL.
 
@@ -106,22 +111,60 @@ class VolumeProfileComputer:
     ) -> VolumeProfileResult:
         """Compute volume profile from OHLCV data."""
         if len(close) < 2:
-            return VolumeProfileResult(
-                poc_price=None, vah=None, val=None, profile={}, total_volume=0.0, relative_position=None
-            )
+            return _empty_profile_result()
 
         price_min = float(np.min(low))
         price_max = float(np.max(high))
         if price_max == price_min:
-            return VolumeProfileResult(
-                poc_price=None, vah=None, val=None, profile={}, total_volume=0.0, relative_position=None
-            )
+            return _empty_profile_result()
 
         num_bins = self._settings.NUM_PRICE_BINS
         bin_size = (price_max - price_min) / num_bins
 
-        # Distribute volume across price bins
-        # Each bar's volume is split uniformly across its high-low range
+        bin_volumes, bin_prices = self._compute_bin_distribution(
+            high, low, close, volume, price_min, bin_size, num_bins
+        )
+
+        total_volume = float(np.sum(bin_volumes))
+        if total_volume == 0:
+            return _empty_profile_result()
+
+        # POC: bin with highest volume
+        poc_bin = int(np.argmax(bin_volumes))
+        poc_price = float(bin_prices[poc_bin])
+
+        # Value Area: expand from POC until we encompass 68.2% of total volume
+        vah_idx, val_idx = self._compute_value_area(bin_volumes, poc_bin, total_volume, num_bins)
+        vah = float(bin_prices[vah_idx] + bin_size / 2)
+        val = float(bin_prices[val_idx] - bin_size / 2)
+
+        rel_pos = self._determine_relative_position(float(close[-1]), poc_price, vah, val, bin_size)
+
+        profile_dict = {round(float(bin_prices[i]), 2): round(float(bin_volumes[i]), 2) for i in range(num_bins)}
+
+        return VolumeProfileResult(
+            poc_price=round(poc_price, 2),
+            vah=round(vah, 2),
+            val=round(val, 2),
+            profile=profile_dict,
+            total_volume=round(total_volume, 2),
+            relative_position=rel_pos,
+        )
+
+    def _compute_bin_distribution(
+        self,
+        high: NDArray[np.float64],
+        low: NDArray[np.float64],
+        close: NDArray[np.float64],
+        volume: NDArray[np.float64],
+        price_min: float,
+        bin_size: float,
+        num_bins: int,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Distribute volume across price bins.
+
+        Each bar's volume is split uniformly across its high-low range.
+        """
         bin_volumes = np.zeros(num_bins)
         bin_prices = np.array([price_min + (i + 0.5) * bin_size for i in range(num_bins)])
 
@@ -143,25 +186,28 @@ class VolumeProfileComputer:
                     fraction = overlap / (bar_high - bar_low)
                     bin_volumes[b] += bar_vol * fraction
 
-        total_volume = float(np.sum(bin_volumes))
-        if total_volume == 0:
-            return VolumeProfileResult(
-                poc_price=None, vah=None, val=None, profile={}, total_volume=0.0, relative_position=None
-            )
+        return bin_volumes, bin_prices
 
-        # POC: bin with highest volume
-        poc_bin = int(np.argmax(bin_volumes))
-        poc_price = float(bin_prices[poc_bin])
+    def _compute_value_area(
+        self,
+        bin_volumes: NDArray[np.float64],
+        poc_bin: int,
+        total_volume: float,
+        num_bins: int,
+    ) -> tuple[int, int]:
+        """Expand value area from POC until 68.2% of volume is encompassed.
 
-        # Value Area: expand from POC until we encompass 68.2% of total volume
+        Returns:
+            Tuple of (vah_idx, val_idx) representing value area boundaries.
+        """
         va_target = total_volume * self._settings.VALUE_AREA_PCT
         vah_idx = poc_bin
         val_idx = poc_bin
-        current_vol = bin_volumes[poc_bin]
+        current_vol = float(bin_volumes[poc_bin])
 
         while current_vol < va_target and (val_idx > 0 or vah_idx < num_bins - 1):
-            add_below = bin_volumes[val_idx - 1] if val_idx > 0 else 0
-            add_above = bin_volumes[vah_idx + 1] if vah_idx < num_bins - 1 else 0
+            add_below = float(bin_volumes[val_idx - 1]) if val_idx > 0 else 0.0
+            add_above = float(bin_volumes[vah_idx + 1]) if vah_idx < num_bins - 1 else 0.0
 
             if add_below >= add_above and val_idx > 0:
                 val_idx -= 1
@@ -175,33 +221,29 @@ class VolumeProfileComputer:
             else:
                 break
 
-        vah = float(bin_prices[vah_idx] + bin_size / 2)
-        val = float(bin_prices[val_idx] - bin_size / 2)
+        return vah_idx, val_idx
 
-        # Relative position of current price to profile
-        # CRITICAL: POC check MUST come before VA boundary checks
-        # because a price can be AT the POC while also being at/below VAL.
-        # Dalton "Mind Over Markets": POC is the fairest price = highest acceptance.
-        last_close = float(close[-1])
+    @staticmethod
+    def _determine_relative_position(
+        last_close: float,
+        poc_price: float,
+        vah: float,
+        val: float,
+        bin_size: float,
+    ) -> str:
+        """Determine relative position of current price to profile.
+
+        CRITICAL: POC check MUST come before VA boundary checks because
+        a price can be AT the POC while also being at/below VAL.
+        Dalton "Mind Over Markets": POC is the fairest price = highest acceptance.
+        """
         if abs(last_close - poc_price) < bin_size:
-            rel_pos = "CURRENT_AT_POC"
-        elif last_close > vah:
-            rel_pos = "CURRENT_ABOVE_VA"
-        elif last_close < val:
-            rel_pos = "CURRENT_BELOW_VA"
-        else:
-            rel_pos = "CURRENT_IN_VA"
-
-        profile_dict = {round(float(bin_prices[i]), 2): round(float(bin_volumes[i]), 2) for i in range(num_bins)}
-
-        return VolumeProfileResult(
-            poc_price=round(poc_price, 2),
-            vah=round(vah, 2),
-            val=round(val, 2),
-            profile=profile_dict,
-            total_volume=round(total_volume, 2),
-            relative_position=rel_pos,
-        )
+            return "CURRENT_AT_POC"
+        if last_close > vah:
+            return "CURRENT_ABOVE_VA"
+        if last_close < val:
+            return "CURRENT_BELOW_VA"
+        return "CURRENT_IN_VA"
 
 
 class VSASignalDetector:
@@ -275,11 +317,40 @@ class VSASignalDetector:
 
         vol_pct = vol / avg_vol
         spread_pct = spread / avg_spread
-
-        # Close position within the bar: 0 = at low, 1 = at high
         close_position = (close[i] - low[i]) / spread if spread > 0 else 0.5
+        ctx = self._build_context(vol_pct, spread_pct, close_position)
 
-        # --- Demand signals ---
+        # --- Demand signals first, then supply signals ---
+        demand = self._check_demand_signals(close, open_, i, vol_pct, spread_pct, close_position, ctx)
+        if demand is not None:
+            return demand
+
+        return self._check_supply_signals(close, open_, i, vol_pct, spread_pct, close_position, ctx)
+
+    @staticmethod
+    def _build_context(vol_pct: float, spread_pct: float, close_position: float) -> dict[str, float | str]:
+        """Build the context dict shared by all VSA signals."""
+        return {
+            "volume_pct": round(vol_pct, 2),
+            "spread_pct": round(spread_pct, 2),
+            "close_position": round(close_position, 2),
+        }
+
+    def _check_demand_signals(
+        self,
+        close: NDArray[np.float64],
+        open_: NDArray[np.float64],
+        i: int,
+        vol_pct: float,
+        spread_pct: float,
+        close_position: float,
+        ctx: dict[str, float | str],
+    ) -> VSASignal | None:
+        """Check for demand (bullish) VSA signals.
+
+        Returns the first matching signal or None.
+        """
+        mult = self._settings.VSA_VOLUME_SPIKE_MULTIPLIER
 
         # Demand bar: wide spread up, close near high, volume above average
         if spread_pct > 1.2 and close[i] > open_[i] and close_position > 0.7 and vol_pct > 1.0:
@@ -287,11 +358,7 @@ class VSASignalDetector:
                 bar_index=i,
                 signal_type=VSASignalType.DEMAND_BAR,
                 confidence=min(vol_pct / 3.0, 1.0),
-                context={
-                    "volume_pct": round(vol_pct, 2),
-                    "spread_pct": round(spread_pct, 2),
-                    "close_position": round(close_position, 2),
-                },
+                context=ctx,
             )
 
         # No supply: narrow spread down, close near high, volume below average
@@ -300,40 +367,44 @@ class VSASignalDetector:
                 bar_index=i,
                 signal_type=VSASignalType.NO_SUPPLY,
                 confidence=min((1.0 - vol_pct) / 2.0, 1.0),
-                context={
-                    "volume_pct": round(vol_pct, 2),
-                    "spread_pct": round(spread_pct, 2),
-                    "close_position": round(close_position, 2),
-                },
+                context=ctx,
             )
 
         # Stopping volume: high volume on down bar, close near middle/high
-        if vol_pct > self._settings.VSA_VOLUME_SPIKE_MULTIPLIER and close[i] < open_[i] and close_position > 0.4:
+        if vol_pct > mult and close[i] < open_[i] and close_position > 0.4:
             return VSASignal(
                 bar_index=i,
                 signal_type=VSASignalType.STOPPING_VOLUME,
                 confidence=min(vol_pct / 4.0, 1.0),
-                context={
-                    "volume_pct": round(vol_pct, 2),
-                    "spread_pct": round(spread_pct, 2),
-                    "close_position": round(close_position, 2),
-                },
+                context=ctx,
             )
 
         # Climactic sell: ultra-high volume, wide spread down, close near low (selling exhaustion)
-        if vol_pct > self._settings.VSA_VOLUME_SPIKE_MULTIPLIER * 2 and close[i] < open_[i] and close_position < 0.3:
+        if vol_pct > mult * 2 and close[i] < open_[i] and close_position < 0.3:
             return VSASignal(
                 bar_index=i,
                 signal_type=VSASignalType.CLIMACTIC_SELL,
                 confidence=min(vol_pct / 6.0, 1.0),
-                context={
-                    "volume_pct": round(vol_pct, 2),
-                    "spread_pct": round(spread_pct, 2),
-                    "close_position": round(close_position, 2),
-                },
+                context=ctx,
             )
 
-        # --- Supply signals ---
+        return None
+
+    def _check_supply_signals(
+        self,
+        close: NDArray[np.float64],
+        open_: NDArray[np.float64],
+        i: int,
+        vol_pct: float,
+        spread_pct: float,
+        close_position: float,
+        ctx: dict[str, float | str],
+    ) -> VSASignal | None:
+        """Check for supply (bearish) VSA signals.
+
+        Returns the first matching signal or None.
+        """
+        mult = self._settings.VSA_VOLUME_SPIKE_MULTIPLIER
 
         # Supply bar: wide spread down, close near low, volume above average
         if spread_pct > 1.2 and close[i] < open_[i] and close_position < 0.3 and vol_pct > 1.0:
@@ -341,11 +412,7 @@ class VSASignalDetector:
                 bar_index=i,
                 signal_type=VSASignalType.SUPPLY_BAR,
                 confidence=min(vol_pct / 3.0, 1.0),
-                context={
-                    "volume_pct": round(vol_pct, 2),
-                    "spread_pct": round(spread_pct, 2),
-                    "close_position": round(close_position, 2),
-                },
+                context=ctx,
             )
 
         # No demand: narrow spread up, close near low, volume below average
@@ -354,50 +421,34 @@ class VSASignalDetector:
                 bar_index=i,
                 signal_type=VSASignalType.NO_DEMAND,
                 confidence=min((1.0 - vol_pct) / 2.0, 1.0),
-                context={
-                    "volume_pct": round(vol_pct, 2),
-                    "spread_pct": round(spread_pct, 2),
-                    "close_position": round(close_position, 2),
-                },
+                context=ctx,
             )
 
         # Effort vs result UP: high volume, narrow spread up → buying exhaustion
-        if vol_pct > self._settings.VSA_VOLUME_SPIKE_MULTIPLIER and close[i] > open_[i] and spread_pct < 0.6:
+        if vol_pct > mult and close[i] > open_[i] and spread_pct < 0.6:
             return VSASignal(
                 bar_index=i,
                 signal_type=VSASignalType.EFFORT_VS_RESULT_UP,
                 confidence=min(vol_pct / 4.0, 1.0),
-                context={
-                    "volume_pct": round(vol_pct, 2),
-                    "spread_pct": round(spread_pct, 2),
-                    "close_position": round(close_position, 2),
-                },
+                context=ctx,
             )
 
         # Effort vs result DOWN: high volume, narrow spread down → selling exhaustion
-        if vol_pct > self._settings.VSA_VOLUME_SPIKE_MULTIPLIER and close[i] < open_[i] and spread_pct < 0.6:
+        if vol_pct > mult and close[i] < open_[i] and spread_pct < 0.6:
             return VSASignal(
                 bar_index=i,
                 signal_type=VSASignalType.EFFORT_VS_RESULT_DOWN,
                 confidence=min(vol_pct / 4.0, 1.0),
-                context={
-                    "volume_pct": round(vol_pct, 2),
-                    "spread_pct": round(spread_pct, 2),
-                    "close_position": round(close_position, 2),
-                },
+                context=ctx,
             )
 
         # Climactic buy: ultra-high volume, wide spread up, close near low → buying climax
-        if vol_pct > self._settings.VSA_VOLUME_SPIKE_MULTIPLIER * 2 and close[i] > open_[i] and close_position < 0.3:
+        if vol_pct > mult * 2 and close[i] > open_[i] and close_position < 0.3:
             return VSASignal(
                 bar_index=i,
                 signal_type=VSASignalType.CLIMACTIC_BUY,
                 confidence=min(vol_pct / 6.0, 1.0),
-                context={
-                    "volume_pct": round(vol_pct, 2),
-                    "spread_pct": round(spread_pct, 2),
-                    "close_position": round(close_position, 2),
-                },
+                context=ctx,
             )
 
         return None
